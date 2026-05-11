@@ -54,6 +54,12 @@ pub struct App {
     /// Frequency input mode.
     pub freq_input_mode: bool,
     pub freq_input_buf: String,
+    /// Cursor position (0.0 = left edge, 1.0 = right edge of spectrum).
+    pub cursor_pos: f32,
+    /// Whether cursor is active/visible.
+    pub cursor_active: bool,
+    /// Whether help modal is shown.
+    pub show_help: bool,
     /// Frame timing.
     frame_count: u64,
     last_fps_update: Instant,
@@ -73,6 +79,9 @@ impl App {
             max_db: 0.0,
             freq_input_mode: false,
             freq_input_buf: String::new(),
+            cursor_pos: 0.5,
+            cursor_active: true,
+            show_help: false,
             frame_count: 0,
             last_fps_update: Instant::now(),
             last_frame_count: 0,
@@ -117,6 +126,12 @@ impl App {
 
     /// Handle keyboard input.
     pub fn handle_key(&mut self, key: KeyEvent) {
+        // Help modal takes priority — any key closes it
+        if self.show_help {
+            self.show_help = false;
+            return;
+        }
+
         if self.freq_input_mode {
             match key.code {
                 KeyCode::Enter => {
@@ -149,12 +164,22 @@ impl App {
                 self.should_quit = true;
             }
             KeyCode::Left => {
-                // Fine tune: -25 kHz
-                self.config.center_freq -= 25_000.0;
+                if self.cursor_active {
+                    // Move cursor left
+                    self.cursor_pos = (self.cursor_pos - 0.02).max(0.0);
+                } else {
+                    // Fine tune: -25 kHz
+                    self.config.center_freq -= 25_000.0;
+                }
             }
             KeyCode::Right => {
-                // Fine tune: +25 kHz
-                self.config.center_freq += 25_000.0;
+                if self.cursor_active {
+                    // Move cursor right
+                    self.cursor_pos = (self.cursor_pos + 0.02).min(1.0);
+                } else {
+                    // Fine tune: +25 kHz
+                    self.config.center_freq += 25_000.0;
+                }
             }
             KeyCode::PageUp => {
                 // Coarse tune: +1 MHz
@@ -186,6 +211,13 @@ impl App {
                 self.freq_input_mode = true;
                 self.freq_input_buf.clear();
             }
+            KeyCode::Char(' ') => {
+                // Toggle cursor active/inactive
+                self.cursor_active = !self.cursor_active;
+            }
+            KeyCode::Char('?') => {
+                self.show_help = true;
+            }
             _ => {}
         }
     }
@@ -197,6 +229,23 @@ impl App {
             SourceType::File { path } => DisplaySource::File(path.clone()),
             SourceType::RtlSdr => DisplaySource::RtlSdr,
         }
+    }
+
+    /// Get the frequency at the current cursor position.
+    pub fn cursor_frequency(&self) -> f64 {
+        let start = self.config.center_freq - self.config.sample_rate / 2.0;
+        start + self.cursor_pos as f64 * self.config.sample_rate
+    }
+
+    /// Get the dB value at the current cursor position from the latest FFT.
+    pub fn cursor_db(&self) -> Option<f32> {
+        self.latest_fft.as_ref().and_then(|fft| {
+            if fft.bins.is_empty() {
+                return None;
+            }
+            let bin_index = (self.cursor_pos * (fft.bins.len() - 1) as f32) as usize;
+            fft.bins.get(bin_index).copied()
+        })
     }
 }
 
@@ -237,6 +286,10 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         app.latest_fft.as_ref(),
         app.min_db,
         app.max_db,
+    ).with_cursor(
+        if app.cursor_active { Some(app.cursor_pos) } else { None },
+        app.cursor_frequency(),
+        app.cursor_db(),
     );
     frame.render_widget(spectrum, chunks[0]);
 
@@ -249,13 +302,18 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
     frame.render_widget(waterfall, chunks[1]);
 
     // Status bar
+    let cursor_info = if app.cursor_active {
+        Some((app.cursor_frequency(), app.cursor_db()))
+    } else {
+        None
+    };
     let status = StatusBarWidget::new(
         app.config.center_freq,
         app.config.sample_rate,
         app.config.gain,
         app.display_source(),
         app.fps,
-    );
+    ).with_cursor(cursor_info);
     frame.render_widget(status, chunks[2]);
 
     // Frequency input overlay
@@ -279,6 +337,75 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         frame.render_widget(Clear, input_area);
         frame.render_widget(input_text, input_area);
     }
+
+    // Help modal
+    if app.show_help {
+        draw_help_modal(frame, size);
+    }
+}
+
+/// Draw the help/cheatsheet modal.
+fn draw_help_modal(frame: &mut Frame, size: Rect) {
+    let block = Block::default()
+        .title(" ⌨️  Keyboard Shortcuts ")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Cyan).bg(Color::Black));
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Navigation", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled("    ← →       ", Style::default().fg(Color::Cyan)),
+            Span::styled("Move cursor (when active) / Tune ±25 kHz", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("    PgUp PgDn ", Style::default().fg(Color::Cyan)),
+            Span::styled("Tune ±1 MHz", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("    f         ", Style::default().fg(Color::Cyan)),
+            Span::styled("Jump to frequency (type e.g. 118.1M)", Style::default().fg(Color::White)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Display", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled("    + -       ", Style::default().fg(Color::Cyan)),
+            Span::styled("Zoom bandwidth in/out", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("    ↑ ↓       ", Style::default().fg(Color::Cyan)),
+            Span::styled("Adjust gain ±1 dB", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("    Space     ", Style::default().fg(Color::Cyan)),
+            Span::styled("Toggle cursor on/off", Style::default().fg(Color::White)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  General", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled("    ?         ", Style::default().fg(Color::Cyan)),
+            Span::styled("Show this help", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("    q / Esc   ", Style::default().fg(Color::Cyan)),
+            Span::styled("Quit", Style::default().fg(Color::White)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Press any key to close", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(lines).block(block);
+    let area = centered_rect(60, 70, size);
+    frame.render_widget(Clear, area);
+    frame.render_widget(paragraph, area);
 }
 
 /// Show the source selection screen and return the user's choice.
@@ -482,6 +609,8 @@ mod tests {
     fn test_app_handle_tune_right() {
         let config = AppConfig::default();
         let mut app = App::new(config);
+        // Deactivate cursor so arrows tune frequency
+        app.cursor_active = false;
         let orig = app.config.center_freq;
 
         app.handle_key(KeyEvent::from(KeyCode::Right));
@@ -492,10 +621,88 @@ mod tests {
     fn test_app_handle_tune_left() {
         let config = AppConfig::default();
         let mut app = App::new(config);
+        // Deactivate cursor so arrows tune frequency
+        app.cursor_active = false;
         let orig = app.config.center_freq;
 
         app.handle_key(KeyEvent::from(KeyCode::Left));
         assert!((app.config.center_freq - (orig - 25_000.0)).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_app_cursor_move_right() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        assert!(app.cursor_active);
+        let orig = app.cursor_pos;
+
+        app.handle_key(KeyEvent::from(KeyCode::Right));
+        assert!(app.cursor_pos > orig);
+    }
+
+    #[test]
+    fn test_app_cursor_move_left() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        assert!(app.cursor_active);
+        let orig = app.cursor_pos;
+
+        app.handle_key(KeyEvent::from(KeyCode::Left));
+        assert!(app.cursor_pos < orig);
+    }
+
+    #[test]
+    fn test_app_cursor_toggle() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        assert!(app.cursor_active);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(!app.cursor_active);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(app.cursor_active);
+    }
+
+    #[test]
+    fn test_app_help_toggle() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        assert!(!app.show_help);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('?')));
+        assert!(app.show_help);
+
+        // Any key closes help
+        app.handle_key(KeyEvent::from(KeyCode::Char('a')));
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn test_app_cursor_frequency() {
+        let config = AppConfig::default();
+        let app = App::new(config);
+        // Cursor at 0.5 should be at center frequency
+        let cursor_freq = app.cursor_frequency();
+        assert!((cursor_freq - app.config.center_freq).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_app_cursor_db() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        // No FFT data yet
+        assert!(app.cursor_db().is_none());
+
+        // Push FFT data
+        let fft = FftResult {
+            bins: vec![-50.0; 100],
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        };
+        app.push_fft(fft);
+        assert!(app.cursor_db().is_some());
+        assert!((app.cursor_db().unwrap() - (-50.0)).abs() < 1.0);
     }
 
     #[test]

@@ -32,6 +32,8 @@ pub struct StatusBarWidget {
     pub gain: Option<f32>,
     pub source: DisplaySource,
     pub fps: f64,
+    /// Cursor info: (frequency, Option<dB>)
+    pub cursor_info: Option<(f64, Option<f32>)>,
 }
 
 impl StatusBarWidget {
@@ -48,7 +50,13 @@ impl StatusBarWidget {
             gain,
             source,
             fps,
+            cursor_info: None,
         }
+    }
+
+    pub fn with_cursor(mut self, info: Option<(f64, Option<f32>)>) -> Self {
+        self.cursor_info = info;
+        self
     }
 
     /// Format the status bar text.
@@ -59,9 +67,19 @@ impl StatusBarWidget {
             Some(g) => format!("{:.0}dB", g),
             None => "AGC".to_string(),
         };
+        let cursor_str = match &self.cursor_info {
+            Some((freq, db)) => {
+                let db_str = match db {
+                    Some(d) => format!("{:.1}dB", d),
+                    None => "--".to_string(),
+                };
+                format!(" │ Cursor: {} @ {}", format_frequency(*freq), db_str)
+            }
+            None => String::new(),
+        };
         format!(
-            " ⏣ Freq: {} │ BW: {} │ Gain: {} │ {} │ {:.0} FPS ",
-            freq, bw, gain_str, self.source, self.fps
+            " ⏣ Freq: {} │ BW: {} │ Gain: {} │ {} │ {:.0} FPS{} ",
+            freq, bw, gain_str, self.source, self.fps, cursor_str
         )
     }
 }
@@ -92,7 +110,7 @@ impl Widget for StatusBarWidget {
         buf.set_string(area.x, area.y, truncated, style);
 
         // Right-aligned help hint
-        let help = " [q]uit [f]req [←→]tune [↑↓]gain [+-]zoom ";
+        let help = " [?]help [Space]cursor ";
         if area.width as usize > status.len() + help.len() + 2 {
             let help_x = area.x + area.width - help.len() as u16;
             let help_style = Style::default()

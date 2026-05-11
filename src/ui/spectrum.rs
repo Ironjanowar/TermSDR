@@ -13,6 +13,12 @@ pub struct SpectrumWidget<'a> {
     fft_result: Option<&'a FftResult>,
     min_db: f32,
     max_db: f32,
+    /// Cursor position (0.0–1.0), None if cursor inactive.
+    cursor_pos: Option<f32>,
+    /// Frequency at cursor.
+    cursor_freq: f64,
+    /// dB value at cursor.
+    cursor_db: Option<f32>,
 }
 
 impl<'a> SpectrumWidget<'a> {
@@ -21,7 +27,17 @@ impl<'a> SpectrumWidget<'a> {
             fft_result,
             min_db,
             max_db,
+            cursor_pos: None,
+            cursor_freq: 0.0,
+            cursor_db: None,
         }
+    }
+
+    pub fn with_cursor(mut self, pos: Option<f32>, freq: f64, db: Option<f32>) -> Self {
+        self.cursor_pos = pos;
+        self.cursor_freq = freq;
+        self.cursor_db = db;
+        self
     }
 }
 
@@ -114,6 +130,44 @@ impl<'a> Widget for SpectrumWidget<'a> {
                 let x = chart_x + (i * label_spacing) as u16;
                 if x + label.len() as u16 <= area.x + area.width {
                     buf.set_string(x, freq_y, label, Style::default().fg(Color::DarkGray));
+                }
+            }
+        }
+
+        // Draw cursor (vertical line + label)
+        if let Some(cursor_pos) = self.cursor_pos {
+            let cursor_x = chart_x + (cursor_pos * (chart_width - 1) as f32) as u16;
+            if cursor_x >= chart_x && cursor_x < chart_x + chart_width {
+                // Vertical line through spectrum
+                for row in 0..chart_height {
+                    let y = chart_y_start + row;
+                    if y < area.y + area.height - 1 {
+                        buf.set_string(cursor_x, y, "│", Style::default().fg(Color::Yellow));
+                    }
+                }
+
+                // Cursor info label at top
+                let freq_str = format_frequency(self.cursor_freq);
+                let db_str = match self.cursor_db {
+                    Some(db) => format!("{:.1}dB", db),
+                    None => "--dB".to_string(),
+                };
+                let label = format!(" {} | {} ", freq_str, db_str);
+                let label_len = label.len() as u16;
+                // Position label to avoid going off-screen
+                let label_x = if cursor_x + label_len + 1 < area.x + area.width {
+                    cursor_x + 1
+                } else {
+                    cursor_x.saturating_sub(label_len + 1)
+                };
+                let label_y = area.y;
+                if label_y < area.y + area.height {
+                    buf.set_string(
+                        label_x,
+                        label_y,
+                        &label,
+                        Style::default().fg(Color::Black).bg(Color::Yellow),
+                    );
                 }
             }
         }

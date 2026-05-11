@@ -144,3 +144,30 @@ We'll parse these in a future version to import bookmarks and device settings.
 8. ~~CubicSDR compat~~ → Future: import `.cubicsession` XML files (bookmarks, device config) ✅
 9. ~~Test mode~~ → D: Synthetic test signal + IQ file playback for dev/offline use ✅
 10. ~~Config format~~ → JSON for native config files. CubicSDR XML import as separate compat feature ✅
+
+## Device Selection (Startup Flow)
+
+At startup, TermSDR shows a source selection modal:
+
+1. Enumerate RTL-SDR devices via `rtlsdr_get_device_count()` + `rtlsdr_get_device_name()`
+2. List detected SDR devices at top (first one pre-selected)
+3. Always show "Test signal" and "File replay" options below
+4. If only 1 SDR device → auto-select (skip modal)
+5. If no SDR devices → show warning, only Test/File available
+6. CLI args can bypass the modal: `--device 0`, `--test`, `--file capture.iq`
+
+```
+┌─────────────────────────────────────┐
+│     📡 TermSDR — Source Selection    │
+│                                      │
+│  Detected RTL-SDR devices:           │
+│  ► [1] RTL2832U - Realtek (SN: 001) │
+│    [2] RTL2832U - NooElec (SN: 002) │
+│                                      │
+│  Other sources:                      │
+│    [T] Test signal (synthetic)       │
+│    [F] File replay (IQ file)         │
+│                                      │
+│  Press number to select, q to quit   │
+└─────────────────────────────────────┘
+```

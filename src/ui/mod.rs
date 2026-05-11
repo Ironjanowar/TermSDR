@@ -169,8 +169,8 @@ impl App {
                     // Move cursor left by 2% of visible bandwidth
                     self.cursor_freq -= 0.02 * self.config.sample_rate;
                 } else {
-                    // Fine tune: -25 kHz
-                    self.config.center_freq -= 25_000.0;
+                    // Fine tune: visual scroll right (lower freq)
+                    self.config.center_freq += 25_000.0;
                 }
             }
             KeyCode::Right => {
@@ -178,8 +178,8 @@ impl App {
                     // Move cursor right by 2% of visible bandwidth
                     self.cursor_freq += 0.02 * self.config.sample_rate;
                 } else {
-                    // Fine tune: +25 kHz
-                    self.config.center_freq += 25_000.0;
+                    // Fine tune: visual scroll left (higher freq)
+                    self.config.center_freq -= 25_000.0;
                 }
             }
             KeyCode::PageUp => {
@@ -622,7 +622,8 @@ mod tests {
         let orig = app.config.center_freq;
 
         app.handle_key(KeyEvent::from(KeyCode::Right));
-        assert!((app.config.center_freq - (orig + 25_000.0)).abs() < 1.0);
+        // Right arrow scrolls spectrum right → decreases center_freq
+        assert!((app.config.center_freq - (orig - 25_000.0)).abs() < 1.0);
     }
 
     #[test]
@@ -634,7 +635,8 @@ mod tests {
         let orig = app.config.center_freq;
 
         app.handle_key(KeyEvent::from(KeyCode::Left));
-        assert!((app.config.center_freq - (orig - 25_000.0)).abs() < 1.0);
+        // Left arrow scrolls spectrum left → increases center_freq
+        assert!((app.config.center_freq - (orig + 25_000.0)).abs() < 1.0);
     }
 
     #[test]
@@ -788,9 +790,9 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
         assert!(!app.cursor_active);
 
-        // Tune right (+25 kHz) — this shifts center_freq
+        // Tune right (-25 kHz to center_freq, spectrum scrolls right)
         app.handle_key(KeyEvent::from(KeyCode::Right));
-        assert!((app.config.center_freq - (original_freq + 25_000.0)).abs() < 1.0);
+        assert!((app.config.center_freq - (original_freq - 25_000.0)).abs() < 1.0);
 
         // Reactivate cursor
         app.handle_key(KeyEvent::from(KeyCode::Char(' ')));

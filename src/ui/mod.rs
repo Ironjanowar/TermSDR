@@ -54,8 +54,8 @@ pub struct App {
     /// Frequency input mode.
     pub freq_input_mode: bool,
     pub freq_input_buf: String,
-    /// Cursor position (0.0 = left edge, 1.0 = right edge of spectrum).
-    pub cursor_pos: f32,
+    /// Cursor frequency in Hz (absolute position).
+    pub cursor_freq: f64,
     /// Whether cursor is active/visible.
     pub cursor_active: bool,
     /// Whether help modal is shown.
@@ -68,6 +68,7 @@ pub struct App {
 
 impl App {
     pub fn new(config: AppConfig) -> Self {
+        let center = config.center_freq;
         Self {
             config,
             latest_fft: None,
@@ -79,7 +80,7 @@ impl App {
             max_db: 0.0,
             freq_input_mode: false,
             freq_input_buf: String::new(),
-            cursor_pos: 0.5,
+            cursor_freq: center,
             cursor_active: true,
             show_help: false,
             frame_count: 0,
@@ -165,8 +166,8 @@ impl App {
             }
             KeyCode::Left => {
                 if self.cursor_active {
-                    // Move cursor left
-                    self.cursor_pos = (self.cursor_pos - 0.02).max(0.0);
+                    // Move cursor left by 2% of visible bandwidth
+                    self.cursor_freq -= 0.02 * self.config.sample_rate;
                 } else {
                     // Fine tune: -25 kHz
                     self.config.center_freq -= 25_000.0;
@@ -174,8 +175,8 @@ impl App {
             }
             KeyCode::Right => {
                 if self.cursor_active {
-                    // Move cursor right
-                    self.cursor_pos = (self.cursor_pos + 0.02).min(1.0);
+                    // Move cursor right by 2% of visible bandwidth
+                    self.cursor_freq += 0.02 * self.config.sample_rate;
                 } else {
                     // Fine tune: +25 kHz
                     self.config.center_freq += 25_000.0;
@@ -231,19 +232,25 @@ impl App {
         }
     }
 
+    /// Get the relative cursor position (0.0–1.0) within the visible spectrum.
+    pub fn cursor_pos(&self) -> f32 {
+        let start = self.config.center_freq - self.config.sample_rate / 2.0;
+        ((self.cursor_freq - start) / self.config.sample_rate) as f32
+    }
+
     /// Get the frequency at the current cursor position.
     pub fn cursor_frequency(&self) -> f64 {
-        let start = self.config.center_freq - self.config.sample_rate / 2.0;
-        start + self.cursor_pos as f64 * self.config.sample_rate
+        self.cursor_freq
     }
 
     /// Get the dB value at the current cursor position from the latest FFT.
     pub fn cursor_db(&self) -> Option<f32> {
+        let pos = self.cursor_pos();
         self.latest_fft.as_ref().and_then(|fft| {
             if fft.bins.is_empty() {
                 return None;
             }
-            let bin_index = (self.cursor_pos * (fft.bins.len() - 1) as f32) as usize;
+            let bin_index = (pos * (fft.bins.len() - 1) as f32) as usize;
             fft.bins.get(bin_index).copied()
         })
     }
@@ -287,7 +294,7 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         app.min_db,
         app.max_db,
     ).with_cursor(
-        Some(app.cursor_pos),
+        Some(app.cursor_pos()),
         app.cursor_active,
         app.cursor_frequency(),
         app.cursor_db(),
@@ -299,7 +306,7 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         &app.waterfall_history,
         app.min_db,
         app.max_db,
-    ).with_cursor(Some(app.cursor_pos), app.cursor_active);
+    ).with_cursor(Some(app.cursor_pos()), app.cursor_active);
     frame.render_widget(waterfall, chunks[1]);
 
     // Status bar
@@ -635,10 +642,10 @@ mod tests {
         let config = AppConfig::default();
         let mut app = App::new(config);
         assert!(app.cursor_active);
-        let orig = app.cursor_pos;
+        let orig = app.cursor_freq;
 
         app.handle_key(KeyEvent::from(KeyCode::Right));
-        assert!(app.cursor_pos > orig);
+        assert!(app.cursor_freq > orig);
     }
 
     #[test]
@@ -646,10 +653,10 @@ mod tests {
         let config = AppConfig::default();
         let mut app = App::new(config);
         assert!(app.cursor_active);
-        let orig = app.cursor_pos;
+        let orig = app.cursor_freq;
 
         app.handle_key(KeyEvent::from(KeyCode::Left));
-        assert!(app.cursor_pos < orig);
+        assert!(app.cursor_freq < orig);
     }
 
     #[test]
@@ -764,5 +771,38 @@ mod tests {
         assert_eq!(sel, SourceSelection::Test);
         let sel2 = SourceSelection::File("test.iq".to_string());
         assert_eq!(sel2, SourceSelection::File("test.iq".to_string()));
+    }
+
+    #[test]
+    fn test_cursor_desync_bug() {
+        // Reproduce: cursor at center, deactivate, tune right, reactivate.
+        // Cursor should still point at the original frequency.
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+
+        // Cursor starts at center_freq
+        let original_freq = app.cursor_frequency();
+        assert!((original_freq - app.config.center_freq).abs() < 1.0);
+
+        // Deactivate cursor
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(!app.cursor_active);
+
+        // Tune right (+25 kHz) — this shifts center_freq
+        app.handle_key(KeyEvent::from(KeyCode::Right));
+        assert!((app.config.center_freq - (original_freq + 25_000.0)).abs() < 1.0);
+
+        // Reactivate cursor
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(app.cursor_active);
+
+        // Cursor should still be at the original frequency, NOT shifted
+        let cursor_freq_after = app.cursor_frequency();
+        assert!(
+            (cursor_freq_after - original_freq).abs() < 1.0,
+            "Cursor desynced! Expected {}, got {}",
+            original_freq,
+            cursor_freq_after
+        );
     }
 }

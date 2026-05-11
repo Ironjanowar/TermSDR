@@ -984,4 +984,199 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char('W')));
         assert!((app.channel_bw - 1_000.0).abs() < 1.0); // capped
     }
+
+    // === Edge-case tests ===
+
+    #[test]
+    fn test_cursor_pos_outside_left() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        // Move cursor way to the left of visible range
+        app.cursor_freq = app.config.center_freq - app.config.sample_rate * 2.0;
+        let pos = app.cursor_pos();
+        assert!(pos < 0.0); // outside visible range
+    }
+
+    #[test]
+    fn test_cursor_pos_outside_right() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        app.cursor_freq = app.config.center_freq + app.config.sample_rate * 2.0;
+        let pos = app.cursor_pos();
+        assert!(pos > 1.0); // outside visible range
+    }
+
+    #[test]
+    fn test_cursor_db_with_empty_fft_bins() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        let fft = FftResult {
+            bins: vec![],
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        };
+        app.latest_fft = Some(fft);
+        assert!(app.cursor_db().is_none());
+    }
+
+    #[test]
+    fn test_cursor_db_cursor_at_extremes() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        let mut bins = vec![-50.0_f32; 100];
+        bins[0] = -10.0;
+        bins[99] = -20.0;
+        let fft = FftResult {
+            bins,
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        };
+        app.push_fft(fft);
+
+        // Cursor at left edge
+        app.cursor_freq = app.config.center_freq - app.config.sample_rate / 2.0;
+        let db = app.cursor_db();
+        assert!(db.is_some());
+    }
+
+    #[test]
+    fn test_freq_input_suffix_only() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        let orig = app.config.center_freq;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('M')));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        // parse_frequency("M") fails, center_freq unchanged
+        assert!(!app.freq_input_mode);
+        assert!((app.config.center_freq - orig).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_bw_input_invalid_value() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        let orig = app.config.sample_rate;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('b')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('y')));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(!app.bw_input_mode);
+        assert!((app.config.sample_rate - orig).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_push_many_fft_frames() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        for i in 0..500 {
+            let fft = FftResult {
+                bins: vec![-50.0 + (i as f32 * 0.1); 100],
+                center_freq: 100e6,
+                sample_rate: 2.048e6,
+            };
+            app.push_fft(fft);
+        }
+        assert!(app.waterfall_history.len() <= app.max_waterfall_rows);
+    }
+
+    #[test]
+    fn test_auto_range_db_extreme_values() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        let fft = FftResult {
+            bins: vec![-200.0, 100.0],
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        };
+        app.push_fft(fft);
+        // Should not panic, and range should be at least 20 dB
+        assert!(app.max_db - app.min_db >= 20.0);
+    }
+
+    #[test]
+    fn test_tune_negative_frequency() {
+        let mut config = AppConfig::default();
+        config.center_freq = 500_000.0; // low frequency
+        let mut app = App::new(config);
+        // Tune down past zero
+        for _ in 0..100 {
+            app.handle_key(KeyEvent::from(KeyCode::PageDown));
+        }
+        // Should not panic; negative freq is technically allowed
+        assert!(app.config.center_freq < 500_000.0);
+    }
+
+    #[test]
+    fn test_tune_very_high_frequency() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        for _ in 0..1000 {
+            app.handle_key(KeyEvent::from(KeyCode::PageUp));
+        }
+        assert!(app.config.center_freq > 100e6);
+    }
+
+    #[test]
+    fn test_zoom_bandwidth_extremes_repeatedly() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        // Zoom in repeatedly
+        for _ in 0..50 {
+            app.handle_key(KeyEvent::from(KeyCode::Char('+')));
+        }
+        assert!(app.config.sample_rate >= 256_000.0); // min clamp
+
+        // Zoom out repeatedly
+        for _ in 0..50 {
+            app.handle_key(KeyEvent::from(KeyCode::Char('-')));
+        }
+        assert!(app.config.sample_rate <= 3_200_000.0); // max clamp
+    }
+
+    #[test]
+    fn test_help_closes_on_any_key() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        app.show_help = true;
+        // 'q' should close help, NOT quit
+        app.handle_key(KeyEvent::from(KeyCode::Char('q')));
+        assert!(!app.show_help);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn test_freq_input_backspace() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('1')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('2')));
+        app.handle_key(KeyEvent::from(KeyCode::Backspace));
+        assert_eq!(app.freq_input_buf, "1");
+    }
+
+    #[test]
+    fn test_gain_clamped_to_max() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        app.config.gain = Some(49.5);
+        app.handle_key(KeyEvent::from(KeyCode::Up));
+        assert_eq!(app.config.gain, Some(50.0));
+        app.handle_key(KeyEvent::from(KeyCode::Up));
+        assert_eq!(app.config.gain, Some(50.0)); // capped
+    }
+
+    #[test]
+    fn test_gain_clamped_to_min() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        app.config.gain = Some(0.5);
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(app.config.gain, Some(0.0));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(app.config.gain, Some(0.0)); // capped
+    }
 }

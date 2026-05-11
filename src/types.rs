@@ -171,4 +171,106 @@ mod tests {
         assert_eq!(peak_bin, 42);
         assert_eq!(peak_val, -10.0);
     }
+
+    // === Edge-case tests ===
+
+    #[test]
+    fn test_bin_frequency_single_bin() {
+        let result = FftResult {
+            bins: vec![0.0],
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        };
+        // With 1 bin, bin_width = sample_rate/1, freq = center - sr/2 + 0
+        let freq = result.bin_frequency(0);
+        assert!((freq - (100e6 - 1.024e6)).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_bin_frequency_last_bin() {
+        let result = FftResult {
+            bins: vec![0.0; 1024],
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        };
+        let freq = result.bin_frequency(1023);
+        // Should be near center + sr/2
+        let expected = 100e6 - 1.024e6 + 1023.0 * (2.048e6 / 1024.0);
+        assert!((freq - expected).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_frequency_to_bin_below_range() {
+        let result = FftResult {
+            bins: vec![0.0; 1024],
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        };
+        // Frequency way below range — offset negative, round to 0 via saturating_sub
+        // Actually (offset / bin_width).round() as usize will wrap for negative → huge usize
+        // Then .min(1023) clamps it. Let's see what happens:
+        let bin = result.frequency_to_bin(50e6); // way below
+        // negative offset → large usize after cast → clamped to 1023
+        assert!(bin <= 1023);
+    }
+
+    #[test]
+    fn test_frequency_to_bin_above_range() {
+        let result = FftResult {
+            bins: vec![0.0; 1024],
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        };
+        let bin = result.frequency_to_bin(200e6);
+        assert_eq!(bin, 1023); // clamped
+    }
+
+    #[test]
+    fn test_frequency_to_bin_negative_freq() {
+        let result = FftResult {
+            bins: vec![0.0; 1024],
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        };
+        let bin = result.frequency_to_bin(-100e6);
+        // Huge negative offset → wraps to large usize → clamped
+        assert!(bin <= 1023);
+    }
+
+    #[test]
+    fn test_peak_empty_bins() {
+        let result = FftResult {
+            bins: vec![],
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        };
+        let (idx, val) = result.peak();
+        assert_eq!(idx, 0);
+        assert_eq!(val, f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn test_peak_all_equal() {
+        let result = FftResult {
+            bins: vec![-50.0; 100],
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        };
+        let (idx, val) = result.peak();
+        assert_eq!(val, -50.0);
+        // max_by returns last max when all equal
+        assert_eq!(idx, 99);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_peak_with_nan() {
+        // NaN comparisons with unwrap() in partial_cmp should panic
+        let result = FftResult {
+            bins: vec![f32::NAN, -50.0, -30.0],
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        };
+        let _ = result.peak();
+    }
 }

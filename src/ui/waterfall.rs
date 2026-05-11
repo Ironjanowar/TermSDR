@@ -199,4 +199,46 @@ mod tests {
         let result = resample_waterfall_row(&[], 5);
         assert_eq!(result.len(), 5);
     }
+
+    // === Edge-case tests ===
+
+    #[test]
+    fn test_resample_waterfall_target_zero() {
+        let bins = vec![-50.0, -40.0];
+        let result = resample_waterfall_row(&bins, 0);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], -100.0);
+    }
+
+    #[test]
+    fn test_resample_waterfall_target_one() {
+        let bins = vec![-80.0, -60.0, -40.0, -20.0];
+        let result = resample_waterfall_row(&bins, 1);
+        assert_eq!(result.len(), 1);
+        // Average of all bins
+        let expected = (-80.0 + -60.0 + -40.0 + -20.0) / 4.0;
+        assert!((result[0] - expected).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_resample_waterfall_larger_than_input() {
+        let bins = vec![-50.0, -30.0];
+        let result = resample_waterfall_row(&bins, 10);
+        assert_eq!(result.len(), 10);
+    }
+
+    #[test]
+    fn test_resample_waterfall_same_size() {
+        let bins = vec![-80.0, -60.0, -40.0, -20.0];
+        let result = resample_waterfall_row(&bins, 4);
+        assert_eq!(result, bins);
+    }
+
+    #[test]
+    fn test_resample_waterfall_nan_values() {
+        let bins = vec![f32::NAN, -50.0];
+        let result = resample_waterfall_row(&bins, 2);
+        assert_eq!(result.len(), 2);
+        // Just verify no panic
+    }
 }

@@ -303,14 +303,16 @@ pub fn generate_freq_labels(center_freq: f64, sample_rate: f64, width: usize) ->
 
 /// Format a frequency in Hz to a human-readable string.
 pub fn format_frequency(freq: f64) -> String {
-    if freq >= 1e9 {
-        format!("{:.3}G", freq / 1e9)
-    } else if freq >= 1e6 {
-        format!("{:.3}M", freq / 1e6)
-    } else if freq >= 1e3 {
-        format!("{:.1}k", freq / 1e3)
+    let abs_freq = freq.abs();
+    let sign = if freq < 0.0 { "-" } else { "" };
+    if abs_freq >= 1e9 {
+        format!("{}{:.3}G", sign, abs_freq / 1e9)
+    } else if abs_freq >= 1e6 {
+        format!("{}{:.3}M", sign, abs_freq / 1e6)
+    } else if abs_freq >= 1e3 {
+        format!("{}{:.1}k", sign, abs_freq / 1e3)
     } else {
-        format!("{:.0}", freq)
+        format!("{}{:.0}", sign, abs_freq)
     }
 }
 
@@ -371,9 +373,83 @@ mod tests {
 
     #[test]
     fn test_spectrum_gradient_returns_color() {
-        // Just verify it doesn't panic
         let _ = spectrum_gradient(0.0);
         let _ = spectrum_gradient(0.5);
         let _ = spectrum_gradient(1.0);
+    }
+
+    // === Edge-case tests ===
+
+    #[test]
+    fn test_resample_bins_target_zero() {
+        let bins = vec![1.0, 2.0, 3.0];
+        let result = resample_bins(&bins, 0);
+        // Returns vec![-100.0; 1] when target_width==0
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], -100.0);
+    }
+
+    #[test]
+    fn test_resample_bins_target_one() {
+        let bins = vec![1.0, 2.0, 3.0, 4.0];
+        let result = resample_bins(&bins, 1);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], 4.0); // max of all bins
+    }
+
+    #[test]
+    fn test_resample_bins_larger_than_input() {
+        let bins = vec![1.0, 2.0];
+        let result = resample_bins(&bins, 10);
+        assert_eq!(result.len(), 10);
+        // Each output bin maps to a narrow slice of input
+        for &v in &result {
+            assert!(v == 1.0 || v == 2.0);
+        }
+    }
+
+    #[test]
+    fn test_resample_bins_nan_values() {
+        let bins = vec![f32::NAN, -50.0, f32::NAN];
+        let result = resample_bins(&bins, 3);
+        assert_eq!(result.len(), 3);
+        // NaN max-pooling: NaN propagates through f32::max
+        // Just verify no panic
+    }
+
+    #[test]
+    fn test_generate_freq_labels_width_zero() {
+        // (0 / 15).max(2) = 2 labels
+        let labels = generate_freq_labels(100e6, 2.048e6, 0);
+        assert_eq!(labels.len(), 2);
+    }
+
+    #[test]
+    fn test_generate_freq_labels_width_one() {
+        let labels = generate_freq_labels(100e6, 2.048e6, 1);
+        assert_eq!(labels.len(), 2);
+    }
+
+    #[test]
+    fn test_format_frequency_negative() {
+        let s = format_frequency(-100e6);
+        assert!(s.contains("-"));
+        assert!(s.contains("M"));
+    }
+
+    #[test]
+    fn test_format_frequency_zero() {
+        assert_eq!(format_frequency(0.0), "0");
+    }
+
+    #[test]
+    fn test_format_frequency_very_large() {
+        let s = format_frequency(999e9);
+        assert!(s.contains("G"));
+    }
+
+    #[test]
+    fn test_format_frequency_small_hz() {
+        assert_eq!(format_frequency(42.0), "42");
     }
 }

@@ -110,4 +110,97 @@ mod tests {
     fn test_parse_frequency_raw() {
         assert!((parse_frequency("433920000").unwrap() - 433_920_000.0).abs() < 1.0);
     }
+
+    // === Edge-case tests ===
+
+    #[test]
+    fn test_parse_frequency_empty_string() {
+        assert!(parse_frequency("").is_err());
+    }
+
+    #[test]
+    fn test_parse_frequency_suffix_only() {
+        assert!(parse_frequency("M").is_err());
+        assert!(parse_frequency("k").is_err());
+        assert!(parse_frequency("G").is_err());
+    }
+
+    #[test]
+    fn test_parse_frequency_negative() {
+        assert!((parse_frequency("-100M").unwrap() - (-100_000_000.0)).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_parse_frequency_zero() {
+        assert!((parse_frequency("0").unwrap()).abs() < f64::EPSILON);
+        assert!((parse_frequency("0M").unwrap()).abs() < f64::EPSILON);
+        assert!((parse_frequency("0k").unwrap()).abs() < f64::EPSILON);
+        assert!((parse_frequency("0G").unwrap()).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_parse_frequency_very_large() {
+        assert!((parse_frequency("999G").unwrap() - 999_000_000_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_parse_frequency_very_small() {
+        assert!((parse_frequency("0.001k").unwrap() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_frequency_invalid_strings() {
+        assert!(parse_frequency("abc").is_err());
+        assert!(parse_frequency("12.3.4M").is_err());
+        assert!(parse_frequency("M100").is_err());
+    }
+
+    #[test]
+    fn test_parse_frequency_whitespace() {
+        assert!((parse_frequency(" 100M ").unwrap() - 100_000_000.0).abs() < 1.0);
+        assert!(parse_frequency("100 M").is_err());
+    }
+
+    #[test]
+    fn test_parse_frequency_case_sensitivity() {
+        assert!(parse_frequency("100m").is_err());
+        assert!(parse_frequency("100K").is_err());
+    }
+
+    #[test]
+    fn test_to_config_default() {
+        let args = CliArgs::parse_from(["termsdr", "--test"]);
+        let config = args.to_config().unwrap();
+        assert!((config.center_freq - 100_000_000.0).abs() < 1.0);
+        assert!((config.sample_rate - 2_048_000.0).abs() < 1.0);
+        assert_eq!(config.fft_size, 2048);
+        assert!(config.gain.is_none());
+        assert_eq!(config.ppm, 0);
+    }
+
+    #[test]
+    fn test_to_config_test_source_signals() {
+        let args = CliArgs::parse_from(["termsdr", "--test"]);
+        let config = args.to_config().unwrap();
+        match &config.source {
+            crate::types::SourceType::Test { signals } => {
+                assert_eq!(signals.len(), 4);
+                assert!((signals[0].0 - 100_000.0).abs() < 1.0);
+                assert!((signals[0].1 - 0.8).abs() < 0.01);
+            }
+            _ => panic!("Expected Test source"),
+        }
+    }
+
+    #[test]
+    fn test_to_config_file_source() {
+        let args = CliArgs::parse_from(["termsdr", "--file", "/tmp/test.iq"]);
+        let config = args.to_config().unwrap();
+        match &config.source {
+            crate::types::SourceType::File { path } => {
+                assert_eq!(path, "/tmp/test.iq");
+            }
+            _ => panic!("Expected File source"),
+        }
+    }
 }

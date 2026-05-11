@@ -164,7 +164,6 @@ mod tests {
 
     #[test]
     fn test_deterministic_output() {
-        // Two sources with same params should produce identical output
         let mut source1 = TestSource::new(2_048_000.0, 100e6, vec![(50_000.0, 0.5)], 0.01);
         let mut source2 = TestSource::new(2_048_000.0, 100e6, vec![(50_000.0, 0.5)], 0.01);
 
@@ -178,5 +177,66 @@ mod tests {
             assert_eq!(a.re, b.re);
             assert_eq!(a.im, b.im);
         }
+    }
+
+    // === Edge-case tests ===
+
+    #[test]
+    fn test_zero_length_buffer() {
+        let mut source = TestSource::new(2_048_000.0, 100e6, vec![(100_000.0, 0.8)], 0.01);
+        let mut buffer: Vec<IqSample> = vec![];
+        let n = source.read_samples(&mut buffer).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_empty_signals_list() {
+        let mut source = TestSource::new(2_048_000.0, 100e6, vec![], 0.0);
+        let mut buffer = vec![IqSample::new(0.0, 0.0); 100];
+        let n = source.read_samples(&mut buffer).unwrap();
+        assert_eq!(n, 100);
+        // With no signals and no noise, all samples should be zero
+        for s in &buffer {
+            assert_eq!(s.re, 0.0);
+            assert_eq!(s.im, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_very_high_frequency_offset() {
+        // Beyond Nyquist — should still produce samples without panic
+        let mut source = TestSource::new(2_048_000.0, 100e6, vec![(10_000_000.0, 0.8)], 0.0);
+        let mut buffer = vec![IqSample::new(0.0, 0.0); 1024];
+        let n = source.read_samples(&mut buffer).unwrap();
+        assert_eq!(n, 1024);
+    }
+
+    #[test]
+    fn test_very_large_amplitude() {
+        let mut source = TestSource::new(2_048_000.0, 100e6, vec![(100_000.0, 100.0)], 0.0);
+        let mut buffer = vec![IqSample::new(0.0, 0.0); 1024];
+        source.read_samples(&mut buffer).unwrap();
+        let max_mag = buffer.iter().map(|s| s.norm()).fold(0.0_f32, f32::max);
+        assert!(max_mag > 50.0); // large amplitude produces large output
+    }
+
+    #[test]
+    fn test_negative_amplitude() {
+        let mut source = TestSource::new(2_048_000.0, 100e6, vec![(100_000.0, -0.5)], 0.0);
+        let mut buffer = vec![IqSample::new(0.0, 0.0); 1024];
+        source.read_samples(&mut buffer).unwrap();
+        // Negative amplitude just inverts the signal; magnitude should be ~0.5
+        let avg_mag: f32 = buffer.iter().map(|s| s.norm()).sum::<f32>() / buffer.len() as f32;
+        assert!((avg_mag - 0.5).abs() < 0.05);
+    }
+
+    #[test]
+    fn test_zero_sample_rate() {
+        // dt = 1/0 = inf, phase_increment = inf, phase wraps
+        // Should not panic
+        let mut source = TestSource::new(0.0, 100e6, vec![(100_000.0, 0.5)], 0.01);
+        let mut buffer = vec![IqSample::new(0.0, 0.0); 10];
+        let n = source.read_samples(&mut buffer).unwrap();
+        assert_eq!(n, 10);
     }
 }

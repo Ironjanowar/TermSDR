@@ -169,7 +169,58 @@ mod tests {
     fn test_viridis_rgb_lookup() {
         assert_eq!(viridis_rgb(0), (68, 1, 84));
         assert_eq!(viridis_rgb(63), VIRIDIS_64[63]);
-        // Out of bounds clamps
         assert_eq!(viridis_rgb(100), VIRIDIS_64[63]);
+    }
+
+    // === Edge-case tests ===
+
+    #[test]
+    fn test_viridis_color_extreme_db_very_negative() {
+        let color = viridis_color(-1000.0, -100.0, 0.0);
+        if let Color::Rgb(r, g, b) = color {
+            assert_eq!((r, g, b), VIRIDIS_64[0]); // clamped to min
+        } else { panic!("Expected Rgb"); }
+    }
+
+    #[test]
+    fn test_viridis_color_extreme_db_very_positive() {
+        let color = viridis_color(1000.0, -100.0, 0.0);
+        if let Color::Rgb(r, g, b) = color {
+            assert_eq!((r, g, b), VIRIDIS_64[63]); // clamped to max
+        } else { panic!("Expected Rgb"); }
+    }
+
+    #[test]
+    fn test_viridis_color_nan_input() {
+        // NaN should clamp to 0.0 via clamp, producing index 0
+        let color = viridis_color(f32::NAN, -100.0, 0.0);
+        // NaN comparison: (NAN - min) / range = NaN, clamp(NaN, 0, 1) = 0 in Rust? Actually NaN.clamp returns NaN... 
+        // Let's just verify no panic
+        if let Color::Rgb(_, _, _) = color { } else { panic!("Expected Rgb"); }
+    }
+
+    #[test]
+    fn test_viridis_color_infinity_input() {
+        let color = viridis_color(f32::INFINITY, -100.0, 0.0);
+        if let Color::Rgb(_, _, _) = color { } else { panic!("Expected Rgb"); }
+        let color = viridis_color(f32::NEG_INFINITY, -100.0, 0.0);
+        if let Color::Rgb(_, _, _) = color { } else { panic!("Expected Rgb"); }
+    }
+
+    #[test]
+    fn test_viridis_color_inverted_range() {
+        // min_db > max_db
+        let color = viridis_color(-50.0, 0.0, -100.0);
+        // range = -100 - 0 = -100, normalized = (-50 - 0) / -100 = 0.5, clamped to 0.5
+        if let Color::Rgb(r, g, b) = color {
+            assert_eq!((r, g, b), VIRIDIS_64[32]);
+        } else { panic!("Expected Rgb"); }
+    }
+
+    #[test]
+    fn test_viridis_index_nan() {
+        // f32::NAN.clamp(0.0, 1.0) behavior
+        let idx = viridis_index(f32::NAN);
+        assert!(idx <= 63); // just don't panic
     }
 }

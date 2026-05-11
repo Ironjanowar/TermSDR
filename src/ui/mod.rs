@@ -54,6 +54,9 @@ pub struct App {
     /// Frequency input mode.
     pub freq_input_mode: bool,
     pub freq_input_buf: String,
+    /// Bandwidth input mode.
+    pub bw_input_mode: bool,
+    pub bw_input_buf: String,
     /// Cursor frequency in Hz (absolute position).
     pub cursor_freq: f64,
     /// Whether cursor is active/visible.
@@ -80,6 +83,8 @@ impl App {
             max_db: 0.0,
             freq_input_mode: false,
             freq_input_buf: String::new(),
+            bw_input_mode: false,
+            bw_input_buf: String::new(),
             cursor_freq: center,
             cursor_active: true,
             show_help: false,
@@ -157,6 +162,30 @@ impl App {
             return;
         }
 
+        if self.bw_input_mode {
+            match key.code {
+                KeyCode::Enter => {
+                    if let Ok(bw) = crate::config::parse_frequency(&self.bw_input_buf) {
+                        self.config.sample_rate = bw;
+                    }
+                    self.bw_input_mode = false;
+                    self.bw_input_buf.clear();
+                }
+                KeyCode::Esc => {
+                    self.bw_input_mode = false;
+                    self.bw_input_buf.clear();
+                }
+                KeyCode::Backspace => {
+                    self.bw_input_buf.pop();
+                }
+                KeyCode::Char(c) => {
+                    self.bw_input_buf.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
                 self.should_quit = true;
@@ -211,6 +240,13 @@ impl App {
             KeyCode::Char('f') => {
                 self.freq_input_mode = true;
                 self.freq_input_buf.clear();
+            }
+            KeyCode::Char('b') => {
+                self.bw_input_mode = true;
+                self.bw_input_buf.clear();
+            }
+            KeyCode::Char('c') => {
+                self.cursor_freq = self.config.center_freq;
             }
             KeyCode::Char(' ') => {
                 // Toggle cursor active/inactive
@@ -324,6 +360,28 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
     ).with_cursor(cursor_info);
     frame.render_widget(status, chunks[2]);
 
+    // Bandwidth input overlay
+    if app.bw_input_mode {
+        let input_area = Rect {
+            x: size.width / 4,
+            y: size.height / 2 - 1,
+            width: size.width / 2,
+            height: 3,
+        };
+        let block = Block::default()
+            .title(" Enter Bandwidth (e.g. 2M, 500k) ")
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::Yellow).bg(Color::Black));
+        let input_text = Paragraph::new(Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::Cyan)),
+            Span::styled(&app.bw_input_buf, Style::default().fg(Color::White)),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+        ]))
+        .block(block);
+        frame.render_widget(Clear, input_area);
+        frame.render_widget(input_text, input_area);
+    }
+
     // Frequency input overlay
     if app.freq_input_mode {
         let input_area = Rect {
@@ -375,6 +433,14 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
         Line::from(vec![
             Span::styled("    f         ", Style::default().fg(Color::Cyan)),
             Span::styled("Jump to frequency (type e.g. 118.1M)", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("    b         ", Style::default().fg(Color::Cyan)),
+            Span::styled("Set bandwidth (type e.g. 2M, 500k)", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("    c         ", Style::default().fg(Color::Cyan)),
+            Span::styled("Center cursor on current frequency", Style::default().fg(Color::White)),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -765,6 +831,54 @@ mod tests {
 
         assert!(!app.freq_input_mode);
         assert!((app.config.center_freq - orig).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_app_bw_input_mode() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('b')));
+        assert!(app.bw_input_mode);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('1')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('.')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('5')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('M')));
+        assert_eq!(app.bw_input_buf, "1.5M");
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(!app.bw_input_mode);
+        assert!((app.config.sample_rate - 1_500_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_app_bw_input_cancel() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        let orig = app.config.sample_rate;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('b')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('5')));
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+
+        assert!(!app.bw_input_mode);
+        assert!((app.config.sample_rate - orig).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_app_center_cursor() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+
+        // Move cursor away from center
+        app.handle_key(KeyEvent::from(KeyCode::Right));
+        app.handle_key(KeyEvent::from(KeyCode::Right));
+        assert!((app.cursor_freq - app.config.center_freq).abs() > 1.0);
+
+        // Press 'c' to center
+        app.handle_key(KeyEvent::from(KeyCode::Char('c')));
+        assert!((app.cursor_freq - app.config.center_freq).abs() < 1.0);
     }
 
     #[test]

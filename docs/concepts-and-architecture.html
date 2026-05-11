@@ -1,0 +1,1203 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TermSDR — Conceptos & Arquitectura</title>
+    <style>
+        :root {
+            --bg: #0a0a0f;
+            --bg2: #12121a;
+            --bg3: #1a1a2e;
+            --accent: #00d4aa;
+            --accent2: #7b68ee;
+            --accent3: #ff6b6b;
+            --text: #e0e0e0;
+            --text-dim: #888;
+            --border: #2a2a3e;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            overflow-x: hidden;
+        }
+
+        /* Header */
+        .hero {
+            background: linear-gradient(135deg, var(--bg2) 0%, var(--bg3) 50%, #16213e 100%);
+            border-bottom: 1px solid var(--border);
+            padding: 3rem 2rem;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: repeating-linear-gradient(
+                0deg,
+                transparent,
+                transparent 2px,
+                rgba(0, 212, 170, 0.03) 2px,
+                rgba(0, 212, 170, 0.03) 4px
+            );
+            pointer-events: none;
+        }
+
+        .hero h1 {
+            font-size: 2.8rem;
+            font-weight: 700;
+            background: linear-gradient(90deg, var(--accent), var(--accent2));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 0.5rem;
+        }
+
+        .hero .subtitle {
+            color: var(--text-dim);
+            font-size: 1.1rem;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        /* Layout */
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        /* Sections */
+        section {
+            margin-bottom: 3rem;
+        }
+
+        h2 {
+            font-size: 1.6rem;
+            color: var(--accent);
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        h2 .emoji { font-size: 1.4rem; }
+
+        h3 {
+            font-size: 1.2rem;
+            color: var(--accent2);
+            margin: 1.5rem 0 0.8rem;
+        }
+
+        p { margin-bottom: 1rem; }
+
+        /* Concept cards */
+        .concept-card {
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            transition: border-color 0.3s;
+        }
+
+        .concept-card:hover {
+            border-color: var(--accent);
+        }
+
+        .concept-card h3 {
+            margin-top: 0;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .concept-card .analogy {
+            background: var(--bg3);
+            border-left: 3px solid var(--accent2);
+            padding: 0.8rem 1rem;
+            border-radius: 0 8px 8px 0;
+            margin: 0.8rem 0;
+            font-style: italic;
+            color: #bbb;
+        }
+
+        /* Diagram */
+        .diagram {
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 2rem;
+            margin: 1.5rem 0;
+            overflow-x: auto;
+        }
+
+        .diagram pre {
+            font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+            font-size: 0.85rem;
+            color: var(--accent);
+            line-height: 1.5;
+            margin: 0;
+        }
+
+        /* Pipeline visualization */
+        .pipeline {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0;
+            align-items: stretch;
+            margin: 1.5rem 0;
+        }
+
+        .pipeline-stage {
+            flex: 1;
+            min-width: 200px;
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.2rem;
+            position: relative;
+            text-align: center;
+        }
+
+        .pipeline-stage:not(:last-child)::after {
+            content: '→';
+            position: absolute;
+            right: -16px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 1.5rem;
+            color: var(--accent);
+            z-index: 1;
+        }
+
+        .pipeline-stage .stage-num {
+            display: inline-block;
+            background: var(--accent);
+            color: var(--bg);
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            line-height: 28px;
+            font-weight: 700;
+            font-size: 0.85rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .pipeline-stage h4 {
+            color: var(--accent);
+            margin-bottom: 0.5rem;
+        }
+
+        .pipeline-stage p {
+            font-size: 0.85rem;
+            color: var(--text-dim);
+            margin: 0;
+        }
+
+        /* Decision table */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            font-size: 0.9rem;
+        }
+
+        th {
+            background: var(--bg3);
+            color: var(--accent);
+            padding: 0.8rem 1rem;
+            text-align: left;
+            border-bottom: 2px solid var(--accent);
+            font-weight: 600;
+        }
+
+        td {
+            padding: 0.7rem 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        tr:hover td {
+            background: var(--bg2);
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .badge-v01 { background: rgba(0, 212, 170, 0.15); color: var(--accent); }
+        .badge-v02 { background: rgba(123, 104, 238, 0.15); color: var(--accent2); }
+        .badge-future { background: rgba(255, 107, 107, 0.15); color: var(--accent3); }
+
+        /* Spectrum visualization (CSS art) */
+        .spectrum-demo {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 1rem 0;
+            position: relative;
+            height: 120px;
+            overflow: hidden;
+        }
+
+        .spectrum-bar {
+            position: absolute;
+            bottom: 20px;
+            width: 3px;
+            background: linear-gradient(to top, var(--accent), var(--accent2));
+            border-radius: 2px 2px 0 0;
+            opacity: 0.8;
+        }
+
+        .spectrum-label {
+            position: absolute;
+            bottom: 4px;
+            font-size: 0.6rem;
+            color: var(--text-dim);
+        }
+
+        /* Waterfall CSS art */
+        .waterfall-demo {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            height: 80px;
+            margin: 1rem 0;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .waterfall-row {
+            height: 4px;
+            display: flex;
+        }
+
+        .waterfall-cell {
+            flex: 1;
+            min-width: 3px;
+        }
+
+        /* Key bindings */
+        .keybind {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            margin: 0.3rem 0.3rem 0.3rem 0;
+        }
+
+        kbd {
+            display: inline-block;
+            background: var(--bg3);
+            border: 1px solid var(--border);
+            border-bottom: 2px solid #444;
+            border-radius: 4px;
+            padding: 0.15rem 0.5rem;
+            font-family: monospace;
+            font-size: 0.85rem;
+            color: var(--accent);
+        }
+
+        /* Crate list */
+        .crate-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 1rem;
+            margin: 1rem 0;
+        }
+
+        .crate-item {
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+        }
+
+        .crate-item code {
+            color: var(--accent);
+            font-weight: 600;
+        }
+
+        .crate-item .desc {
+            font-size: 0.85rem;
+            color: var(--text-dim);
+            margin-top: 0.3rem;
+        }
+
+        /* File tree */
+        .file-tree {
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.2rem;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 0.85rem;
+            line-height: 1.8;
+        }
+
+        .file-tree .dir { color: var(--accent2); }
+        .file-tree .file { color: var(--text-dim); }
+        .file-tree .comment { color: #555; font-style: italic; }
+
+        /* IQ visualization */
+        .iq-visual {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 2rem;
+            margin: 1.5rem 0;
+            flex-wrap: wrap;
+        }
+
+        .iq-circle {
+            width: 150px;
+            height: 150px;
+            border: 2px solid var(--border);
+            border-radius: 50%;
+            position: relative;
+            background: radial-gradient(circle, rgba(0,212,170,0.05), transparent);
+        }
+
+        .iq-circle .axis {
+            position: absolute;
+            background: var(--border);
+        }
+
+        .iq-circle .axis-h {
+            width: 100%;
+            height: 1px;
+            top: 50%;
+            left: 0;
+        }
+
+        .iq-circle .axis-v {
+            width: 1px;
+            height: 100%;
+            top: 0;
+            left: 50%;
+        }
+
+        .iq-circle .label {
+            position: absolute;
+            font-size: 0.7rem;
+            color: var(--accent);
+            font-weight: 600;
+        }
+
+        .iq-circle .label-i { right: 4px; top: 50%; transform: translateY(-50%); }
+        .iq-circle .label-q { left: 50%; top: 4px; transform: translateX(-50%); }
+
+        .iq-circle .dot {
+            position: absolute;
+            width: 8px;
+            height: 8px;
+            background: var(--accent);
+            border-radius: 50%;
+            box-shadow: 0 0 8px var(--accent);
+            animation: iq-rotate 3s linear infinite;
+        }
+
+        @keyframes iq-rotate {
+            0% { top: 25%; left: 75%; }
+            25% { top: 15%; left: 50%; }
+            50% { top: 25%; left: 25%; }
+            75% { top: 75%; left: 25%; }
+            100% { top: 25%; left: 75%; }
+        }
+
+        .iq-arrow {
+            font-size: 2rem;
+            color: var(--accent);
+        }
+
+        /* Footer */
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-dim);
+            font-size: 0.85rem;
+            border-top: 1px solid var(--border);
+        }
+
+        /* Responsive */
+        @media (max-width: 700px) {
+            .hero h1 { font-size: 2rem; }
+            .pipeline { flex-direction: column; gap: 1rem; }
+            .pipeline-stage:not(:last-child)::after {
+                content: '↓';
+                right: 50%;
+                top: auto;
+                bottom: -18px;
+                transform: translateX(50%);
+            }
+            .container { padding: 1rem; }
+        }
+
+        /* Smooth scroll */
+        html { scroll-behavior: smooth; }
+
+        /* TOC */
+        .toc {
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .toc h3 { margin-top: 0; color: var(--text); }
+
+        .toc ol {
+            padding-left: 1.5rem;
+        }
+
+        .toc li {
+            margin: 0.4rem 0;
+        }
+
+        .toc a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .toc a:hover {
+            text-decoration: underline;
+        }
+
+        /* Code inline */
+        code {
+            background: var(--bg3);
+            padding: 0.1rem 0.4rem;
+            border-radius: 3px;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 0.85em;
+        }
+
+        /* Highlight box */
+        .highlight-box {
+            background: linear-gradient(135deg, rgba(0,212,170,0.08), rgba(123,104,238,0.08));
+            border: 1px solid var(--accent);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+        }
+
+        .formula {
+            text-align: center;
+            font-size: 1.1rem;
+            padding: 1rem;
+            color: var(--accent);
+            font-family: 'JetBrains Mono', monospace;
+        }
+    </style>
+</head>
+<body>
+
+<div class="hero">
+    <h1>📡 TermSDR</h1>
+    <p class="subtitle">CubicSDR en tu terminal — Guía de conceptos y arquitectura del proyecto</p>
+</div>
+
+<div class="container">
+
+    <nav class="toc">
+        <h3>📑 Índice</h3>
+        <ol>
+            <li><a href="#sdr">¿Qué es SDR?</a></li>
+            <li><a href="#rtlsdr">RTL-SDR: el hardware</a></li>
+            <li><a href="#iq">Muestras IQ: la materia prima</a></li>
+            <li><a href="#fft">FFT: del tiempo a la frecuencia</a></li>
+            <li><a href="#spectrum">Espectro y Waterfall</a></li>
+            <li><a href="#demod">Demodulación (v0.2)</a></li>
+            <li><a href="#architecture">Arquitectura de TermSDR</a></li>
+            <li><a href="#pipeline">Pipeline de 3 hilos</a></li>
+            <li><a href="#structure">Estructura del proyecto</a></li>
+            <li><a href="#controls">Controles</a></li>
+            <li><a href="#deps">Dependencias</a></li>
+            <li><a href="#decisions">Decisiones del diseño</a></li>
+            <li><a href="#roadmap">Roadmap</a></li>
+        </ol>
+    </nav>
+
+    <!-- 1. SDR -->
+    <section id="sdr">
+        <h2><span class="emoji">📻</span> ¿Qué es SDR?</h2>
+
+        <div class="concept-card">
+            <h3>🔧 Software Defined Radio</h3>
+            <p>
+                En una radio tradicional, la electrónica física (filtros, amplificadores, demoduladores)
+                decide qué frecuencia escuchas y cómo se procesa la señal. Cada radio está "hardcoded"
+                para un tipo de señal.
+            </p>
+            <p>
+                <strong>SDR invierte esto:</strong> el hardware solo digitaliza un trozo ancho del espectro
+                electromagnético y lo pasa al ordenador como datos crudos. Todo lo demás — filtrar, demodular,
+                visualizar — lo hace el <strong>software</strong>.
+            </p>
+            <div class="analogy">
+                💡 <strong>Analogía:</strong> Una radio FM es como una cámara desechable que solo hace fotos con un filtro fijo.
+                Un SDR es como una cámara RAW: captura todo y tú decides en el ordenador qué hacer con la imagen.
+            </div>
+        </div>
+    </section>
+
+    <!-- 2. RTL-SDR -->
+    <section id="rtlsdr">
+        <h2><span class="emoji">🔌</span> RTL-SDR: el hardware</h2>
+
+        <div class="concept-card">
+            <h3>📦 El dongle USB</h3>
+            <p>
+                El RTL-SDR es un receptor USB basado en el chip <strong>RTL2832U</strong> (originalmente
+                diseñado para TV digital DVB-T). La comunidad descubrió que podía usarse como receptor
+                SDR genérico reprogramando su firmware.
+            </p>
+
+            <table>
+                <tr><th>Parámetro</th><th>Valor</th></tr>
+                <tr><td>Rango de frecuencia</td><td>~24 MHz — 1.766 GHz</td></tr>
+                <tr><td>Ancho de banda máximo</td><td>~3.2 MHz (estable: 2.048 MHz)</td></tr>
+                <tr><td>Resolución ADC</td><td>8 bits</td></tr>
+                <tr><td>Salida</td><td>Muestras IQ (pares I,Q de 8 bits)</td></tr>
+                <tr><td>Interfaz</td><td>USB 2.0</td></tr>
+                <tr><td>Precio</td><td>~25-35€</td></tr>
+            </table>
+
+            <div class="analogy">
+                💡 <strong>Importante:</strong> El RTL-SDR solo puede capturar UN bloque continuo de ~2 MHz
+                a la vez. Si quieres escuchar 100 MHz y 433 MHz simultáneamente, necesitas dos dongles.
+                Pero dentro de esos 2 MHz, puedes "escuchar" múltiples señales.
+            </div>
+        </div>
+    </section>
+
+    <!-- 3. IQ Samples -->
+    <section id="iq">
+        <h2><span class="emoji">〰️</span> Muestras IQ: la materia prima</h2>
+
+        <div class="concept-card">
+            <h3>📊 ¿Qué son I y Q?</h3>
+            <p>
+                Cuando el RTL-SDR digitaliza la señal, no te da "audio" ni "datos" directamente.
+                Te da <strong>muestras IQ</strong>: pares de valores que representan la señal como un
+                <strong>número complejo</strong>.
+            </p>
+
+            <div class="iq-visual">
+                <div class="iq-circle">
+                    <div class="axis axis-h"></div>
+                    <div class="axis axis-v"></div>
+                    <span class="label label-i">I (In-phase)</span>
+                    <span class="label label-q">Q (Quadrature)</span>
+                    <div class="dot"></div>
+                </div>
+                <div>
+                    <p><strong>I (In-phase):</strong> Componente "real" de la señal</p>
+                    <p><strong>Q (Quadrature):</strong> Componente "imaginario" (desfasado 90°)</p>
+                    <p>Juntos: <code>sample = I + jQ</code></p>
+                    <p>Cada muestra es un punto en el plano complejo. La señal "gira" en este plano.</p>
+                </div>
+            </div>
+
+            <div class="analogy">
+                💡 <strong>Analogía:</strong> Imagina que estás mirando una cuerda que vibra desde arriba.
+                I es el movimiento horizontal y Q es el movimiento vertical. Juntos describen completamente
+                la vibración, incluyendo su dirección, velocidad y amplitud.
+            </div>
+
+            <p>
+                A <strong>2.048 MS/s</strong> (millones de muestras por segundo), el RTL-SDR genera
+                <strong>~2 millones de pares (I,Q) cada segundo</strong>. Eso es ~8 MB/s de datos crudos.
+            </p>
+        </div>
+
+        <div class="concept-card">
+            <h3>💾 Formato de datos IQ</h3>
+            <p>El RTL-SDR envía los datos como bytes intercalados:</p>
+            <div class="diagram">
+<pre>
+Byte:  [I₀] [Q₀] [I₁] [Q₁] [I₂] [Q₂] [I₃] [Q₃] ...
+        └──┘       └──┘       └──┘       └──┘
+      Sample 0   Sample 1   Sample 2   Sample 3
+
+Cada byte: unsigned 8-bit (0-255), centrado en 127.5
+Para obtener el valor real: valor_float = (byte - 127.5) / 127.5
+</pre>
+            </div>
+            <p>
+                Los archivos <code>.iq</code> o <code>.bin</code> que graba <code>rtl_sdr</code>
+                usan exactamente este formato. Por eso podemos reproducirlos directamente.
+            </p>
+        </div>
+    </section>
+
+    <!-- 4. FFT -->
+    <section id="fft">
+        <h2><span class="emoji">🔬</span> FFT: del tiempo a la frecuencia</h2>
+
+        <div class="concept-card">
+            <h3>🧮 Fast Fourier Transform</h3>
+            <p>
+                Las muestras IQ están en el <strong>dominio del tiempo</strong>: te dicen qué valor tiene
+                la señal en cada instante. Pero para visualizar el espectro necesitamos el
+                <strong>dominio de la frecuencia</strong>: cuánta energía hay en cada frecuencia.
+            </p>
+            <p>
+                La FFT (Fast Fourier Transform) es el algoritmo que hace esta conversión.
+                Es la pieza central del DSP (Digital Signal Processing).
+            </p>
+
+            <div class="diagram">
+<pre>
+DOMINIO DEL TIEMPO                    DOMINIO DE LA FRECUENCIA
+(muestras IQ)                         (espectro)
+
+  Amplitud                              Potencia (dB)
+  ↑  ╱╲  ╱╲  ╱╲  ╱╲                    ↑
+  │ ╱  ╲╱  ╲╱  ╲╱  ╲         FFT       │    ┃
+  │╱              ╲╱ ╲    ──────────►   │  ┃ ┃
+  └──────────────────── → t             │  ┃ ┃ ┃
+  "¿qué pasa ahora?"                   └──┸─┸─┸──── → frecuencia
+                                        "¿qué frecuencias hay?"
+</pre>
+            </div>
+
+            <h3>📐 Parámetros clave del FFT</h3>
+            <table>
+                <tr><th>Parámetro</th><th>Valor en TermSDR</th><th>Qué significa</th></tr>
+                <tr>
+                    <td><strong>FFT Size (N)</strong></td>
+                    <td>2048</td>
+                    <td>Cuántas muestras toma cada FFT. Más = mejor resolución en frecuencia, pero más lento</td>
+                </tr>
+                <tr>
+                    <td><strong>Resolución en frecuencia</strong></td>
+                    <td>~1 kHz</td>
+                    <td><code>sample_rate / N</code> = 2,048,000 / 2048 = 1000 Hz entre cada "bin"</td>
+                </tr>
+                <tr>
+                    <td><strong>FFTs por segundo</strong></td>
+                    <td>~1000</td>
+                    <td><code>sample_rate / N</code> — cada FFT consume N muestras</td>
+                </tr>
+                <tr>
+                    <td><strong>Salida</strong></td>
+                    <td>2048 valores complejos</td>
+                    <td>Cada valor = magnitud y fase de una frecuencia concreta</td>
+                </tr>
+            </table>
+
+            <h3>📏 De FFT a decibelios</h3>
+            <p>La FFT produce números complejos. Para visualizar, calculamos la magnitud en dB:</p>
+            <div class="formula">
+                magnitud = √(I² + Q²)<br>
+                potencia_dB = 20 × log₁₀(magnitud)
+            </div>
+            <p>Los dB son la escala estándar en radio porque comprimen un rango enorme de valores
+               (una señal puede ser 1,000,000× más fuerte que otra) en números manejables.</p>
+        </div>
+    </section>
+
+    <!-- 5. Spectrum & Waterfall -->
+    <section id="spectrum">
+        <h2><span class="emoji">📊</span> Espectro y Waterfall</h2>
+
+        <div class="concept-card">
+            <h3>📈 Vista de Espectro (Spectrum)</h3>
+            <p>
+                El espectro es una gráfica en tiempo real donde:
+            </p>
+            <ul style="margin: 0.5rem 0 1rem 1.5rem;">
+                <li><strong>Eje X:</strong> Frecuencia (MHz)</li>
+                <li><strong>Eje Y:</strong> Potencia (dB)</li>
+            </ul>
+            <p>Cada frame es una foto instantánea de "cuánta energía hay en cada frecuencia". Se actualiza ~30-60 veces por segundo.</p>
+
+            <div class="spectrum-demo" id="spectrumDemo">
+                <!-- Generated by JS -->
+            </div>
+            <p style="text-align: center; font-size: 0.8rem; color: var(--text-dim);">
+                ↑ Simulación de espectro FFT (las señales son los picos)
+            </p>
+        </div>
+
+        <div class="concept-card">
+            <h3>🌊 Vista Waterfall (Cascada)</h3>
+            <p>
+                El waterfall muestra la <strong>evolución del espectro en el tiempo</strong>:
+            </p>
+            <ul style="margin: 0.5rem 0 1rem 1.5rem;">
+                <li><strong>Eje X:</strong> Frecuencia (igual que el espectro)</li>
+                <li><strong>Eje Y:</strong> Tiempo (la fila más reciente arriba, las antiguas bajan)</li>
+                <li><strong>Color:</strong> Potencia (Viridis: púrpura=débil → amarillo=fuerte)</li>
+            </ul>
+            <p>Es como si el espectro "cayera" hacia abajo, dejando un rastro de colores.</p>
+
+            <div class="waterfall-demo" id="waterfallDemo">
+                <!-- Generated by JS -->
+            </div>
+            <p style="text-align: center; font-size: 0.8rem; color: var(--text-dim);">
+                ↑ Simulación de waterfall con paleta Viridis
+            </p>
+
+            <div class="analogy">
+                💡 <strong>¿Para qué sirve?</strong> El espectro te dice qué hay ahora.
+                El waterfall te dice qué ha pasado en el tiempo. Una transmisión intermitente
+                (como una radio de policía o aviación) aparece como rayas horizontales en el waterfall
+                aunque en el espectro instantáneo la pierdas entre parpadeos.
+            </div>
+        </div>
+
+        <div class="highlight-box">
+            <h3 style="color: var(--accent); margin-top: 0;">🖥️ Layout de TermSDR</h3>
+            <div class="diagram">
+<pre>
+┌──────────────────────────────────────────────────────────┐
+│                    ESPECTRO (FFT)                        │
+│  dB ↑                                                    │
+│  -20│          ┃                                         │
+│  -40│    ┃     ┃┃    ┃                                   │
+│  -60│  ┃ ┃┃    ┃┃  ┃ ┃┃   ┃                              │
+│  -80│┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃┃                  │
+│     └───────────────────────────────── → freq (MHz)      │
+├──────────────────────────────────────────────────────────┤
+│                   WATERFALL                              │
+│  now  ████████████████████████████████████████           │
+│   ↓   ████████████████████████████████████████           │
+│       ████████████████████████████████████████           │
+│       ████████████████████████████████████████           │
+│  old  ████████████████████████████████████████           │
+├──────────────────────────────────────────────────────────┤
+│  📡 118.100 MHz  |  BW: 2.048 MHz  |  Gain: Auto  |  ▶  │
+└──────────────────────────────────────────────────────────┘
+</pre>
+            </div>
+        </div>
+    </section>
+
+    <!-- 6. Demodulation -->
+    <section id="demod">
+        <h2><span class="emoji">🔊</span> Demodulación (v0.2)</h2>
+
+        <div class="concept-card">
+            <h3>🎵 ¿Qué es demodular?</h3>
+            <p>
+                Las señales de radio "empaquetan" información (voz, música, datos) dentro de una
+                onda portadora de alta frecuencia. <strong>Demodular</strong> es extraer esa información.
+            </p>
+
+            <table>
+                <tr><th>Modulación</th><th>Uso típico</th><th>Cómo funciona</th></tr>
+                <tr>
+                    <td><strong>FM</strong> (Frequency Modulation)</td>
+                    <td>Radio comercial, walkie-talkies</td>
+                    <td>La información varía la <em>frecuencia</em> de la portadora</td>
+                </tr>
+                <tr>
+                    <td><strong>AM</strong> (Amplitude Modulation)</td>
+                    <td>Aviación, radio AM, onda corta</td>
+                    <td>La información varía la <em>amplitud</em> de la portadora</td>
+                </tr>
+                <tr>
+                    <td><strong>SSB</strong> (Single Side Band)</td>
+                    <td>Radioaficionados, marítimo</td>
+                    <td>AM optimizado, usa solo media banda</td>
+                </tr>
+            </table>
+
+            <div class="analogy">
+                💡 <strong>Para TermSDR v0.2:</strong> Lo primero será AM (para aviación, tu caso de uso principal)
+                y FM (para radio comercial). AM es matemáticamente más simple: la amplitud de la señal IQ
+                <em>es</em> el audio. FM requiere calcular la derivada de la fase.
+            </div>
+        </div>
+    </section>
+
+    <!-- 7. Architecture -->
+    <section id="architecture">
+        <h2><span class="emoji">🏗️</span> Arquitectura de TermSDR</h2>
+
+        <div class="concept-card">
+            <h3>🎯 Principios de diseño</h3>
+            <ul style="margin: 0.5rem 0 0 1.5rem;">
+                <li><strong>Desacoplamiento:</strong> Cada fase del pipeline es independiente</li>
+                <li><strong>Sin pérdida:</strong> Si el rendering va lento, se descartan frames viejos, no se para la captura</li>
+                <li><strong>Extensible:</strong> Añadir demoduladores en v0.2 no requiere cambiar la captura ni el FFT</li>
+                <li><strong>Fuentes intercambiables:</strong> RTL-SDR, archivo IQ, o señal de test usan la misma interfaz</li>
+            </ul>
+        </div>
+
+        <div class="diagram">
+<pre>
+                        TermSDR v0.1 Architecture
+  ═══════════════════════════════════════════════════════════
+
+  ┌─────────────────────┐
+  │   SOURCE (trait)     │   Implementaciones:
+  │   ─────────────────  │   • RtlSdrSource (hardware real)
+  │   fn read_iq()       │   • FileSource (archivo .iq/.bin)
+  │   fn sample_rate()   │   • TestSource (señal sintética)
+  │   fn center_freq()   │
+  └──────────┬──────────┘
+             │ IQ samples (Vec&lt;Complex&lt;f32&gt;&gt;)
+             │ via crossbeam channel
+             ▼
+  ┌─────────────────────┐
+  │   DSP PROCESSOR      │
+  │   ─────────────────  │   • Windowing (Hanning/Blackman)
+  │   fn process_fft()   │   • FFT (rustfft, size=2048)
+  │   fn to_db()         │   • Magnitude → dB conversion
+  │   fn average()       │   • Optional averaging
+  └──────────┬──────────┘
+             │ Vec&lt;f32&gt; (magnitudes en dB)
+             │ via crossbeam channel
+             ▼
+  ┌─────────────────────┐
+  │   TUI RENDERER       │
+  │   ─────────────────  │   • Spectrum widget (ratatui)
+  │   fn draw_spectrum() │   • Waterfall widget (ratatui)
+  │   fn draw_waterfall()│   • Status bar
+  │   fn handle_input()  │   • Keyboard handler
+  └─────────────────────┘
+
+  ═══════════════════════════════════════════════════════════
+  v0.2: Fan-out del canal de captura → N demoduladores
+</pre>
+        </div>
+    </section>
+
+    <!-- 8. Pipeline -->
+    <section id="pipeline">
+        <h2><span class="emoji">⚡</span> Pipeline de 3 hilos</h2>
+
+        <div class="pipeline">
+            <div class="pipeline-stage">
+                <div class="stage-num">1</div>
+                <h4>Captura</h4>
+                <p>Lee muestras IQ del RTL-SDR (o archivo/test) en bloques de 2048. Las envía por un canal crossbeam.</p>
+                <p style="margin-top: 0.5rem;"><strong>~2M muestras/s</strong></p>
+            </div>
+            <div class="pipeline-stage">
+                <div class="stage-num">2</div>
+                <h4>DSP / FFT</h4>
+                <p>Recibe bloques IQ, aplica ventana, FFT, convierte a dB. Envía el espectro procesado al renderer.</p>
+                <p style="margin-top: 0.5rem;"><strong>~1000 FFTs/s</strong></p>
+            </div>
+            <div class="pipeline-stage">
+                <div class="stage-num">3</div>
+                <h4>TUI</h4>
+                <p>Renderiza espectro + waterfall, procesa input de teclado. Descarta frames si no puede seguir el ritmo.</p>
+                <p style="margin-top: 0.5rem;"><strong>~60 FPS</strong></p>
+            </div>
+        </div>
+
+        <div class="concept-card">
+            <h3>🔗 Comunicación entre hilos</h3>
+            <p>Usamos <code>crossbeam::channel</code> (bounded) entre cada etapa:</p>
+            <div class="diagram">
+<pre>
+Thread 1 ──► [buffer: 4 bloques] ──► Thread 2 ──► [buffer: 2 frames] ──► Thread 3
+
+Si el buffer se llena:
+  • Captura → DSP: descarta el bloque más viejo (try_send)
+  • DSP → TUI: descarta el frame más viejo (try_send)
+
+Resultado: nunca se bloquea la captura, la pantalla muestra
+           siempre lo más reciente posible.
+</pre>
+            </div>
+        </div>
+    </section>
+
+    <!-- 9. Structure -->
+    <section id="structure">
+        <h2><span class="emoji">📁</span> Estructura del proyecto</h2>
+
+        <div class="file-tree">
+            <span class="dir">termsdr/</span><br>
+            ├── <span class="file">Cargo.toml</span> <span class="comment"># dependencias y metadatos</span><br>
+            ├── <span class="file">README.md</span><br>
+            ├── <span class="dir">plans/</span><br>
+            │   └── <span class="file">initial-plan.md</span> <span class="comment"># este documento de decisiones</span><br>
+            └── <span class="dir">src/</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">main.rs</span> <span class="comment"># CLI args (clap), arranque, spawn threads</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">types.rs</span> <span class="comment"># tipos compartidos: IqSample, FftResult, Config</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">config.rs</span> <span class="comment"># parseo CLI + JSON config</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;├── <span class="dir">capture/</span> <span class="comment"># Hilo 1: fuentes de señal</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;│   ├── <span class="file">mod.rs</span> <span class="comment"># trait Source + dispatch</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;│   ├── <span class="file">rtlsdr.rs</span> <span class="comment"># RTL-SDR via librtlsdr</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;│   ├── <span class="file">file.rs</span> <span class="comment"># replay de archivos .iq/.bin</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;│   └── <span class="file">test_signal.rs</span> <span class="comment"># señal sintética para dev</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;├── <span class="dir">dsp/</span> <span class="comment"># Hilo 2: procesamiento de señal</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;│   ├── <span class="file">mod.rs</span> <span class="comment"># pipeline DSP</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;│   └── <span class="file">fft.rs</span> <span class="comment"># FFT + windowing + dB conversion</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;└── <span class="dir">ui/</span> <span class="comment"># Hilo 3: interfaz terminal</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">mod.rs</span> <span class="comment"># App state + event loop</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">spectrum.rs</span> <span class="comment"># widget de espectro</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">waterfall.rs</span> <span class="comment"># widget de waterfall</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└── <span class="file">status_bar.rs</span> <span class="comment"># barra de estado inferior</span>
+        </div>
+    </section>
+
+    <!-- 10. Controls -->
+    <section id="controls">
+        <h2><span class="emoji">⌨️</span> Controles</h2>
+
+        <div class="concept-card" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+            <div>
+                <h3 style="margin-top: 0;">Navegación</h3>
+                <div class="keybind"><kbd>←</kbd> / <kbd>→</kbd> <span>Frecuencia (paso fino, ~25 kHz)</span></div><br>
+                <div class="keybind"><kbd>PgUp</kbd> / <kbd>PgDn</kbd> <span>Frecuencia (paso grueso, ~1 MHz)</span></div><br>
+                <div class="keybind"><kbd>f</kbd> <span>Saltar a frecuencia (modal)</span></div><br>
+                <div class="keybind"><kbd>+</kbd> / <kbd>-</kbd> <span>Zoom ancho de banda</span></div>
+            </div>
+            <div>
+                <h3 style="margin-top: 0;">Control</h3>
+                <div class="keybind"><kbd>↑</kbd> / <kbd>↓</kbd> <span>Ajustar ganancia</span></div><br>
+                <div class="keybind"><kbd>b</kbd> <span>Configurar ancho de banda</span></div><br>
+                <div class="keybind"><kbd>Space</kbd> <span>Toggle cursor activo/inactivo</span></div><br>
+                <div class="keybind"><kbd>m</kbd> <span>Poner marcador en cursor</span></div><br>
+                <div class="keybind"><kbd>q</kbd> <span>Salir</span></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- 11. Dependencies -->
+    <section id="deps">
+        <h2><span class="emoji">📦</span> Dependencias (Rust Crates)</h2>
+
+        <div class="crate-list">
+            <div class="crate-item">
+                <code>ratatui</code>
+                <div class="desc">Framework TUI. Sucesor de tui-rs. Widgets, layout, estilos.</div>
+            </div>
+            <div class="crate-item">
+                <code>crossterm</code>
+                <div class="desc">Backend de terminal. Eventos de teclado, colores, cursor.</div>
+            </div>
+            <div class="crate-item">
+                <code>rustfft</code>
+                <div class="desc">FFT puro Rust, sin dependencias C. SIMD optimizado.</div>
+            </div>
+            <div class="crate-item">
+                <code>rtlsdr</code>
+                <div class="desc">Bindings Rust para librtlsdr. Control del dongle USB.</div>
+            </div>
+            <div class="crate-item">
+                <code>num-complex</code>
+                <div class="desc">Tipo Complex&lt;f32&gt; para muestras IQ y resultado FFT.</div>
+            </div>
+            <div class="crate-item">
+                <code>crossbeam</code>
+                <div class="desc">Canales multi-productor/consumidor para comunicar hilos.</div>
+            </div>
+            <div class="crate-item">
+                <code>clap</code>
+                <div class="desc">Parser de argumentos CLI. Derive macros para struct → args.</div>
+            </div>
+            <div class="crate-item">
+                <code>serde + serde_json</code>
+                <div class="desc">Serialización para archivos de configuración JSON.</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- 12. Decisions -->
+    <section id="decisions">
+        <h2><span class="emoji">✅</span> Decisiones del diseño</h2>
+
+        <table>
+            <tr><th>#</th><th>Decisión</th><th>Resultado</th></tr>
+            <tr><td>1</td><td>Hardware target</td><td>RTL-SDR (dongle USB)</td></tr>
+            <tr><td>2</td><td>Lenguaje</td><td>Rust + ratatui</td></tr>
+            <tr><td>3</td><td>Scope v0.1</td><td>Espectro + Waterfall + controles freq/BW</td></tr>
+            <tr><td>4</td><td>Layout</td><td>Stacked vertical (espectro arriba, waterfall abajo)</td></tr>
+            <tr><td>5</td><td>Colores waterfall</td><td>Viridis (configurable en futuro)</td></tr>
+            <tr><td>6</td><td>Navegación frecuencia</td><td>Multi-step: flechas (fino) + PgUp/PgDn (grueso) + modal (f)</td></tr>
+            <tr><td>7</td><td>Cursor/marcadores</td><td>Cursor con toggle (espacio), marcadores para futuro audio</td></tr>
+            <tr><td>8</td><td>Configuración</td><td>CLI args + JSON config. CubicSDR XML como import futuro</td></tr>
+            <tr><td>9</td><td>Sin hardware</td><td>Señal test sintética + replay archivos IQ</td></tr>
+            <tr><td>10</td><td>Formato config</td><td>JSON nativo</td></tr>
+            <tr><td>11</td><td>Threading</td><td>3 hilos: Captura → DSP/FFT → TUI (extensible a fan-out)</td></tr>
+            <tr><td>12</td><td>Input handling</td><td>Event loop ratatui estándar con crossterm poll (~60fps)</td></tr>
+            <tr><td>13</td><td>Estructura proyecto</td><td>Modular single crate (capture/, dsp/, ui/)</td></tr>
+        </table>
+    </section>
+
+    <!-- 13. Roadmap -->
+    <section id="roadmap">
+        <h2><span class="emoji">🗺️</span> Roadmap</h2>
+
+        <div class="concept-card">
+            <h3><span class="badge badge-v01">v0.1</span> Visual — lo que estamos construyendo</h3>
+            <ul style="margin: 0.5rem 0 0 1.5rem;">
+                <li>Espectro FFT en tiempo real</li>
+                <li>Waterfall con paleta Viridis</li>
+                <li>Selección de frecuencia (flechas + salto directo)</li>
+                <li>Configuración de ancho de banda</li>
+                <li>Cursor visual con toggle</li>
+                <li>Modo test (señal sintética)</li>
+                <li>Replay de archivos IQ</li>
+                <li>CLI args con defaults sensatos</li>
+            </ul>
+        </div>
+
+        <div class="concept-card">
+            <h3><span class="badge badge-v02">v0.2</span> Audio — escuchar señales</h3>
+            <ul style="margin: 0.5rem 0 0 1.5rem;">
+                <li>Demodulación AM (aviación)</li>
+                <li>Demodulación FM (radio comercial)</li>
+                <li>Multi-escucha: marcadores → puntos de escucha</li>
+                <li>Mezcla de audio de múltiples frecuencias</li>
+                <li>Squelch (silenciar cuando no hay señal)</li>
+            </ul>
+        </div>
+
+        <div class="concept-card">
+            <h3><span class="badge badge-future">Futuro</span> Extensiones</h3>
+            <ul style="margin: 0.5rem 0 0 1.5rem;">
+                <li>Import de sesiones CubicSDR (.cubicsession XML)</li>
+                <li>Grabación de IQ y audio</li>
+                <li>Bookmarks de frecuencias</li>
+                <li>Paleta de colores configurable</li>
+                <li>SSB / otros modos de demodulación</li>
+                <li>Múltiples VFOs</li>
+                <li>WebSocket server mode: DSP/FFT output via WebSocket for remote clients (headless backend + web frontend)</li>
+            </ul>
+        </div>
+    </section>
+
+</div>
+
+<footer>
+    📡 TermSDR — Built with Rust + ratatui | Concept doc generated for the project kickoff
+</footer>
+
+<script>
+    // Generate spectrum bars
+    (function() {
+        const demo = document.getElementById('spectrumDemo');
+        if (!demo) return;
+
+        const width = demo.offsetWidth - 20;
+        const numBars = Math.floor(width / 4);
+
+        // Create noise floor + some signal peaks
+        const peaks = [
+            { pos: 0.15, height: 85, width: 8 },
+            { pos: 0.35, height: 70, width: 5 },
+            { pos: 0.52, height: 95, width: 10 },
+            { pos: 0.7, height: 60, width: 4 },
+            { pos: 0.85, height: 75, width: 6 },
+        ];
+
+        for (let i = 0; i < numBars; i++) {
+            const bar = document.createElement('div');
+            bar.className = 'spectrum-bar';
+            bar.style.left = (10 + i * 4) + 'px';
+
+            // Base noise
+            let height = 8 + Math.random() * 12;
+
+            // Add peaks
+            const pos = i / numBars;
+            for (const peak of peaks) {
+                const dist = Math.abs(pos - peak.pos) * numBars;
+                if (dist < peak.width) {
+                    const gaussian = Math.exp(-0.5 * Math.pow(dist / (peak.width / 3), 2));
+                    height += peak.height * gaussian;
+                }
+            }
+
+            bar.style.height = Math.min(height, 90) + 'px';
+            demo.appendChild(bar);
+        }
+
+        // Add frequency labels
+        const labels = ['117 MHz', '118 MHz', '119 MHz'];
+        labels.forEach((text, i) => {
+            const label = document.createElement('div');
+            label.className = 'spectrum-label';
+            label.textContent = text;
+            label.style.left = (10 + (i / (labels.length - 1)) * (width - 20)) + 'px';
+            demo.appendChild(label);
+        });
+    })();
+
+    // Generate waterfall
+    (function() {
+        const demo = document.getElementById('waterfallDemo');
+        if (!demo) return;
+
+        // Viridis-ish palette
+        const viridis = [
+            '#440154', '#481567', '#482677', '#453781',
+            '#3f4788', '#39568c', '#31688e', '#2a788e',
+            '#23888e', '#1f988b', '#22a884', '#35b779',
+            '#54c568', '#7ad151', '#a5db36', '#d2e21b', '#fde725'
+        ];
+
+        const cols = 80;
+        const rows = 20;
+
+        // Signal positions (matching spectrum peaks)
+        const signals = [
+            { pos: 0.15, strength: 0.7, active: true },
+            { pos: 0.35, strength: 0.5, active: false },
+            { pos: 0.52, strength: 0.9, active: true },
+            { pos: 0.7, strength: 0.4, active: false },
+            { pos: 0.85, strength: 0.6, active: true },
+        ];
+
+        for (let r = 0; r < rows; r++) {
+            const row = document.createElement('div');
+            row.className = 'waterfall-row';
+
+            for (let c = 0; c < cols; c++) {
+                const cell = document.createElement('div');
+                cell.className = 'waterfall-cell';
+
+                // Base noise
+                let intensity = Math.random() * 0.15;
+
+                // Add signals
+                const pos = c / cols;
+                for (const sig of signals) {
+                    const dist = Math.abs(pos - sig.pos) * cols;
+                    if (dist < 3) {
+                        const g = Math.exp(-0.5 * Math.pow(dist / 1.2, 2));
+                        // Some signals are intermittent
+                        const active = sig.active || (Math.sin(r * 0.8 + sig.pos * 20) > 0.3);
+                        if (active) {
+                            intensity += sig.strength * g * (0.7 + Math.random() * 0.3);
+                        }
+                    }
+                }
+
+                intensity = Math.min(intensity, 1);
+                const colorIdx = Math.floor(intensity * (viridis.length - 1));
+                cell.style.backgroundColor = viridis[colorIdx];
+                row.appendChild(cell);
+            }
+
+            demo.appendChild(row);
+        }
+    })();
+</script>
+
+</body>
+</html>

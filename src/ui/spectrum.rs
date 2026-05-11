@@ -13,8 +13,10 @@ pub struct SpectrumWidget<'a> {
     fft_result: Option<&'a FftResult>,
     min_db: f32,
     max_db: f32,
-    /// Cursor position (0.0–1.0), None if cursor inactive.
+    /// Cursor position (0.0–1.0), None if cursor hidden entirely.
     cursor_pos: Option<f32>,
+    /// Whether cursor is active (solid) or inactive (dashed).
+    cursor_active: bool,
     /// Frequency at cursor.
     cursor_freq: f64,
     /// dB value at cursor.
@@ -28,13 +30,15 @@ impl<'a> SpectrumWidget<'a> {
             min_db,
             max_db,
             cursor_pos: None,
+            cursor_active: true,
             cursor_freq: 0.0,
             cursor_db: None,
         }
     }
 
-    pub fn with_cursor(mut self, pos: Option<f32>, freq: f64, db: Option<f32>) -> Self {
+    pub fn with_cursor(mut self, pos: Option<f32>, active: bool, freq: f64, db: Option<f32>) -> Self {
         self.cursor_pos = pos;
+        self.cursor_active = active;
         self.cursor_freq = freq;
         self.cursor_db = db;
         self
@@ -139,10 +143,23 @@ impl<'a> Widget for SpectrumWidget<'a> {
             let cursor_x = chart_x + (cursor_pos * (chart_width - 1) as f32) as u16;
             if cursor_x >= chart_x && cursor_x < chart_x + chart_width {
                 // Vertical line through spectrum
+                // Solid line when active, dashed when inactive
+                let (active, dash_char) = match self.cursor_active {
+                    true => (true, "│"),
+                    false => (false, "┆"),
+                };
+                let cursor_color = if active { Color::Yellow } else { Color::Rgb(180, 180, 60) };
                 for row in 0..chart_height {
                     let y = chart_y_start + row;
                     if y < area.y + area.height - 1 {
-                        buf.set_string(cursor_x, y, "│", Style::default().fg(Color::Yellow));
+                        if active {
+                            buf.set_string(cursor_x, y, dash_char, Style::default().fg(cursor_color));
+                        } else {
+                            // Dashed: show every other row
+                            if row % 2 == 0 {
+                                buf.set_string(cursor_x, y, "┆", Style::default().fg(cursor_color));
+                            }
+                        }
                     }
                 }
 
@@ -162,11 +179,16 @@ impl<'a> Widget for SpectrumWidget<'a> {
                 };
                 let label_y = area.y;
                 if label_y < area.y + area.height {
+                    let label_style = if active {
+                        Style::default().fg(Color::Black).bg(Color::Yellow)
+                    } else {
+                        Style::default().fg(Color::Rgb(180, 180, 60)).bg(Color::Rgb(40, 40, 40))
+                    };
                     buf.set_string(
                         label_x,
                         label_y,
                         &label,
-                        Style::default().fg(Color::Black).bg(Color::Yellow),
+                        label_style,
                     );
                 }
             }

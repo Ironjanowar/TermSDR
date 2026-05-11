@@ -14,6 +14,10 @@ pub struct WaterfallWidget<'a> {
     history: &'a [Vec<f32>],
     min_db: f32,
     max_db: f32,
+    /// Cursor position (0.0–1.0), None if hidden.
+    cursor_pos: Option<f32>,
+    /// Whether cursor is active (solid) or inactive (dashed).
+    cursor_active: bool,
 }
 
 impl<'a> WaterfallWidget<'a> {
@@ -22,7 +26,15 @@ impl<'a> WaterfallWidget<'a> {
             history,
             min_db,
             max_db,
+            cursor_pos: None,
+            cursor_active: true,
         }
+    }
+
+    pub fn with_cursor(mut self, pos: Option<f32>, active: bool) -> Self {
+        self.cursor_pos = pos;
+        self.cursor_active = active;
+        self
     }
 }
 
@@ -62,6 +74,34 @@ impl<'a> Widget for WaterfallWidget<'a> {
                 for col in 0..width {
                     let x = area.x + col as u16;
                     buf.set_string(x, y, "█", Style::default().fg(dark));
+                }
+            }
+        }
+
+        // Draw cursor vertical line on waterfall
+        if let Some(cursor_pos) = self.cursor_pos {
+            let cursor_x = area.x + (cursor_pos * (width - 1) as f32) as u16;
+            if cursor_x >= area.x && cursor_x < area.x + area.width {
+                use ratatui::style::Color;
+                let cursor_color = if self.cursor_active {
+                    Color::Yellow
+                } else {
+                    Color::Rgb(180, 180, 60)
+                };
+                for row in 0..height {
+                    let y = area.y + row as u16;
+                    if y >= area.y + area.height {
+                        break;
+                    }
+                    if self.cursor_active {
+                        // Solid line
+                        buf.set_string(cursor_x, y, "│", Style::default().fg(cursor_color));
+                    } else {
+                        // Dashed: every other row
+                        if row % 2 == 0 {
+                            buf.set_string(cursor_x, y, "┆", Style::default().fg(cursor_color));
+                        }
+                    }
                 }
             }
         }

@@ -287,7 +287,8 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         app.min_db,
         app.max_db,
     ).with_cursor(
-        if app.cursor_active { Some(app.cursor_pos) } else { None },
+        Some(app.cursor_pos),
+        app.cursor_active,
         app.cursor_frequency(),
         app.cursor_db(),
     );
@@ -298,7 +299,7 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         &app.waterfall_history,
         app.min_db,
         app.max_db,
-    );
+    ).with_cursor(Some(app.cursor_pos), app.cursor_active);
     frame.render_widget(waterfall, chunks[1]);
 
     // Status bar

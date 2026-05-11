@@ -18,6 +18,14 @@ pub struct WaterfallWidget<'a> {
     cursor_pos: Option<f32>,
     /// Whether cursor is active (solid) or inactive (dashed).
     cursor_active: bool,
+    /// Channel bandwidth in Hz.
+    channel_bw: Option<f64>,
+    /// Cursor frequency in Hz.
+    cursor_freq: f64,
+    /// Center frequency in Hz.
+    center_freq: f64,
+    /// Sample rate in Hz.
+    sample_rate: f64,
 }
 
 impl<'a> WaterfallWidget<'a> {
@@ -28,12 +36,24 @@ impl<'a> WaterfallWidget<'a> {
             max_db,
             cursor_pos: None,
             cursor_active: true,
+            channel_bw: None,
+            cursor_freq: 0.0,
+            center_freq: 0.0,
+            sample_rate: 0.0,
         }
     }
 
     pub fn with_cursor(mut self, pos: Option<f32>, active: bool) -> Self {
         self.cursor_pos = pos;
         self.cursor_active = active;
+        self
+    }
+
+    pub fn with_bandwidth(mut self, bw: Option<f64>, cursor_freq: f64, center_freq: f64, sample_rate: f64) -> Self {
+        self.channel_bw = bw;
+        self.cursor_freq = cursor_freq;
+        self.center_freq = center_freq;
+        self.sample_rate = sample_rate;
         self
     }
 }
@@ -100,6 +120,35 @@ impl<'a> Widget for WaterfallWidget<'a> {
                         // Dashed: every other row
                         if row % 2 == 0 {
                             buf.set_string(cursor_x, y, "┆", Style::default().fg(cursor_color));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Draw channel bandwidth lines
+        if let Some(bw) = self.channel_bw {
+            if self.sample_rate > 0.0 {
+                let left_freq = self.cursor_freq - bw / 2.0;
+                let right_freq = self.cursor_freq + bw / 2.0;
+                let start_freq = self.center_freq - self.sample_rate / 2.0;
+
+                use ratatui::style::Color;
+                let bw_color = Color::Rgb(60, 180, 180);
+
+                for &edge_freq in &[left_freq, right_freq] {
+                    let pos = ((edge_freq - start_freq) / self.sample_rate) as f32;
+                    if pos >= 0.0 && pos <= 1.0 {
+                        let edge_x = area.x + (pos * (width - 1) as f32) as u16;
+                        if edge_x >= area.x && edge_x < area.x + area.width {
+                            for row in 0..height {
+                                if row % 2 == 0 {
+                                    let y = area.y + row as u16;
+                                    if y < area.y + area.height {
+                                        buf.set_string(edge_x, y, "┊", Style::default().fg(bw_color));
+                                    }
+                                }
+                            }
                         }
                     }
                 }

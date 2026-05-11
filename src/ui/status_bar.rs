@@ -34,6 +34,8 @@ pub struct StatusBarWidget {
     pub fps: f64,
     /// Cursor info: (frequency, Option<dB>)
     pub cursor_info: Option<(f64, Option<f32>)>,
+    /// Channel bandwidth in Hz.
+    pub channel_bw: f64,
 }
 
 impl StatusBarWidget {
@@ -51,11 +53,17 @@ impl StatusBarWidget {
             source,
             fps,
             cursor_info: None,
+            channel_bw: 25_000.0,
         }
     }
 
     pub fn with_cursor(mut self, info: Option<(f64, Option<f32>)>) -> Self {
         self.cursor_info = info;
+        self
+    }
+
+    pub fn with_channel_bw(mut self, bw: f64) -> Self {
+        self.channel_bw = bw;
         self
     }
 
@@ -77,9 +85,16 @@ impl StatusBarWidget {
             }
             None => String::new(),
         };
+        let bw_str = if self.channel_bw >= 1_000_000.0 {
+            format!("{:.1}M", self.channel_bw / 1_000_000.0)
+        } else if self.channel_bw >= 1_000.0 {
+            format!("{:.1}k", self.channel_bw / 1_000.0)
+        } else {
+            format!("{:.0}", self.channel_bw)
+        };
         format!(
-            " ⏣ Freq: {} │ BW: {} │ Gain: {} │ {} │ {:.0} FPS{} ",
-            freq, bw, gain_str, self.source, self.fps, cursor_str
+            " ⏣ Freq: {} │ BW: {} │ ChBW: {} │ Gain: {} │ {} │ {:.0} FPS{} ",
+            freq, bw, bw_str, gain_str, self.source, self.fps, cursor_str
         )
     }
 }

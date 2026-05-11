@@ -21,6 +21,12 @@ pub struct SpectrumWidget<'a> {
     cursor_freq: f64,
     /// dB value at cursor.
     cursor_db: Option<f32>,
+    /// Channel bandwidth in Hz.
+    channel_bw: Option<f64>,
+    /// Center frequency for bandwidth calculation.
+    center_freq: f64,
+    /// Sample rate for bandwidth calculation.
+    sample_rate: f64,
 }
 
 impl<'a> SpectrumWidget<'a> {
@@ -33,6 +39,9 @@ impl<'a> SpectrumWidget<'a> {
             cursor_active: true,
             cursor_freq: 0.0,
             cursor_db: None,
+            channel_bw: None,
+            center_freq: 0.0,
+            sample_rate: 0.0,
         }
     }
 
@@ -41,6 +50,13 @@ impl<'a> SpectrumWidget<'a> {
         self.cursor_active = active;
         self.cursor_freq = freq;
         self.cursor_db = db;
+        self
+    }
+
+    pub fn with_bandwidth(mut self, bw: Option<f64>, center_freq: f64, sample_rate: f64) -> Self {
+        self.channel_bw = bw;
+        self.center_freq = center_freq;
+        self.sample_rate = sample_rate;
         self
     }
 }
@@ -190,6 +206,35 @@ impl<'a> Widget for SpectrumWidget<'a> {
                         &label,
                         label_style,
                     );
+                }
+            }
+        }
+
+        // Draw channel bandwidth lines
+        if let (Some(cursor_pos), Some(bw)) = (self.cursor_pos, self.channel_bw) {
+            if self.sample_rate > 0.0 {
+                let cursor_freq_hz = self.center_freq - self.sample_rate / 2.0 + cursor_pos as f64 * self.sample_rate;
+                let left_freq = cursor_freq_hz - bw / 2.0;
+                let right_freq = cursor_freq_hz + bw / 2.0;
+                let start_freq = self.center_freq - self.sample_rate / 2.0;
+
+                let bw_color = Color::Rgb(60, 180, 180);
+
+                for &edge_freq in &[left_freq, right_freq] {
+                    let pos = ((edge_freq - start_freq) / self.sample_rate) as f32;
+                    if pos >= 0.0 && pos <= 1.0 {
+                        let edge_x = chart_x + (pos * (chart_width - 1) as f32) as u16;
+                        if edge_x >= chart_x && edge_x < chart_x + chart_width {
+                            for row in 0..chart_height {
+                                if row % 2 == 0 {
+                                    let y = chart_y_start + row;
+                                    if y < area.y + area.height - 1 {
+                                        buf.set_string(edge_x, y, "┊", Style::default().fg(bw_color));
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -63,6 +63,8 @@ pub struct App {
     pub cursor_active: bool,
     /// Whether help modal is shown.
     pub show_help: bool,
+    /// Channel bandwidth in Hz.
+    pub channel_bw: f64,
     /// Frame timing.
     frame_count: u64,
     last_fps_update: Instant,
@@ -88,6 +90,7 @@ impl App {
             cursor_freq: center,
             cursor_active: true,
             show_help: false,
+            channel_bw: 25_000.0,
             frame_count: 0,
             last_fps_update: Instant::now(),
             last_frame_count: 0,
@@ -255,6 +258,12 @@ impl App {
             KeyCode::Char('?') => {
                 self.show_help = true;
             }
+            KeyCode::Char('w') => {
+                self.channel_bw = (self.channel_bw * 2.0).min(1_000_000.0);
+            }
+            KeyCode::Char('W') => {
+                self.channel_bw = (self.channel_bw / 2.0).max(1_000.0);
+            }
             _ => {}
         }
     }
@@ -334,6 +343,10 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         app.cursor_active,
         app.cursor_frequency(),
         app.cursor_db(),
+    ).with_bandwidth(
+        Some(app.channel_bw),
+        app.config.center_freq,
+        app.config.sample_rate,
     );
     frame.render_widget(spectrum, chunks[0]);
 
@@ -342,7 +355,13 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         &app.waterfall_history,
         app.min_db,
         app.max_db,
-    ).with_cursor(Some(app.cursor_pos()), app.cursor_active);
+    ).with_cursor(Some(app.cursor_pos()), app.cursor_active)
+    .with_bandwidth(
+        Some(app.channel_bw),
+        app.cursor_freq,
+        app.config.center_freq,
+        app.config.sample_rate,
+    );
     frame.render_widget(waterfall, chunks[1]);
 
     // Status bar
@@ -357,7 +376,8 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         app.config.gain,
         app.display_source(),
         app.fps,
-    ).with_cursor(cursor_info);
+    ).with_cursor(cursor_info)
+    .with_channel_bw(app.channel_bw);
     frame.render_widget(status, chunks[2]);
 
     // Bandwidth input overlay
@@ -457,6 +477,10 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
         Line::from(vec![
             Span::styled("    Space     ", Style::default().fg(Color::Cyan)),
             Span::styled("Toggle cursor on/off", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("    w / W     ", Style::default().fg(Color::Cyan)),
+            Span::styled("Widen/narrow channel bandwidth", Style::default().fg(Color::White)),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -920,5 +944,44 @@ mod tests {
             original_freq,
             cursor_freq_after
         );
+    }
+
+    #[test]
+    fn test_app_channel_bw_increase() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        assert!((app.channel_bw - 25_000.0).abs() < 1.0);
+        app.handle_key(KeyEvent::from(KeyCode::Char('w')));
+        assert!((app.channel_bw - 50_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_app_channel_bw_decrease() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        app.handle_key(KeyEvent::from(KeyCode::Char('W')));
+        assert!((app.channel_bw - 12_500.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_app_channel_bw_max() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        app.channel_bw = 512_000.0;
+        app.handle_key(KeyEvent::from(KeyCode::Char('w')));
+        assert!((app.channel_bw - 1_000_000.0).abs() < 1.0);
+        app.handle_key(KeyEvent::from(KeyCode::Char('w')));
+        assert!((app.channel_bw - 1_000_000.0).abs() < 1.0); // capped
+    }
+
+    #[test]
+    fn test_app_channel_bw_min() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        app.channel_bw = 2_000.0;
+        app.handle_key(KeyEvent::from(KeyCode::Char('W')));
+        assert!((app.channel_bw - 1_000.0).abs() < 1.0);
+        app.handle_key(KeyEvent::from(KeyCode::Char('W')));
+        assert!((app.channel_bw - 1_000.0).abs() < 1.0); // capped
     }
 }

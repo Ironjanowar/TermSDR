@@ -112,6 +112,68 @@ fn test_pipeline_detects_multiple_signals() {
 }
 
 #[test]
+fn test_pipeline_threads_start_stop() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+    use crossbeam_channel::bounded;
+
+    let running = Arc::new(AtomicBool::new(true));
+    let (iq_tx, iq_rx) = bounded::<Vec<IqSample>>(4);
+    let (fft_tx, fft_rx) = bounded::<termsdr::types::FftResult>(2);
+
+    let fft_size = 1024;
+    let sample_rate = 1_024_000.0;
+    let center_freq = 100e6;
+
+    // Capture thread
+    let r1 = running.clone();
+    let t1 = thread::spawn(move || {
+        let mut source = TestSource::new(sample_rate, center_freq, vec![(50_000.0, 0.5)], 0.01);
+        let mut buf = vec![IqSample::new(0.0, 0.0); fft_size];
+        while r1.load(Ordering::Relaxed) {
+            source.read_samples(&mut buf).unwrap();
+            if iq_tx.try_send(buf.clone()).is_err() {
+                // Channel full or disconnected
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+
+    // DSP thread
+    let r2 = running.clone();
+    let t2 = thread::spawn(move || {
+        let mut processor = FftProcessor::new(fft_size, 1);
+        while r2.load(Ordering::Relaxed) {
+            match iq_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(samples) => {
+                    if let Some(result) = processor.process(&samples, center_freq, sample_rate) {
+                        let _ = fft_tx.try_send(result);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+    });
+
+    // Let it run briefly
+    thread::sleep(Duration::from_millis(200));
+
+    // Should have some FFT results
+    let mut count = 0;
+    while let Ok(_result) = fft_rx.try_recv() {
+        count += 1;
+    }
+    assert!(count > 0, "Pipeline should have produced FFT results, got {}", count);
+
+    // Clean shutdown
+    running.store(false, Ordering::SeqCst);
+    t1.join().unwrap();
+    t2.join().unwrap();
+}
+
+#[test]
 fn test_source_trait_used_generically() {
     // Verify we can use TestSource through the Source trait
     fn process_source(source: &mut dyn Source, fft_size: usize) -> termsdr::types::FftResult {

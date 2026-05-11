@@ -1,7 +1,3 @@
-// TODO: CLI argument parsing and JSON config loading.
-// Will use clap derive for CLI args and merge with JSON config file.
-// CLI args override JSON config values.
-
 use anyhow::Result;
 use clap::Parser;
 
@@ -35,6 +31,10 @@ pub struct CliArgs {
     #[arg(long)]
     pub test: bool,
 
+    /// IQ file path for file replay mode
+    #[arg(long)]
+    pub file: Option<String>,
+
     /// JSON config file path
     #[arg(short, long)]
     pub config: Option<String>,
@@ -62,8 +62,15 @@ impl CliArgs {
 
         let source = if self.test {
             crate::types::SourceType::Test {
-                signals: vec![(100_000.0, 0.8)],
+                signals: vec![
+                    (100_000.0, 0.8),   // Strong signal at +100kHz
+                    (-200_000.0, 0.4),  // Medium signal at -200kHz
+                    (350_000.0, 0.2),   // Weak signal at +350kHz
+                    (-500_000.0, 0.15), // Very weak signal at -500kHz
+                ],
             }
+        } else if let Some(path) = &self.file {
+            crate::types::SourceType::File { path: path.clone() }
         } else {
             crate::types::SourceType::RtlSdr
         };

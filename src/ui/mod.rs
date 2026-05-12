@@ -571,7 +571,9 @@ impl App {
                 } else {
                     // Fine tune: visual scroll right (lower freq)
                     self.config.center_freq += 25_000.0;
+                    self.cursor_freq += 25_000.0;
                     self.sync_shared_center_freq();
+                    self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
                 }
             }
             KeyCode::Right => {
@@ -583,17 +585,27 @@ impl App {
                 } else {
                     // Fine tune: visual scroll left (higher freq)
                     self.config.center_freq -= 25_000.0;
+                    self.cursor_freq -= 25_000.0;
                     self.sync_shared_center_freq();
+                    self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
                 }
             }
             KeyCode::PageUp => {
                 // Coarse tune: +1 MHz
                 self.config.center_freq += 1_000_000.0;
+                if !self.cursor_active {
+                    self.cursor_freq += 1_000_000.0;
+                    self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
+                }
                 self.sync_shared_center_freq();
             }
             KeyCode::PageDown => {
                 // Coarse tune: -1 MHz
                 self.config.center_freq -= 1_000_000.0;
+                if !self.cursor_active {
+                    self.cursor_freq -= 1_000_000.0;
+                    self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
+                }
                 self.sync_shared_center_freq();
             }
             KeyCode::Up => {
@@ -2132,14 +2144,15 @@ mod tests {
 
     #[test]
     fn test_cursor_desync_bug() {
-        // Reproduce: cursor at center, deactivate, tune right, reactivate.
-        // Cursor should still point at the original frequency.
+        // When cursor is inactive and user tunes with ←→, cursor_freq should
+        // shift along with center_freq so the cursor stays at the same visual
+        // position on screen ("sticks" to the view, not to an absolute freq).
         let config = AppConfig::default();
         let mut app = App::new(config, None);
 
         // Cursor starts at center_freq
-        let original_freq = app.cursor_frequency();
-        assert!((original_freq - app.config.center_freq).abs() < 1.0);
+        let original_center = app.config.center_freq;
+        assert!((app.cursor_frequency() - original_center).abs() < 1.0);
 
         // Deactivate cursor
         app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
@@ -2147,20 +2160,73 @@ mod tests {
 
         // Tune right (-25 kHz to center_freq, spectrum scrolls right)
         app.handle_key(KeyEvent::from(KeyCode::Right));
-        assert!((app.config.center_freq - (original_freq - 25_000.0)).abs() < 1.0);
+        let new_center = original_center - 25_000.0;
+        assert!((app.config.center_freq - new_center).abs() < 1.0);
 
-        // Reactivate cursor
+        // Cursor should have shifted by the same amount (stays at same screen pos)
+        let expected_cursor = original_center - 25_000.0;
+        assert!(
+            (app.cursor_frequency() - expected_cursor).abs() < 1.0,
+            "Cursor should track center_freq when inactive. Expected {}, got {}",
+            expected_cursor,
+            app.cursor_frequency()
+        );
+
+        // Reactivate cursor — it should still be at the shifted position
         app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
         assert!(app.cursor_active);
-
-        // Cursor should still be at the original frequency, NOT shifted
-        let cursor_freq_after = app.cursor_frequency();
         assert!(
-            (cursor_freq_after - original_freq).abs() < 1.0,
-            "Cursor desynced! Expected {}, got {}",
-            original_freq,
-            cursor_freq_after
+            (app.cursor_frequency() - expected_cursor).abs() < 1.0,
+            "Cursor should remain at tracked position after reactivation",
         );
+    }
+
+    #[test]
+    fn test_cursor_tracks_center_on_left_arrow_inactive() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        let original = app.config.center_freq;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(' '))); // deactivate
+        app.handle_key(KeyEvent::from(KeyCode::Left));      // +25kHz center
+
+        assert!((app.config.center_freq - (original + 25_000.0)).abs() < 1.0);
+        assert!(
+            (app.cursor_frequency() - (original + 25_000.0)).abs() < 1.0,
+            "Cursor should track center on Left when inactive",
+        );
+    }
+
+    #[test]
+    fn test_cursor_tracks_center_on_pageup_inactive() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        let original = app.config.center_freq;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(' '))); // deactivate
+        app.handle_key(KeyEvent::from(KeyCode::PageUp));     // +1MHz
+
+        assert!((app.config.center_freq - (original + 1_000_000.0)).abs() < 1.0);
+        assert!(
+            (app.cursor_frequency() - (original + 1_000_000.0)).abs() < 1.0,
+            "Cursor should track center on PageUp when inactive",
+        );
+    }
+
+    #[test]
+    fn test_cursor_does_not_track_when_active() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        let original_cursor = app.cursor_frequency();
+
+        // Cursor active: Right should move cursor, not center
+        app.handle_key(KeyEvent::from(KeyCode::Right));
+        assert!(
+            (app.cursor_frequency() - original_cursor).abs() > 1.0,
+            "Cursor should move when active",
+        );
+        // center_freq unchanged when cursor active
+        assert!((app.config.center_freq - original_cursor).abs() < 1.0);
     }
 
     #[test]

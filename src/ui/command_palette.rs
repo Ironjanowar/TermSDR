@@ -42,6 +42,7 @@ impl CommandRegistry {
             Command { name: "tune-coarse+", description: "Tune up 1 MHz", accepts_param: false, requires_param: false, hotkey: "PgUp" },
             Command { name: "tune-coarse-", description: "Tune down 1 MHz", accepts_param: false, requires_param: false, hotkey: "PgDn" },
             Command { name: "volume", description: "Set volume (0-100)", accepts_param: true, requires_param: true, hotkey: "v/V" },
+            Command { name: "waterfall", description: "Set waterfall time span (seconds)", accepts_param: true, requires_param: true, hotkey: "t/T" },
             Command { name: "zoom-in", description: "Zoom in (decrease bandwidth)", accepts_param: false, requires_param: false, hotkey: "+" },
             Command { name: "zoom-out", description: "Zoom out (increase bandwidth)", accepts_param: false, requires_param: false, hotkey: "-" },
         ];
@@ -243,6 +244,14 @@ impl CommandPalette {
                 }
             }
             "zoom-in" => Ok(CommandAction::ZoomIn),
+            "waterfall" => {
+                let p = param.unwrap();
+                match p.parse::<f64>() {
+                    Ok(secs) if secs >= 5.0 && secs <= 120.0 => Ok(CommandAction::SetWaterfallTimeSpan(secs)),
+                    Ok(_) => Err("Waterfall time span must be 5-120 seconds".to_string()),
+                    Err(_) => Err(format!("Invalid time span: '{}'", p)),
+                }
+            }
             "zoom-out" => Ok(CommandAction::ZoomOut),
             _ => Err("Unknown command".to_string()),
         }
@@ -270,6 +279,7 @@ pub enum CommandAction {
     ZoomOut,
     SetVolume(u8),
     SetSquelch(Option<f32>),
+    SetWaterfallTimeSpan(f64),
 }
 
 #[cfg(test)]
@@ -281,7 +291,7 @@ mod tests {
     #[test]
     fn test_registry_has_all_commands() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.all().len(), 18);
+        assert_eq!(reg.all().len(), 19);
     }
 
     #[test]
@@ -296,7 +306,7 @@ mod tests {
     #[test]
     fn test_registry_filter_empty_returns_all() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.filter("").len(), 18);
+        assert_eq!(reg.filter("").len(), 19);
     }
 
     #[test]
@@ -418,7 +428,7 @@ mod tests {
         for _ in 0..100 {
             palette.select_down();
         }
-        assert_eq!(palette.selected, 17); // 18 commands, index 17
+        assert_eq!(palette.selected, 18); // 19 commands, index 18
     }
 
     #[test]
@@ -799,5 +809,59 @@ mod tests {
         palette.input = "output".to_string();
         assert!(palette.execute().is_err());
         assert!(palette.execute().unwrap_err().contains("not yet implemented"));
+    }
+
+    // === Waterfall command tests ===
+
+    #[test]
+    fn test_execute_waterfall_with_param() {
+        let mut palette = CommandPalette::new();
+        palette.input = "waterfall 30".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::SetWaterfallTimeSpan(30.0)));
+    }
+
+    #[test]
+    fn test_execute_waterfall_min() {
+        let mut palette = CommandPalette::new();
+        palette.input = "waterfall 5".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::SetWaterfallTimeSpan(5.0)));
+    }
+
+    #[test]
+    fn test_execute_waterfall_max() {
+        let mut palette = CommandPalette::new();
+        palette.input = "waterfall 120".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::SetWaterfallTimeSpan(120.0)));
+    }
+
+    #[test]
+    fn test_execute_waterfall_out_of_range() {
+        let mut palette = CommandPalette::new();
+        palette.input = "waterfall 200".to_string();
+        assert!(palette.execute().is_err());
+        assert!(palette.execute().unwrap_err().contains("5-120"));
+    }
+
+    #[test]
+    fn test_execute_waterfall_too_low() {
+        let mut palette = CommandPalette::new();
+        palette.input = "waterfall 2".to_string();
+        assert!(palette.execute().is_err());
+    }
+
+    #[test]
+    fn test_execute_waterfall_requires_param() {
+        let mut palette = CommandPalette::new();
+        palette.input = "waterfall".to_string();
+        assert!(palette.execute().is_err());
+        assert!(palette.execute().unwrap_err().contains("requires a value"));
+    }
+
+    #[test]
+    fn test_execute_waterfall_invalid_param() {
+        let mut palette = CommandPalette::new();
+        palette.input = "waterfall abc".to_string();
+        assert!(palette.execute().is_err());
+        assert!(palette.execute().unwrap_err().contains("Invalid time span"));
     }
 }

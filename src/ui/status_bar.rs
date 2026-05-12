@@ -42,6 +42,8 @@ pub struct StatusBarWidget {
     pub audio_active: bool,
     /// Squelch threshold.
     pub squelch: Option<f32>,
+    /// Waterfall time span in seconds.
+    pub waterfall_time_span: f64,
 }
 
 impl StatusBarWidget {
@@ -63,6 +65,7 @@ impl StatusBarWidget {
             volume: 80,
             audio_active: true,
             squelch: None,
+            waterfall_time_span: 20.0,
         }
     }
 
@@ -80,6 +83,11 @@ impl StatusBarWidget {
         self.volume = volume;
         self.audio_active = audio_active;
         self.squelch = squelch;
+        self
+    }
+
+    pub fn with_waterfall_time_span(mut self, span: f64) -> Self {
+        self.waterfall_time_span = span;
         self
     }
 
@@ -118,8 +126,8 @@ impl StatusBarWidget {
             None => String::new(),
         };
         format!(
-            " ⏣ Freq: {} │ BW: {} │ ChBW: {} │ Gain: {} │ {}{} │ {} │ {:.0} FPS{} ",
-            freq, bw, bw_str, gain_str, vol_str, sq_str, self.source, self.fps, cursor_str
+            " ⏣ Freq: {} │ BW: {} │ ChBW: {} │ Gain: {} │ {}{} │ WF:{:.0}s │ {} │ {:.0} FPS{} ",
+            freq, bw, bw_str, gain_str, vol_str, sq_str, self.waterfall_time_span, self.source, self.fps, cursor_str
         )
     }
 }
@@ -181,6 +189,7 @@ mod tests {
         assert!(status.contains("TEST"));
         assert!(status.contains("30 FPS"));
         assert!(status.contains("\u{1f50a} 80%")); // default volume
+        assert!(status.contains("WF:20s"));
     }
 
     #[test]

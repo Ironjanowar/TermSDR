@@ -49,6 +49,8 @@ pub struct App {
     pub waterfall_history: Vec<Vec<f32>>,
     /// Maximum waterfall rows to keep.
     pub max_waterfall_rows: usize,
+    /// Waterfall time span in seconds.
+    pub waterfall_time_span: f64,
     /// FPS counter.
     pub fps: f64,
     /// Whether the app should quit.
@@ -95,7 +97,8 @@ impl App {
             config,
             latest_fft: None,
             waterfall_history: Vec::new(),
-            max_waterfall_rows: 200,
+            max_waterfall_rows: 600,
+            waterfall_time_span: 20.0,
             fps: 0.0,
             should_quit: false,
             min_db: -80.0,
@@ -348,6 +351,15 @@ impl App {
                 self.channel_bw = (self.channel_bw / 2.0).max(1_000.0);
                 self.send_audio_control(AudioControl::SetChannelBw(self.channel_bw));
             }
+            KeyCode::Char('t') => {
+                self.waterfall_time_span = (self.waterfall_time_span + 5.0).min(120.0);
+                self.max_waterfall_rows = (self.waterfall_time_span * 30.0) as usize;
+            }
+            KeyCode::Char('T') => {
+                self.waterfall_time_span = (self.waterfall_time_span - 5.0).max(5.0);
+                self.max_waterfall_rows = (self.waterfall_time_span * 30.0) as usize;
+                self.waterfall_history.truncate(self.max_waterfall_rows);
+            }
             KeyCode::Char('v') => {
                 self.volume = (self.volume + 5).min(100);
                 self.send_audio_control(AudioControl::SetVolume(self.volume));
@@ -420,6 +432,11 @@ impl App {
             CommandAction::SetSquelch(sq) => {
                 self.squelch = sq;
                 self.send_audio_control(AudioControl::SetSquelch(self.squelch));
+            }
+            CommandAction::SetWaterfallTimeSpan(secs) => {
+                self.waterfall_time_span = secs.clamp(5.0, 120.0);
+                self.max_waterfall_rows = (self.waterfall_time_span * 30.0) as usize;
+                self.waterfall_history.truncate(self.max_waterfall_rows);
             }
         }
     }
@@ -534,7 +551,8 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         app.fps,
     ).with_cursor(cursor_info)
     .with_channel_bw(app.channel_bw)
-    .with_audio(app.volume, app.cursor_active, app.squelch);
+    .with_audio(app.volume, app.cursor_active, app.squelch)
+    .with_waterfall_time_span(app.waterfall_time_span);
     frame.render_widget(status, chunks[2]);
 
     // Bandwidth input overlay
@@ -647,6 +665,10 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
         Line::from(vec![
             Span::styled("    v / V     ", Style::default().fg(Color::Cyan)),
             Span::styled("Volume up/down", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("    t / T     ", Style::default().fg(Color::Cyan)),
+            Span::styled("Waterfall time span +/- 5s", Style::default().fg(Color::White)),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -1640,5 +1662,71 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Tab));
         // Should autocomplete to "channelbw " (with space since it accepts params)
         assert_eq!(app.command_palette.input, "channelbw ");
+    }
+
+    // === Waterfall time span hotkey tests ===
+
+    #[test]
+    fn test_waterfall_time_span_default() {
+        let config = AppConfig::default();
+        let app = App::new(config, None);
+        assert!((app.waterfall_time_span - 20.0).abs() < 0.01);
+        assert_eq!(app.max_waterfall_rows, 600);
+    }
+
+    #[test]
+    fn test_waterfall_time_span_increase() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
+        assert!((app.waterfall_time_span - 25.0).abs() < 0.01);
+        assert_eq!(app.max_waterfall_rows, 750);
+    }
+
+    #[test]
+    fn test_waterfall_time_span_decrease() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        app.handle_key(KeyEvent::from(KeyCode::Char('T')));
+        assert!((app.waterfall_time_span - 15.0).abs() < 0.01);
+        assert_eq!(app.max_waterfall_rows, 450);
+    }
+
+    #[test]
+    fn test_waterfall_time_span_max_cap() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        app.waterfall_time_span = 120.0;
+        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
+        assert!((app.waterfall_time_span - 120.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_waterfall_time_span_min_cap() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        app.waterfall_time_span = 5.0;
+        app.handle_key(KeyEvent::from(KeyCode::Char('T')));
+        assert!((app.waterfall_time_span - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_waterfall_decrease_truncates_history() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        // Fill with lots of rows
+        for _ in 0..700 {
+            let fft = FftResult {
+                bins: vec![-50.0; 10],
+                center_freq: 100e6,
+                sample_rate: 2.048e6,
+            };
+            app.push_fft(fft);
+        }
+        assert_eq!(app.waterfall_history.len(), 600);
+        // Decrease time span
+        app.handle_key(KeyEvent::from(KeyCode::Char('T')));
+        assert_eq!(app.max_waterfall_rows, 450);
+        assert!(app.waterfall_history.len() <= 450);
     }
 }

@@ -1,5 +1,6 @@
 //! Command palette: a modal overlay that lets users search and execute commands.
 
+use crate::audio::demod::DemodMode;
 use crate::config::parse_frequency;
 
 /// A command that can be executed from the palette.
@@ -29,6 +30,7 @@ impl CommandRegistry {
             Command { name: "bandwidth", description: "Set sample rate/bandwidth", accepts_param: true, requires_param: true, hotkey: "b" },
             Command { name: "center", description: "Center cursor on screen", accepts_param: false, requires_param: false, hotkey: "c" },
             Command { name: "channelbw", description: "Set channel bandwidth", accepts_param: true, requires_param: false, hotkey: "w/W" },
+            Command { name: "demod", description: "Set demodulation mode (am/fm/nfm)", accepts_param: true, requires_param: false, hotkey: "d" },
             Command { name: "frequency", description: "Jump to frequency", accepts_param: true, requires_param: true, hotkey: "f" },
             Command { name: "output", description: "Select audio output device", accepts_param: false, requires_param: false, hotkey: "-" },
             Command { name: "gain+", description: "Increase gain by 1 dB", accepts_param: false, requires_param: false, hotkey: "↑" },
@@ -211,6 +213,18 @@ impl CommandPalette {
                     Ok(CommandAction::WidenChannelBw)
                 }
             }
+            "demod" => {
+                if let Some(p) = param {
+                    match p.to_lowercase().as_str() {
+                        "am" => Ok(CommandAction::SetDemodMode(DemodMode::AM)),
+                        "fm" => Ok(CommandAction::SetDemodMode(DemodMode::FM)),
+                        "nfm" => Ok(CommandAction::SetDemodMode(DemodMode::NFM)),
+                        _ => Err("Invalid mode. Use: am, fm, nfm".to_string()),
+                    }
+                } else {
+                    Err("demod requires a mode:\n  am  \u{2014} Amplitude Modulation (aviation 118-137 MHz, HF)\n  fm  \u{2014} Wideband FM (commercial radio 87-108 MHz, BW: 200 kHz)\n  nfm \u{2014} Narrowband FM (walkie-talkies, PMR446, BW: 25 kHz)".to_string())
+                }
+            }
             "frequency" => {
                 // requires_param check already ensures param is Some
                 let p = param.unwrap();
@@ -300,6 +314,7 @@ pub enum CommandAction {
     AddVfo(f64),
     RemoveVfo(usize),
     ClearVfos,
+    SetDemodMode(DemodMode),
 }
 
 #[cfg(test)]
@@ -311,7 +326,7 @@ mod tests {
     #[test]
     fn test_registry_has_all_commands() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.all().len(), 22);
+        assert_eq!(reg.all().len(), 23);
     }
 
     #[test]
@@ -326,7 +341,7 @@ mod tests {
     #[test]
     fn test_registry_filter_empty_returns_all() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.filter("").len(), 22);
+        assert_eq!(reg.filter("").len(), 23);
     }
 
     #[test]
@@ -448,7 +463,7 @@ mod tests {
         for _ in 0..100 {
             palette.select_down();
         }
-        assert_eq!(palette.selected, 21); // 22 commands, index 21
+        assert_eq!(palette.selected, 22); // 22 commands, index 21
     }
 
     #[test]
@@ -934,5 +949,57 @@ mod tests {
         let mut palette = CommandPalette::new();
         palette.input = "vfo-clear".to_string();
         assert_eq!(palette.execute(), Ok(CommandAction::ClearVfos));
+    }
+
+    // === Demod command tests ===
+
+    #[test]
+    fn test_execute_demod_am() {
+        let mut palette = CommandPalette::new();
+        palette.input = "demod am".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::SetDemodMode(DemodMode::AM)));
+    }
+
+    #[test]
+    fn test_execute_demod_fm() {
+        let mut palette = CommandPalette::new();
+        palette.input = "demod fm".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::SetDemodMode(DemodMode::FM)));
+    }
+
+    #[test]
+    fn test_execute_demod_nfm() {
+        let mut palette = CommandPalette::new();
+        palette.input = "demod nfm".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::SetDemodMode(DemodMode::NFM)));
+    }
+
+    #[test]
+    fn test_execute_demod_case_insensitive() {
+        let mut palette = CommandPalette::new();
+        palette.input = "demod FM".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::SetDemodMode(DemodMode::FM)));
+    }
+
+    #[test]
+    fn test_execute_demod_no_param_error() {
+        let mut palette = CommandPalette::new();
+        palette.input = "demod".to_string();
+        let result = palette.execute();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("demod requires a mode"));
+        assert!(err.contains("am"));
+        assert!(err.contains("fm"));
+        assert!(err.contains("nfm"));
+    }
+
+    #[test]
+    fn test_execute_demod_invalid_mode() {
+        let mut palette = CommandPalette::new();
+        palette.input = "demod xyz".to_string();
+        let result = palette.execute();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid mode"));
     }
 }

@@ -44,6 +44,8 @@ pub struct StatusBarWidget {
     pub squelch: Option<f32>,
     /// Waterfall time span in seconds.
     pub waterfall_time_span: f64,
+    /// Demodulation mode label.
+    pub demod_mode: String,
 }
 
 impl StatusBarWidget {
@@ -66,6 +68,7 @@ impl StatusBarWidget {
             audio_active: true,
             squelch: None,
             waterfall_time_span: 20.0,
+            demod_mode: "AM".to_string(),
         }
     }
 
@@ -88,6 +91,11 @@ impl StatusBarWidget {
 
     pub fn with_waterfall_time_span(mut self, span: f64) -> Self {
         self.waterfall_time_span = span;
+        self
+    }
+
+    pub fn with_demod_mode(mut self, mode: &str) -> Self {
+        self.demod_mode = mode.to_string();
         self
     }
 
@@ -117,9 +125,9 @@ impl StatusBarWidget {
             format!("{:.0}", self.channel_bw)
         };
         let vol_str = if self.audio_active {
-            format!("🔊 {}%", self.volume)
+            format!("{} 🔊 {}%", self.demod_mode, self.volume)
         } else {
-            "🔇 MUTED".to_string()
+            format!("{} 🔇 MUTED", self.demod_mode)
         };
         let sq_str = match self.squelch {
             Some(db) => format!(" │ SQ:{:.0}dB", db),
@@ -188,7 +196,7 @@ mod tests {
         assert!(status.contains("40dB"));
         assert!(status.contains("TEST"));
         assert!(status.contains("30 FPS"));
-        assert!(status.contains("\u{1f50a} 80%")); // default volume
+        assert!(status.contains("AM \u{1f50a} 80%")); // default demod + volume
         assert!(status.contains("WF:20s"));
     }
 
@@ -216,7 +224,7 @@ mod tests {
         );
         bar.audio_active = false;
         let status = bar.format_status();
-        assert!(status.contains("\u{1f507} MUTED"));
+        assert!(status.contains("AM \u{1f507} MUTED"));
     }
 
     #[test]

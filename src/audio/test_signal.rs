@@ -64,6 +64,42 @@ pub fn generate_tone(
     samples
 }
 
+/// Generate a synthetic FM-modulated signal for testing.
+///
+/// Produces: `e^(j * phase(t))` where
+/// `phase(t) = 2π * offset * t + (deviation/audio_freq) * sin(2π * audio_freq * t)`
+///
+/// # Arguments
+/// * `carrier_freq` - Carrier frequency in Hz (absolute, offset from center_freq)
+/// * `audio_freq` - Modulating audio tone frequency in Hz
+/// * `deviation` - Frequency deviation in Hz
+/// * `sample_rate` - Sample rate in Hz
+/// * `center_freq` - Center frequency of the "receiver" in Hz
+/// * `num_samples` - Number of IQ samples to generate
+pub fn generate_fm_signal(
+    carrier_freq: f64,
+    audio_freq: f64,
+    deviation: f64,
+    sample_rate: f64,
+    center_freq: f64,
+    num_samples: usize,
+) -> Vec<IqSample> {
+    let offset = carrier_freq - center_freq;
+    let mut samples = Vec::with_capacity(num_samples);
+    let modulation_index = deviation / audio_freq;
+
+    for i in 0..num_samples {
+        let t = i as f64 / sample_rate;
+        let phase = 2.0 * PI * offset * t
+            + modulation_index * (2.0 * PI * audio_freq * t).sin();
+        let i_val = phase.cos() as f32;
+        let q_val = phase.sin() as f32;
+        samples.push(IqSample::new(i_val, q_val));
+    }
+
+    samples
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,6 +164,39 @@ mod tests {
         for s in &samples {
             assert!((s.re - 1.0).abs() < 0.001);
             assert!(s.im.abs() < 0.001);
+        }
+    }
+
+    // FM signal tests
+
+    #[test]
+    fn test_fm_signal_length() {
+        let samples = generate_fm_signal(100.1e6, 1000.0, 75_000.0, 2.048e6, 100.0e6, 4096);
+        assert_eq!(samples.len(), 4096);
+    }
+
+    #[test]
+    fn test_fm_signal_constant_magnitude() {
+        // FM signal should have constant magnitude (~1.0)
+        let samples = generate_fm_signal(100.1e6, 1000.0, 75_000.0, 2.048e6, 100.0e6, 4096);
+        for s in &samples {
+            let mag = s.norm();
+            assert!(
+                (mag - 1.0).abs() < 0.01,
+                "FM signal magnitude should be ~1.0, got {}",
+                mag
+            );
+        }
+    }
+
+    #[test]
+    fn test_fm_signal_unmodulated_is_carrier() {
+        // With deviation=0, should be same as a pure tone
+        let fm = generate_fm_signal(100.1e6, 1000.0, 0.0, 2.048e6, 100.0e6, 1024);
+        let tone = generate_tone(100_000.0, 1.0, 2.048e6, 1024);
+        for (f, t) in fm.iter().zip(tone.iter()) {
+            assert!((f.re - t.re).abs() < 0.01, "I mismatch: {} vs {}", f.re, t.re);
+            assert!((f.im - t.im).abs() < 0.01, "Q mismatch: {} vs {}", f.im, t.im);
         }
     }
 }

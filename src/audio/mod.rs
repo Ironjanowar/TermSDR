@@ -3,7 +3,7 @@ pub mod test_signal;
 pub mod cpal_sink;
 
 use crate::types::IqSample;
-use demod::AmDemodulator;
+use demod::{Demodulator, DemodMode};
 
 // ============================================================================
 // Audio Sink Abstraction
@@ -52,8 +52,10 @@ pub enum AudioControl {
     SetVolume(u8),            // 0-100
     SetSquelch(Option<f32>),  // None = disabled, Some(dB) = threshold
     Mute(bool),
-    AddVfo { id: usize, freq: f64, channel_bw: f64 },
+    AddVfo { id: usize, freq: f64, channel_bw: f64, mode: DemodMode },
     RemoveVfo(usize),
+    SetDemodMode(DemodMode),               // for cursor (id=0)
+    SetVfoDemodMode { id: usize, mode: DemodMode },  // for specific VFO
     Shutdown,
 }
 
@@ -78,7 +80,7 @@ pub fn audio_thread(
 
     let output_sample_rate = sink.sample_rate() as f64;
     // Cursor demodulator (id=0)
-    let mut cursor_demod = AmDemodulator::new(
+    let mut cursor_demod = Demodulator::new_am(
         center_freq,
         cursor_freq,
         channel_bw,
@@ -86,7 +88,7 @@ pub fn audio_thread(
         output_sample_rate,
     );
 
-    let mut vfo_demods: HashMap<usize, AmDemodulator> = HashMap::new();
+    let mut vfo_demods: HashMap<usize, Demodulator> = HashMap::new();
 
     let mut volume: f32 = 1.0; // 100%
     let mut muted = false;
@@ -94,8 +96,8 @@ pub fn audio_thread(
 
     fn apply_control(
         ctrl: AudioControl,
-        cursor_demod: &mut AmDemodulator,
-        vfo_demods: &mut HashMap<usize, AmDemodulator>,
+        cursor_demod: &mut Demodulator,
+        vfo_demods: &mut HashMap<usize, Demodulator>,
         volume: &mut f32,
         squelch: &mut Option<f32>,
         muted: &mut bool,
@@ -109,18 +111,27 @@ pub fn audio_thread(
             AudioControl::SetVolume(v) => *volume = v.min(100) as f32 / 100.0,
             AudioControl::SetSquelch(s) => *squelch = s,
             AudioControl::Mute(m) => *muted = m,
-            AudioControl::AddVfo { id, freq, channel_bw } => {
-                let demod = AmDemodulator::new(
+            AudioControl::AddVfo { id, freq, channel_bw, mode } => {
+                let demod = Demodulator::new(
                     center_freq,
                     freq,
                     channel_bw,
                     input_sample_rate,
                     output_sample_rate,
+                    mode,
                 );
                 vfo_demods.insert(id, demod);
             }
             AudioControl::RemoveVfo(id) => {
                 vfo_demods.remove(&id);
+            }
+            AudioControl::SetDemodMode(mode) => {
+                cursor_demod.set_mode(mode);
+            }
+            AudioControl::SetVfoDemodMode { id, mode } => {
+                if let Some(demod) = vfo_demods.get_mut(&id) {
+                    demod.set_mode(mode);
+                }
             }
             AudioControl::Shutdown => return true,
         }
@@ -541,7 +552,7 @@ mod tests {
         }
 
         // Add a VFO
-        ctrl_tx.send(AudioControl::AddVfo { id: 1, freq: 100.2e6, channel_bw: 25_000.0 }).unwrap();
+        ctrl_tx.send(AudioControl::AddVfo { id: 1, freq: 100.2e6, channel_bw: 25_000.0, mode: DemodMode::AM }).unwrap();
 
         let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
         let handle = std::thread::spawn(move || {
@@ -582,7 +593,7 @@ mod tests {
 
         // Mute cursor, add VFO at signal frequency
         ctrl_tx.send(AudioControl::Mute(true)).unwrap();
-        ctrl_tx.send(AudioControl::AddVfo { id: 1, freq: cursor, channel_bw: 25_000.0 }).unwrap();
+        ctrl_tx.send(AudioControl::AddVfo { id: 1, freq: cursor, channel_bw: 25_000.0, mode: DemodMode::AM }).unwrap();
 
         let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
         let handle = std::thread::spawn(move || {
@@ -607,7 +618,7 @@ mod tests {
         let (iq_tx, iq_rx) = bounded(4);
         let (ctrl_tx, ctrl_rx) = unbounded();
 
-        ctrl_tx.send(AudioControl::AddVfo { id: 1, freq: 100.1e6, channel_bw: 25_000.0 }).unwrap();
+        ctrl_tx.send(AudioControl::AddVfo { id: 1, freq: 100.1e6, channel_bw: 25_000.0, mode: DemodMode::AM }).unwrap();
         ctrl_tx.send(AudioControl::RemoveVfo(1)).unwrap();
 
         let sink = Box::new(NullSink::new(48000));

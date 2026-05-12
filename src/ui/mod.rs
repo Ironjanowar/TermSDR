@@ -25,6 +25,7 @@ use ratatui::{
 };
 
 use crate::audio::AudioControl;
+use crate::audio::demod::DemodMode;
 use crate::types::{AppConfig, FftResult, SourceType};
 use command_palette::{CommandAction, CommandPalette};
 use spectrum::SpectrumWidget;
@@ -50,6 +51,7 @@ pub struct Vfo {
     pub freq: f64,
     pub channel_bw: f64,
     pub color: Color,
+    pub demod_mode: DemodMode,
 }
 
 /// Source selection at startup.
@@ -111,6 +113,8 @@ pub struct App {
     pub audio_control_tx: Option<crossbeam_channel::Sender<AudioControl>>,
     /// Shared center frequency for TestSource reactivity.
     pub shared_center_freq: Option<Arc<AtomicU64>>,
+    /// Demodulation mode for cursor.
+    pub demod_mode: DemodMode,
     /// Frame timing.
     frame_count: u64,
     last_fps_update: Instant,
@@ -147,6 +151,7 @@ impl App {
             show_vfo_delete_modal: false,
             audio_control_tx,
             shared_center_freq: None,
+            demod_mode: DemodMode::AM,
             frame_count: 0,
             last_fps_update: Instant::now(),
             last_frame_count: 0,
@@ -430,6 +435,7 @@ impl App {
                         freq: self.cursor_freq,
                         channel_bw: self.channel_bw,
                         color,
+                        demod_mode: self.demod_mode,
                     };
                     self.vfos.push(vfo);
                     self.next_vfo_id += 1;
@@ -437,6 +443,7 @@ impl App {
                         id,
                         freq: self.cursor_freq,
                         channel_bw: self.channel_bw,
+                        mode: self.demod_mode,
                     });
                 }
             }
@@ -444,6 +451,14 @@ impl App {
                 if !self.vfos.is_empty() {
                     self.show_vfo_delete_modal = true;
                 }
+            }
+            KeyCode::Char('d') => {
+                // Cycle demod mode: AM → FM → NFM → AM
+                let new_mode = self.demod_mode.next();
+                self.demod_mode = new_mode;
+                self.channel_bw = new_mode.default_channel_bw();
+                self.send_audio_control(AudioControl::SetDemodMode(new_mode));
+                self.send_audio_control(AudioControl::SetChannelBw(self.channel_bw));
             }
             _ => {}
         }
@@ -520,6 +535,7 @@ impl App {
                         freq,
                         channel_bw: self.channel_bw,
                         color,
+                        demod_mode: self.demod_mode,
                     };
                     self.vfos.push(vfo);
                     self.next_vfo_id += 1;
@@ -527,6 +543,7 @@ impl App {
                         id,
                         freq,
                         channel_bw: self.channel_bw,
+                        mode: self.demod_mode,
                     });
                 }
             }
@@ -542,6 +559,12 @@ impl App {
                 for id in ids {
                     self.send_audio_control(AudioControl::RemoveVfo(id));
                 }
+            }
+            CommandAction::SetDemodMode(mode) => {
+                self.demod_mode = mode;
+                self.channel_bw = mode.default_channel_bw();
+                self.send_audio_control(AudioControl::SetDemodMode(mode));
+                self.send_audio_control(AudioControl::SetChannelBw(self.channel_bw));
             }
         }
     }
@@ -660,7 +683,8 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
     ).with_cursor(cursor_info)
     .with_channel_bw(app.channel_bw)
     .with_audio(app.volume, app.cursor_active, app.squelch)
-    .with_waterfall_time_span(app.waterfall_time_span);
+    .with_waterfall_time_span(app.waterfall_time_span)
+    .with_demod_mode(app.demod_mode.label());
     frame.render_widget(status, chunks[2]);
 
     // Bandwidth input overlay
@@ -786,6 +810,10 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
         Line::from(vec![
             Span::styled("    x         ", Style::default().fg(Color::Cyan)),
             Span::styled("Delete a pinned VFO", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("    d         ", Style::default().fg(Color::Cyan)),
+            Span::styled("Cycle demod mode (AM \u{2192} FM \u{2192} NFM)", Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
             Span::styled("    t / T     ", Style::default().fg(Color::Cyan)),
@@ -992,7 +1020,7 @@ fn draw_vfo_delete_modal(frame: &mut Frame, size: Rect, vfos: &[Vfo]) {
         }
         let freq_str = format_frequency(vfo.freq);
         let bw_str = format_frequency(vfo.channel_bw);
-        let label = format!("  [{}] {}  BW: {}", vfo.id, freq_str, bw_str);
+        let label = format!("  [{}] {} {}  BW: {}", vfo.id, vfo.demod_mode.label(), freq_str, bw_str);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(label, Style::default().fg(vfo.color)))),
             Rect { x: inner.x, y, width: inner.width, height: 1 },
@@ -2044,5 +2072,66 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
         assert!(!app.cursor_active);
         assert_eq!(app.vfos.len(), 1);
+    }
+
+    // === Demod mode tests ===
+
+    #[test]
+    fn test_d_key_cycles_demod_mode() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        assert_eq!(app.demod_mode, DemodMode::AM);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        assert_eq!(app.demod_mode, DemodMode::FM);
+        assert!((app.channel_bw - 200_000.0).abs() < 1.0);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        assert_eq!(app.demod_mode, DemodMode::NFM);
+        assert!((app.channel_bw - 25_000.0).abs() < 1.0);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        assert_eq!(app.demod_mode, DemodMode::AM);
+        assert!((app.channel_bw - 25_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_vfo_inherits_demod_mode() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+
+        // Switch to FM
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        assert_eq!(app.demod_mode, DemodMode::FM);
+
+        // Create VFO — should inherit FM mode
+        app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        assert_eq!(app.vfos.len(), 1);
+        assert_eq!(app.vfos[0].demod_mode, DemodMode::FM);
+    }
+
+    #[test]
+    fn test_demod_command_action() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+
+        app.apply_command_action(CommandAction::SetDemodMode(DemodMode::NFM));
+        assert_eq!(app.demod_mode, DemodMode::NFM);
+        assert!((app.channel_bw - 25_000.0).abs() < 1.0);
+
+        app.apply_command_action(CommandAction::SetDemodMode(DemodMode::FM));
+        assert_eq!(app.demod_mode, DemodMode::FM);
+        assert!((app.channel_bw - 200_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_d_key_does_not_work_in_help_modal() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        app.show_help = true;
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        // Help should close, but demod mode should NOT change
+        assert!(!app.show_help);
+        assert_eq!(app.demod_mode, DemodMode::AM);
     }
 }

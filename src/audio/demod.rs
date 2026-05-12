@@ -1,7 +1,51 @@
-//! AM demodulation pipeline: frequency shift → LPF → decimate → envelope → DC removal.
+//! Demodulation pipeline: frequency shift → LPF → decimate → demod (AM/FM/NFM) → DC removal.
 
 use crate::types::IqSample;
 use std::f64::consts::PI;
+
+// ============================================================================
+// Demodulation Mode
+// ============================================================================
+
+/// Demodulation mode for a VFO or cursor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DemodMode {
+    /// Amplitude Modulation (aviation 118-137 MHz, HF)
+    AM,
+    /// Wideband FM (commercial radio 87-108 MHz, BW: 200 kHz)
+    FM,
+    /// Narrowband FM (walkie-talkies, PMR446, BW: 25 kHz)
+    NFM,
+}
+
+impl DemodMode {
+    /// Default channel bandwidth for this demodulation mode.
+    pub fn default_channel_bw(&self) -> f64 {
+        match self {
+            DemodMode::AM => 25_000.0,
+            DemodMode::FM => 200_000.0,
+            DemodMode::NFM => 25_000.0,
+        }
+    }
+
+    /// Short label for display.
+    pub fn label(&self) -> &'static str {
+        match self {
+            DemodMode::AM => "AM",
+            DemodMode::FM => "FM",
+            DemodMode::NFM => "NFM",
+        }
+    }
+
+    /// Cycle to the next mode: AM → FM → NFM → AM.
+    pub fn next(&self) -> DemodMode {
+        match self {
+            DemodMode::AM => DemodMode::FM,
+            DemodMode::FM => DemodMode::NFM,
+            DemodMode::NFM => DemodMode::AM,
+        }
+    }
+}
 
 // ============================================================================
 // 1.1 Frequency Shift (Mix to Baseband)
@@ -158,6 +202,72 @@ pub fn am_demod(samples: &[IqSample]) -> Vec<f32> {
 }
 
 // ============================================================================
+// 1.4b FM Discriminator
+// ============================================================================
+
+/// FM demodulation via frequency discriminator.
+///
+/// `audio[n] = arg(sample[n] * conj(sample[n-1]))`
+///
+/// The output is the instantaneous frequency deviation (in radians per sample).
+pub fn fm_demod(samples: &[IqSample]) -> Vec<f32> {
+    if samples.len() < 2 {
+        return vec![0.0; samples.len()];
+    }
+    let mut output = Vec::with_capacity(samples.len());
+    output.push(0.0); // first sample has no previous
+    for i in 1..samples.len() {
+        let product = samples[i] * samples[i - 1].conj();
+        output.push(product.arg());
+    }
+    output
+}
+
+// ============================================================================
+// 1.4c De-emphasis Filter
+// ============================================================================
+
+/// IIR de-emphasis filter for FM audio.
+///
+/// Applies a single-pole low-pass to counteract the FM pre-emphasis used in
+/// broadcast FM transmission.
+pub struct DeEmphasis {
+    alpha: f32,
+    prev_output: f32,
+}
+
+impl DeEmphasis {
+    /// Create a de-emphasis filter.
+    ///
+    /// # Arguments
+    /// * `sample_rate` - Audio sample rate in Hz
+    /// * `tau` - Time constant in seconds (50e-6 for Europe, 75e-6 for US)
+    pub fn new(sample_rate: f64, tau: f64) -> Self {
+        let alpha = (-1.0 / (sample_rate * tau)).exp() as f32;
+        Self {
+            alpha,
+            prev_output: 0.0,
+        }
+    }
+
+    /// Get the alpha coefficient (for testing).
+    pub fn alpha(&self) -> f32 {
+        self.alpha
+    }
+
+    /// Process audio samples through the de-emphasis filter.
+    pub fn process(&mut self, samples: &[f32]) -> Vec<f32> {
+        let mut output = Vec::with_capacity(samples.len());
+        for &s in samples {
+            let out = s * (1.0 - self.alpha) + self.prev_output * self.alpha;
+            self.prev_output = out;
+            output.push(out);
+        }
+        output
+    }
+}
+
+// ============================================================================
 // 1.5 DC Removal
 // ============================================================================
 
@@ -201,11 +311,12 @@ impl DcRemoval {
 }
 
 // ============================================================================
-// 1.6 Full AM Demodulation Pipeline
+// 1.6 Full Demodulation Pipeline
 // ============================================================================
 
-/// Complete AM demodulator that chains all DSP stages.
-pub struct AmDemodulator {
+/// Complete demodulator that chains all DSP stages.
+/// Supports AM, FM (wideband), and NFM (narrowband) modes.
+pub struct Demodulator {
     fir_filter: FirFilter,
     dc_removal: DcRemoval,
     shift_phase: f64,
@@ -213,10 +324,13 @@ pub struct AmDemodulator {
     cursor_freq: f64,
     center_freq: f64,
     input_sample_rate: f64,
+    mode: DemodMode,
+    de_emphasis: Option<DeEmphasis>,
+    prev_sample: IqSample,
 }
 
-impl AmDemodulator {
-    /// Create a new AM demodulator.
+impl Demodulator {
+    /// Create a new demodulator.
     ///
     /// # Arguments
     /// * `center_freq` - Center frequency of the SDR in Hz
@@ -224,12 +338,14 @@ impl AmDemodulator {
     /// * `channel_bw` - Channel bandwidth in Hz
     /// * `input_sample_rate` - Input sample rate from SDR in Hz
     /// * `output_sample_rate` - Desired audio output sample rate in Hz (e.g., 48000)
+    /// * `mode` - Demodulation mode (AM, FM, NFM)
     pub fn new(
         center_freq: f64,
         cursor_freq: f64,
         channel_bw: f64,
         input_sample_rate: f64,
         output_sample_rate: f64,
+        mode: DemodMode,
     ) -> Self {
         let decimation_factor = (input_sample_rate / output_sample_rate).round() as usize;
         let decimation_factor = decimation_factor.max(1);
@@ -239,6 +355,14 @@ impl AmDemodulator {
         let num_taps = 101;
         let fir_filter = FirFilter::low_pass(channel_bw / 2.0, input_sample_rate, num_taps);
 
+        let de_emphasis = match mode {
+            DemodMode::FM => {
+                let output_sr = input_sample_rate / decimation_factor as f64;
+                Some(DeEmphasis::new(output_sr, 50e-6))
+            }
+            _ => None,
+        };
+
         Self {
             fir_filter,
             dc_removal: DcRemoval::new(0.995),
@@ -247,10 +371,24 @@ impl AmDemodulator {
             cursor_freq,
             center_freq,
             input_sample_rate,
+            mode,
+            de_emphasis,
+            prev_sample: IqSample::new(0.0, 0.0),
         }
     }
 
-    /// Process a block of IQ samples through the full AM demodulation pipeline.
+    /// Create a new AM demodulator (convenience constructor for backward compatibility).
+    pub fn new_am(
+        center_freq: f64,
+        cursor_freq: f64,
+        channel_bw: f64,
+        input_sample_rate: f64,
+        output_sample_rate: f64,
+    ) -> Self {
+        Self::new(center_freq, cursor_freq, channel_bw, input_sample_rate, output_sample_rate, DemodMode::AM)
+    }
+
+    /// Process a block of IQ samples through the full demodulation pipeline.
     ///
     /// Returns audio samples at the output sample rate.
     pub fn process(&mut self, samples: &[IqSample]) -> Vec<f32> {
@@ -264,10 +402,31 @@ impl AmDemodulator {
         // 3. Decimate: reduce sample rate
         let decimated = decimate(&filtered, self.decimation_factor);
 
-        // 4. AM envelope detection
-        let audio = am_demod(&decimated);
+        // 4. Demodulate based on mode
+        let audio = match self.mode {
+            DemodMode::AM => am_demod(&decimated),
+            DemodMode::FM | DemodMode::NFM => {
+                // Prepend prev_sample for continuity across blocks
+                let mut with_prev = Vec::with_capacity(decimated.len() + 1);
+                with_prev.push(self.prev_sample);
+                with_prev.extend_from_slice(&decimated);
+                if let Some(last) = decimated.last() {
+                    self.prev_sample = *last;
+                }
+                let raw = fm_demod(&with_prev);
+                // Skip first element (from prepended prev_sample)
+                raw[1..].to_vec()
+            }
+        };
 
-        // 5. DC removal
+        // 5. Apply de-emphasis for FM mode only
+        let audio = if let Some(ref mut de_emph) = self.de_emphasis {
+            de_emph.process(&audio)
+        } else {
+            audio
+        };
+
+        // 6. DC removal
         self.dc_removal.process(&audio)
     }
 
@@ -282,6 +441,24 @@ impl AmDemodulator {
         self.fir_filter = FirFilter::low_pass(bw / 2.0, self.input_sample_rate, 101);
     }
 
+    /// Set the demodulation mode. Reconfigures de-emphasis and resets FM state.
+    pub fn set_mode(&mut self, mode: DemodMode) {
+        self.mode = mode;
+        self.de_emphasis = match mode {
+            DemodMode::FM => {
+                let output_sr = self.input_sample_rate / self.decimation_factor as f64;
+                Some(DeEmphasis::new(output_sr, 50e-6))
+            }
+            _ => None,
+        };
+        self.prev_sample = IqSample::new(0.0, 0.0);
+    }
+
+    /// Get the current demodulation mode.
+    pub fn mode(&self) -> DemodMode {
+        self.mode
+    }
+
     /// Get the current decimation factor.
     pub fn decimation_factor(&self) -> usize {
         self.decimation_factor
@@ -293,6 +470,9 @@ impl AmDemodulator {
     }
 }
 
+/// Type alias for backward compatibility.
+pub type AmDemodulator = Demodulator;
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -300,7 +480,7 @@ impl AmDemodulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::test_signal::{generate_am_signal, generate_tone};
+    use crate::audio::test_signal::{generate_am_signal, generate_fm_signal, generate_tone};
 
     // ========================================================================
     // 1. Frequency shift tests
@@ -691,7 +871,7 @@ mod tests {
         let channel_bw = 25_000.0;
         let audio_rate = 48_000.0;
 
-        let mut demod = AmDemodulator::new(
+        let mut demod = Demodulator::new_am(
             center_freq,
             cursor_freq,
             channel_bw,
@@ -711,7 +891,7 @@ mod tests {
         let sample_rate = 2.048e6;
         let audio_rate = 48_000.0;
 
-        let demod = AmDemodulator::new(100.0e6, 100.1e6, 25_000.0, sample_rate, audio_rate);
+        let demod = Demodulator::new_am(100.0e6, 100.1e6, 25_000.0, sample_rate, audio_rate);
 
         // Decimation factor should be ~42
         let factor = demod.decimation_factor();
@@ -733,7 +913,7 @@ mod tests {
     #[test]
     fn test_am_demod_pipeline_output_length() {
         let sample_rate = 2.048e6;
-        let mut demod = AmDemodulator::new(100.0e6, 100.1e6, 25_000.0, sample_rate, 48_000.0);
+        let mut demod = Demodulator::new_am(100.0e6, 100.1e6, 25_000.0, sample_rate, 48_000.0);
         let factor = demod.decimation_factor();
 
         let input_len = 4096;
@@ -759,7 +939,7 @@ mod tests {
         let channel_bw = 25_000.0;
         let audio_rate = 48_000.0;
 
-        let mut demod = AmDemodulator::new(
+        let mut demod = Demodulator::new_am(
             center_freq,
             cursor_freq,
             channel_bw,
@@ -836,7 +1016,7 @@ mod tests {
         let sample_rate = 2.048e6;
         let center_freq = 100.0e6;
 
-        let mut demod = AmDemodulator::new(
+        let mut demod = Demodulator::new_am(
             center_freq,
             100.1e6,
             25_000.0,
@@ -858,7 +1038,7 @@ mod tests {
         let sample_rate = 2.048e6;
         let center_freq = 100.0e6;
 
-        let mut demod = AmDemodulator::new(
+        let mut demod = Demodulator::new_am(
             center_freq,
             100.1e6,
             25_000.0,
@@ -881,7 +1061,7 @@ mod tests {
         let center_freq = 100.0e6;
         let cursor_freq = 100.5e6; // cursor at +500kHz
 
-        let mut demod = AmDemodulator::new(
+        let mut demod = Demodulator::new_am(
             center_freq,
             cursor_freq,
             25_000.0,
@@ -901,6 +1081,262 @@ mod tests {
             power < 0.01,
             "Audio should be near-silent when signal is outside channel, power = {:.6}",
             power
+        );
+    }
+
+    // ========================================================================
+    // 8. DemodMode tests
+    // ========================================================================
+
+    #[test]
+    fn test_demod_mode_default_channel_bw() {
+        assert!((DemodMode::AM.default_channel_bw() - 25_000.0).abs() < 0.1);
+        assert!((DemodMode::FM.default_channel_bw() - 200_000.0).abs() < 0.1);
+        assert!((DemodMode::NFM.default_channel_bw() - 25_000.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_demod_mode_labels() {
+        assert_eq!(DemodMode::AM.label(), "AM");
+        assert_eq!(DemodMode::FM.label(), "FM");
+        assert_eq!(DemodMode::NFM.label(), "NFM");
+    }
+
+    #[test]
+    fn test_demod_mode_cycle() {
+        assert_eq!(DemodMode::AM.next(), DemodMode::FM);
+        assert_eq!(DemodMode::FM.next(), DemodMode::NFM);
+        assert_eq!(DemodMode::NFM.next(), DemodMode::AM);
+    }
+
+    // ========================================================================
+    // 9. FM discriminator tests
+    // ========================================================================
+
+    #[test]
+    fn test_fm_demod_pure_carrier_near_zero() {
+        // Pure carrier (no modulation) at DC → output near 0
+        let samples: Vec<IqSample> = vec![IqSample::new(1.0, 0.0); 100];
+        let output = fm_demod(&samples);
+        assert_eq!(output.len(), 100);
+        for &s in &output[1..] {
+            assert!(s.abs() < 0.001, "Pure carrier should produce near-zero FM output, got {}", s);
+        }
+    }
+
+    #[test]
+    fn test_fm_demod_single_sample() {
+        let samples = vec![IqSample::new(1.0, 0.0)];
+        let output = fm_demod(&samples);
+        assert_eq!(output, vec![0.0]);
+    }
+
+    #[test]
+    fn test_fm_demod_empty() {
+        let samples: Vec<IqSample> = vec![];
+        let output = fm_demod(&samples);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_fm_demod_rotating_carrier() {
+        // A tone at a known frequency should produce a constant discriminator output
+        let sample_rate = 48_000.0;
+        let freq = 1000.0; // 1 kHz
+        let samples = generate_tone(freq, 1.0, sample_rate, 1000);
+        let output = fm_demod(&samples);
+        // Expected phase increment per sample: 2π * freq / sample_rate
+        let expected = 2.0 * std::f64::consts::PI * freq / sample_rate;
+        for &s in &output[1..] {
+            assert!(
+                (s - expected as f32).abs() < 0.01,
+                "Expected ~{:.4}, got {:.4}",
+                expected,
+                s
+            );
+        }
+    }
+
+    // ========================================================================
+    // 10. De-emphasis tests
+    // ========================================================================
+
+    #[test]
+    fn test_de_emphasis_dc_passthrough() {
+        // DC should pass through (attenuated by the filter gain at DC)
+        let mut de_emph = DeEmphasis::new(48_000.0, 50e-6);
+        let dc: Vec<f32> = vec![1.0; 10000];
+        let output = de_emph.process(&dc);
+        // After settling, output should converge to 1.0
+        let last = output.last().unwrap();
+        assert!(
+            (last - 1.0).abs() < 0.01,
+            "DC should pass through de-emphasis, got {}",
+            last
+        );
+    }
+
+    #[test]
+    fn test_de_emphasis_attenuates_high_freq() {
+        let sample_rate = 48_000.0;
+        let mut de_emph = DeEmphasis::new(sample_rate, 50e-6);
+        // Generate high-frequency signal (10 kHz)
+        let signal: Vec<f32> = (0..10000)
+            .map(|i| (2.0 * std::f64::consts::PI * 10_000.0 * i as f64 / sample_rate).sin() as f32)
+            .collect();
+        let output = de_emph.process(&signal);
+        // Measure output power in steady state
+        let input_power: f64 = signal[5000..].iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / 5000.0;
+        let output_power: f64 = output[5000..].iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / 5000.0;
+        let attenuation_db = 10.0 * (output_power / input_power).log10();
+        assert!(
+            attenuation_db < -5.0,
+            "High frequency should be attenuated, got {:.1} dB",
+            attenuation_db
+        );
+    }
+
+    #[test]
+    fn test_de_emphasis_coefficients() {
+        // alpha = exp(-1 / (sample_rate * tau))
+        let sr = 48_000.0;
+        let tau = 50e-6;
+        let expected_alpha = (-1.0_f64 / (sr * tau)).exp() as f32;
+        let de_emph = DeEmphasis::new(sr, tau);
+        assert!(
+            (de_emph.alpha() - expected_alpha).abs() < 1e-6,
+            "Alpha mismatch: expected {}, got {}",
+            expected_alpha,
+            de_emph.alpha()
+        );
+    }
+
+    // ========================================================================
+    // 11. FM pipeline tests
+    // ========================================================================
+
+    #[test]
+    fn test_fm_demod_pipeline_produces_output() {
+        let sample_rate = 2.048e6;
+        let center_freq = 100.0e6;
+        let cursor_freq = 100.1e6;
+        let channel_bw = 200_000.0;
+        let audio_rate = 48_000.0;
+
+        let mut demod = Demodulator::new(
+            center_freq,
+            cursor_freq,
+            channel_bw,
+            sample_rate,
+            audio_rate,
+            DemodMode::FM,
+        );
+
+        let samples = generate_fm_signal(
+            cursor_freq, 1000.0, 75_000.0, sample_rate, center_freq, 8192,
+        );
+        let audio = demod.process(&samples);
+        assert!(!audio.is_empty(), "FM pipeline should produce audio output");
+    }
+
+    #[test]
+    fn test_nfm_demod_pipeline_produces_output() {
+        let sample_rate = 2.048e6;
+        let center_freq = 100.0e6;
+        let cursor_freq = 100.1e6;
+        let channel_bw = 25_000.0;
+        let audio_rate = 48_000.0;
+
+        let mut demod = Demodulator::new(
+            center_freq,
+            cursor_freq,
+            channel_bw,
+            sample_rate,
+            audio_rate,
+            DemodMode::NFM,
+        );
+
+        let samples = generate_fm_signal(
+            cursor_freq, 1000.0, 5_000.0, sample_rate, center_freq, 8192,
+        );
+        let audio = demod.process(&samples);
+        assert!(!audio.is_empty(), "NFM pipeline should produce audio output");
+    }
+
+    #[test]
+    fn test_mode_switch_am_to_fm() {
+        let sample_rate = 2.048e6;
+        let center_freq = 100.0e6;
+        let cursor_freq = 100.1e6;
+        let audio_rate = 48_000.0;
+
+        let mut demod = Demodulator::new(
+            center_freq, cursor_freq, 25_000.0, sample_rate, audio_rate, DemodMode::AM,
+        );
+        assert_eq!(demod.mode(), DemodMode::AM);
+
+        // Process AM
+        let am_samples = generate_am_signal(cursor_freq, 1000.0, 0.8, sample_rate, center_freq, 4096);
+        let am_audio = demod.process(&am_samples);
+        assert!(!am_audio.is_empty());
+
+        // Switch to FM
+        demod.set_mode(DemodMode::FM);
+        assert_eq!(demod.mode(), DemodMode::FM);
+        demod.set_channel_bw(200_000.0);
+
+        let fm_samples = generate_fm_signal(cursor_freq, 1000.0, 75_000.0, sample_rate, center_freq, 4096);
+        let fm_audio = demod.process(&fm_samples);
+        assert!(!fm_audio.is_empty());
+    }
+
+    #[test]
+    fn test_fm_demod_detects_tone() {
+        // Generate FM signal with 1kHz tone, demodulate, verify tone is present
+        let sample_rate = 2.048e6;
+        let center_freq = 100.0e6;
+        let cursor_freq = 100.1e6;
+        let channel_bw = 25_000.0;
+        let audio_rate = 48_000.0;
+
+        let mut demod = Demodulator::new(
+            center_freq, cursor_freq, channel_bw, sample_rate, audio_rate, DemodMode::NFM,
+        );
+
+        // Generate 100ms of data with low deviation (NFM-like)
+        let num_samples = (sample_rate * 0.1) as usize;
+        let samples = generate_fm_signal(
+            cursor_freq, 1000.0, 5_000.0, sample_rate, center_freq, num_samples,
+        );
+        let audio = demod.process(&samples);
+
+        assert!(audio.len() > 200);
+
+        // Skip transient
+        let steady_audio = &audio[audio.len() / 2..];
+
+        // Verify AC content exists
+        let mean: f64 = steady_audio.iter().map(|&s| s as f64).sum::<f64>() / steady_audio.len() as f64;
+        let variance: f64 = steady_audio.iter().map(|&s| { let d = s as f64 - mean; d * d }).sum::<f64>() / steady_audio.len() as f64;
+        assert!(variance > 1e-6, "FM demod audio should have AC content (variance = {:.2e})", variance);
+
+        // Zero-crossing analysis
+        let actual_audio_rate = demod.actual_output_sample_rate();
+        let mut zero_crossings = 0;
+        for i in 1..steady_audio.len() {
+            let prev = steady_audio[i - 1] - mean as f32;
+            let curr = steady_audio[i] - mean as f32;
+            if (prev < 0.0 && curr >= 0.0) || (prev >= 0.0 && curr < 0.0) {
+                zero_crossings += 1;
+            }
+        }
+        let duration = steady_audio.len() as f64 / actual_audio_rate;
+        let expected_crossings = 2.0 * 1000.0 * duration;
+        let ratio = zero_crossings as f64 / expected_crossings;
+        assert!(
+            ratio > 0.5 && ratio < 2.0,
+            "FM zero crossings suggest wrong freq: {} crossings, expected ~{:.0} (ratio={:.2})",
+            zero_crossings, expected_crossings, ratio
         );
     }
 }

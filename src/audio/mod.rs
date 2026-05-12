@@ -238,40 +238,59 @@ pub fn audio_thread(
             }
         }
 
-        // Demodulate: collect outputs from all active demodulators
-        let mut outputs: Vec<Vec<f32>> = Vec::new();
+        // Demodulate: collect outputs from all active demodulators with their pre-AGC levels
+        let mut outputs: Vec<(Vec<f32>, f32)> = Vec::new(); // (audio, pre_agc_rms)
 
         // Cursor demodulator (id=0) — only if not muted
         if !muted {
-            outputs.push(cursor_demod.process(&iq_block));
+            let audio = cursor_demod.process(&iq_block);
+            let rms = cursor_demod.pre_agc_rms();
+            outputs.push((audio, rms));
         }
 
         // VFO demodulators
         for demod in vfo_demods.values_mut() {
-            outputs.push(demod.process(&iq_block));
+            let audio = demod.process(&iq_block);
+            let rms = demod.pre_agc_rms();
+            outputs.push((audio, rms));
         }
 
         let num_active = outputs.len();
 
-        // Mix outputs
+        // Mix outputs using power-weighted mixing.
+        // VFOs with stronger pre-AGC signals get more weight in the mix.
+        // This prevents noise-only VFOs from drowning out real signals.
         let audio = if num_active == 0 {
-            // No active demodulators → silence
-            // Estimate output length from cursor demod
             let silent = cursor_demod.process(&iq_block);
             vec![0.0f32; silent.len()]
         } else if num_active == 1 {
-            outputs.into_iter().next().unwrap()
+            outputs.into_iter().next().unwrap().0
         } else {
-            let max_len = outputs.iter().map(|o| o.len()).max().unwrap_or(0);
+            let max_len = outputs.iter().map(|o| o.0.len()).max().unwrap_or(0);
             let mut mixed = vec![0.0f32; max_len];
-            for output in &outputs {
-                for (i, &s) in output.iter().enumerate() {
-                    mixed[i] += s;
+
+            // Compute weights from pre-AGC RMS levels
+            let total_rms: f32 = outputs.iter().map(|o| o.1).sum();
+
+            if total_rms > 1e-10 {
+                // Power-weighted mix: each VFO contributes proportionally to its signal strength
+                for (output, rms) in &outputs {
+                    let weight = rms / total_rms;
+                    for (i, &s) in output.iter().enumerate() {
+                        mixed[i] += s * weight;
+                    }
                 }
-            }
-            let divisor = num_active as f32;
-            for s in &mut mixed {
-                *s /= divisor;
+            } else {
+                // All VFOs are essentially silent — simple average
+                for (output, _) in &outputs {
+                    for (i, &s) in output.iter().enumerate() {
+                        mixed[i] += s;
+                    }
+                }
+                let divisor = num_active as f32;
+                for s in &mut mixed {
+                    *s /= divisor;
+                }
             }
             mixed
         };

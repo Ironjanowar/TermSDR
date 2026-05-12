@@ -380,8 +380,8 @@ impl Agc {
             // Compute desired gain
             let desired_gain = self.target_level / rms;
 
-            // Clamp gain to [1.0, max_gain_linear]
-            self.current_gain = desired_gain.clamp(1.0, self.max_gain_linear);
+            // Clamp gain — allow attenuation down to -20dB (0.1) for loud signals
+            self.current_gain = desired_gain.clamp(0.1, self.max_gain_linear);
 
             output.push(s * self.current_gain);
         }
@@ -443,6 +443,8 @@ pub struct Demodulator {
     agc: Agc,
     audio_bandpass: AudioBandpass,
     prev_sample: IqSample,
+    /// Pre-AGC RMS level of the most recent block (used for power-weighted mixing)
+    pre_agc_rms: f32,
 }
 
 impl Demodulator {
@@ -493,6 +495,7 @@ impl Demodulator {
             agc: Agc::new(actual_output_sr, 10.0, 300.0, 0.3, 50.0),
             audio_bandpass: AudioBandpass::new(300.0, 3400.0, actual_output_sr, 101),
             prev_sample: IqSample::new(0.0, 0.0),
+            pre_agc_rms: 0.0,
         }
     }
 
@@ -547,6 +550,14 @@ impl Demodulator {
 
         // 6. Audio bandpass filter (voice frequencies)
         let audio = self.audio_bandpass.process(&audio);
+
+        // 6.5 Measure pre-AGC RMS for power-weighted mixing
+        if !audio.is_empty() {
+            let sum_sq: f64 = audio.iter().map(|&s| (s as f64) * (s as f64)).sum();
+            self.pre_agc_rms = (sum_sq / audio.len() as f64).sqrt() as f32;
+        } else {
+            self.pre_agc_rms = 0.0;
+        }
 
         // 7. AGC
         let audio = self.agc.process(&audio);
@@ -634,6 +645,12 @@ impl Demodulator {
 
     pub fn set_bandpass_high_cut(&mut self, hz: f64) {
         self.audio_bandpass.set_high_cut(hz);
+    }
+
+    /// Get the pre-AGC RMS level from the most recent process() call.
+    /// Used for power-weighted mixing of multiple VFOs.
+    pub fn pre_agc_rms(&self) -> f32 {
+        self.pre_agc_rms
     }
 }
 

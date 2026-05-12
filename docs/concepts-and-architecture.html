@@ -521,9 +521,10 @@
             <li><a href="#iq">Muestras IQ: la materia prima</a></li>
             <li><a href="#fft">FFT: del tiempo a la frecuencia</a></li>
             <li><a href="#spectrum">Espectro y Waterfall</a></li>
-            <li><a href="#demod">Demodulación (v0.2)</a></li>
+            <li><a href="#demod">Demodulación</a></li>
+            <li><a href="#vfos">Múltiples VFOs</a></li>
             <li><a href="#architecture">Arquitectura de TermSDR</a></li>
-            <li><a href="#pipeline">Pipeline de 3 hilos</a></li>
+            <li><a href="#pipeline">Pipeline de 4 hilos</a></li>
             <li><a href="#structure">Estructura del proyecto</a></li>
             <li><a href="#controls">Controles</a></li>
             <li><a href="#command-palette">Command Palette</a></li>
@@ -792,7 +793,7 @@ DOMINIO DEL TIEMPO                    DOMINIO DE LA FRECUENCIA
 
     <!-- 6. Demodulation -->
     <section id="demod">
-        <h2><span class="emoji">🔊</span> Demodulación (v0.2)</h2>
+        <h2><span class="emoji">🔊</span> Demodulación</h2>
 
         <div class="concept-card">
             <h3>🎵 ¿Qué es demodular?</h3>
@@ -802,29 +803,94 @@ DOMINIO DEL TIEMPO                    DOMINIO DE LA FRECUENCIA
             </p>
 
             <table>
-                <tr><th>Modulación</th><th>Uso típico</th><th>Cómo funciona</th></tr>
-                <tr>
-                    <td><strong>FM</strong> (Frequency Modulation)</td>
-                    <td>Radio comercial, walkie-talkies</td>
-                    <td>La información varía la <em>frecuencia</em> de la portadora</td>
-                </tr>
+                <tr><th>Modulación</th><th>Uso típico</th><th>Cómo funciona</th><th>Estado</th></tr>
                 <tr>
                     <td><strong>AM</strong> (Amplitude Modulation)</td>
                     <td>Aviación, radio AM, onda corta</td>
                     <td>La información varía la <em>amplitud</em> de la portadora</td>
+                    <td><span class="badge badge-v01">✅ Implementado</span></td>
+                </tr>
+                <tr>
+                    <td><strong>FM</strong> (Frequency Modulation)</td>
+                    <td>Radio comercial, walkie-talkies</td>
+                    <td>La información varía la <em>frecuencia</em> de la portadora</td>
+                    <td><span class="badge badge-future">Futuro</span></td>
                 </tr>
                 <tr>
                     <td><strong>SSB</strong> (Single Side Band)</td>
                     <td>Radioaficionados, marítimo</td>
                     <td>AM optimizado, usa solo media banda</td>
+                    <td><span class="badge badge-future">Futuro</span></td>
                 </tr>
             </table>
 
             <div class="analogy">
-                💡 <strong>Para TermSDR v0.2:</strong> Lo primero será AM (para aviación, tu caso de uso principal)
-                y FM (para radio comercial). AM es matemáticamente más simple: la amplitud de la señal IQ
-                <em>es</em> el audio. FM requiere calcular la derivada de la fase.
+                💡 <strong>AM en TermSDR:</strong> El cursor funciona como tu sintonizador. Mueve el cursor
+                a una señal y escucharás el audio demodulado en AM. La amplitud de la señal IQ <em>es</em>
+                directamente el audio. Para más detalles, consulta <a href="audio-demodulation-concepts.html" style="color: var(--accent);">Audio Demodulation Concepts</a>.
             </div>
+        </div>
+
+        <div class="concept-card">
+            <h3>🔈 Controles de audio</h3>
+            <ul style="margin: 0.5rem 0 0 1.5rem;">
+                <li><strong>Volumen:</strong> <kbd>v</kbd>/<kbd>V</kbd> sube/baja en pasos de 5 (rango 0–100), o <code>/volume 80</code></li>
+                <li><strong>Squelch:</strong> <code>/squelch -60</code> para activar umbral, <code>/squelch</code> para desactivar</li>
+                <li><strong>Mute:</strong> <kbd>Space</kbd> desactiva el cursor y silencia el audio del cursor principal</li>
+                <li><strong>VFOs:</strong> Los VFOs pinneados se demodemulan simultáneamente y se mezclan en mono</li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- 6b. Multiple VFOs -->
+    <section id="vfos">
+        <h2><span class="emoji">📍</span> Múltiples VFOs</h2>
+
+        <div class="concept-card">
+            <h3>🎛️ Variable Frequency Oscillators</h3>
+            <p>
+                Un VFO (Variable Frequency Oscillator) es un punto de escucha pinneado a una frecuencia específica.
+                TermSDR soporta hasta <strong>8 VFOs simultáneos</strong>, cada uno con su propia frecuencia,
+                ancho de banda de canal y color.
+            </p>
+
+            <div class="diagram">
+<pre>
+  Espectro con 3 VFOs:
+
+  dB ↑
+     │     <span style="color:#ff6b6b">┃</span>          <span style="color:#50fa7b">┃</span>     <span style="color:#8be9fd">┃</span>
+     │   <span style="color:#ff6b6b">┃ ┃</span>       <span style="color:#50fa7b">┃ ┃</span>   <span style="color:#8be9fd">┃ ┃</span>
+     │ <span style="color:#ff6b6b">VFO1</span>      <span style="color:#50fa7b">VFO2</span>  <span style="color:#8be9fd">VFO3</span>
+     └──────────────────────── → freq
+
+  Cada VFO: línea vertical coloreada + marcadores de ancho de canal
+  Visibles tanto en espectro como en waterfall
+</pre>
+            </div>
+        </div>
+
+        <div class="concept-card">
+            <h3>📋 Workflow</h3>
+            <ol style="margin: 0.5rem 0 0 1.5rem;">
+                <li>Sintoniza el cursor a una frecuencia de interés</li>
+                <li>Pulsa <kbd>m</kbd> para <strong>pinear un VFO</strong> — captura la frecuencia y ancho de canal actuales</li>
+                <li>Cada VFO recibe un <strong>color único</strong> (Rojo, Verde, Azul, Magenta, Cyan…) y un <strong>número ID</strong> (1–8)</li>
+                <li>Los VFOs se muestran como líneas verticales coloreadas en espectro y waterfall</li>
+                <li>Todos los VFOs se <strong>demodemulan simultáneamente</strong> y se mezclan en salida mono</li>
+                <li>Pulsa <kbd>x</kbd> para abrir el modal de borrado, luego el número del VFO</li>
+            </ol>
+        </div>
+
+        <div class="concept-card">
+            <h3>🎮 Gestión de VFOs</h3>
+            <table>
+                <tr><th>Acción</th><th>Atajo</th><th>Comando</th></tr>
+                <tr><td>Pinear VFO en cursor</td><td><kbd>m</kbd></td><td><code>/vfo-add 118.1M</code></td></tr>
+                <tr><td>Eliminar un VFO</td><td><kbd>x</kbd> + número</td><td><code>/vfo-remove 3</code></td></tr>
+                <tr><td>Eliminar todos</td><td>—</td><td><code>/vfo-clear</code></td></tr>
+            </table>
+            <p style="margin-top: 1rem;">Máximo 8 VFOs. Los colores se asignan en orden: Rojo → Verde → Azul → Magenta → Cyan → LightRed → Blanco → LightMagenta.</p>
         </div>
     </section>
 
@@ -837,14 +903,14 @@ DOMINIO DEL TIEMPO                    DOMINIO DE LA FRECUENCIA
             <ul style="margin: 0.5rem 0 0 1.5rem;">
                 <li><strong>Desacoplamiento:</strong> Cada fase del pipeline es independiente</li>
                 <li><strong>Sin pérdida:</strong> Si el rendering va lento, se descartan frames viejos, no se para la captura</li>
-                <li><strong>Extensible:</strong> Añadir demoduladores en v0.2 no requiere cambiar la captura ni el FFT</li>
+                <li><strong>Extensible:</strong> Añadir demoduladores no requiere cambiar la captura ni el FFT</li>
                 <li><strong>Fuentes intercambiables:</strong> RTL-SDR, archivo IQ, o señal de test usan la misma interfaz</li>
             </ul>
         </div>
 
         <div class="diagram">
 <pre>
-                        TermSDR v0.1 Architecture
+                        TermSDR Architecture (4-thread)
   ═══════════════════════════════════════════════════════════
 
   ┌─────────────────────┐
@@ -866,24 +932,27 @@ DOMINIO DEL TIEMPO                    DOMINIO DE LA FRECUENCIA
   └──────────┬──────────┘
              │ Vec&lt;f32&gt; (magnitudes en dB)
              │ via crossbeam channel
-             ▼
-  ┌─────────────────────┐
-  │   TUI RENDERER       │
-  │   ─────────────────  │   • Spectrum widget (ratatui)
-  │   fn draw_spectrum() │   • Waterfall widget (ratatui)
-  │   fn draw_waterfall()│   • Status bar
-  │   fn handle_input()  │   • Keyboard handler
-  └─────────────────────┘
+             ├──────────────────────┐
+             ▼                      ▼
+  ┌─────────────────────┐ ┌─────────────────────┐
+  │   AUDIO DEMOD        │ │   TUI RENDERER       │
+  │   ─────────────────  │ │   ─────────────────  │
+  │   • AM demodulation  │ │   • Spectrum widget   │
+  │   • Channel extract  │ │   • Waterfall widget  │
+  │   • Per-VFO demod    │ │   • VFO visualization │
+  │   • Mono mix         │ │   • Status bar        │
+  │   • Volume/Squelch   │ │   • Keyboard handler  │
+  │   • cpal output      │ │                       │
+  └─────────────────────┘ └─────────────────────┘
 
   ═══════════════════════════════════════════════════════════
-  v0.2: Fan-out del canal de captura → N demoduladores
 </pre>
         </div>
     </section>
 
     <!-- 8. Pipeline -->
     <section id="pipeline">
-        <h2><span class="emoji">⚡</span> Pipeline de 3 hilos</h2>
+        <h2><span class="emoji">⚡</span> Pipeline de 4 hilos</h2>
 
         <div class="pipeline">
             <div class="pipeline-stage">
@@ -900,8 +969,14 @@ DOMINIO DEL TIEMPO                    DOMINIO DE LA FRECUENCIA
             </div>
             <div class="pipeline-stage">
                 <div class="stage-num">3</div>
+                <h4>Audio</h4>
+                <p>Demodulación AM, extracción por canal, mezcla de VFOs a mono, volumen/squelch, salida vía cpal.</p>
+                <p style="margin-top: 0.5rem;"><strong>48 kHz output</strong></p>
+            </div>
+            <div class="pipeline-stage">
+                <div class="stage-num">4</div>
                 <h4>TUI</h4>
-                <p>Renderiza espectro + waterfall, procesa input de teclado. Descarta frames si no puede seguir el ritmo.</p>
+                <p>Renderiza espectro + waterfall + VFOs, procesa input de teclado. Descarta frames si no puede seguir el ritmo.</p>
                 <p style="margin-top: 0.5rem;"><strong>~60 FPS</strong></p>
             </div>
         </div>
@@ -911,7 +986,8 @@ DOMINIO DEL TIEMPO                    DOMINIO DE LA FRECUENCIA
             <p>Usamos <code>crossbeam::channel</code> (bounded) entre cada etapa:</p>
             <div class="diagram">
 <pre>
-Thread 1 ──► [buffer: 4 bloques] ──► Thread 2 ──► [buffer: 2 frames] ──► Thread 3
+Thread 1 ──► [buffer: 4 bloques] ──► Thread 2 ──┬► [buffer: 2 frames] ──► Thread 4 (TUI)
+                                                └► Thread 3 (Audio)
 
 Si el buffer se llena:
   • Captura → DSP: descarta el bloque más viejo (try_send)
@@ -938,17 +1014,22 @@ Resultado: nunca se bloquea la captura, la pantalla muestra
             &nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">main.rs</span> <span class="comment"># CLI args (clap), arranque, spawn threads</span><br>
             &nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">types.rs</span> <span class="comment"># tipos compartidos: IqSample, FftResult, Config</span><br>
             &nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">config.rs</span> <span class="comment"># parseo CLI + JSON config</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;├── <span class="dir">audio/</span> <span class="comment"># Hilo 3: demodulación y audio</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;│   ├── <span class="file">mod.rs</span> <span class="comment"># control de audio, gestión VFOs, pipeline</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;│   ├── <span class="file">demod.rs</span> <span class="comment"># demodulación AM</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;│   ├── <span class="file">cpal_sink.rs</span> <span class="comment"># salida de audio vía cpal</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;│   └── <span class="file">test_signal.rs</span> <span class="comment"># utilidades de test de audio</span><br>
             &nbsp;&nbsp;&nbsp;&nbsp;├── <span class="dir">capture/</span> <span class="comment"># Hilo 1: fuentes de señal</span><br>
             &nbsp;&nbsp;&nbsp;&nbsp;│   ├── <span class="file">mod.rs</span> <span class="comment"># trait Source + dispatch</span><br>
-            &nbsp;&nbsp;&nbsp;&nbsp;│   ├── <span class="file">rtlsdr.rs</span> <span class="comment"># RTL-SDR via librtlsdr</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;│   ├── <span class="file">rtlsdr.rs</span> <span class="comment"># RTL-SDR via librtlsdr (feature-gated)</span><br>
             &nbsp;&nbsp;&nbsp;&nbsp;│   ├── <span class="file">file.rs</span> <span class="comment"># replay de archivos .iq/.bin</span><br>
             &nbsp;&nbsp;&nbsp;&nbsp;│   └── <span class="file">test_signal.rs</span> <span class="comment"># señal sintética para dev</span><br>
             &nbsp;&nbsp;&nbsp;&nbsp;├── <span class="dir">dsp/</span> <span class="comment"># Hilo 2: procesamiento de señal</span><br>
             &nbsp;&nbsp;&nbsp;&nbsp;│   ├── <span class="file">mod.rs</span> <span class="comment"># pipeline DSP</span><br>
             &nbsp;&nbsp;&nbsp;&nbsp;│   └── <span class="file">fft.rs</span> <span class="comment"># FFT + windowing + dB conversion</span><br>
-            &nbsp;&nbsp;&nbsp;&nbsp;└── <span class="dir">ui/</span> <span class="comment"># Hilo 3: interfaz terminal</span><br>
-            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">mod.rs</span> <span class="comment"># App state + event loop</span><br>
-            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">command_palette.rs</span> <span class="comment"># command palette: registro, estado, ejecución</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;└── <span class="dir">ui/</span> <span class="comment"># Hilo 4: interfaz terminal</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">mod.rs</span> <span class="comment"># App state, event loop, VFO management</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">command_palette.rs</span> <span class="comment"># command palette: 22 comandos</span><br>
             &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">spectrum.rs</span> <span class="comment"># widget de espectro</span><br>
             &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">waterfall.rs</span> <span class="comment"># widget de waterfall</span><br>
             &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">colors.rs</span> <span class="comment"># utilidades de color</span><br>
@@ -960,7 +1041,8 @@ Resultado: nunca se bloquea la captura, la pantalla muestra
     <section id="controls">
         <h2><span class="emoji">⌨️</span> Controles</h2>
 
-        <div class="concept-card" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+        <div class="concept-card">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
             <div>
                 <h3 style="margin-top: 0;">Navegación</h3>
                 <div class="keybind"><kbd>←</kbd> / <kbd>→</kbd> <span>Mover cursor / Sintonización fina (±25 kHz)</span></div><br>
@@ -974,10 +1056,23 @@ Resultado: nunca se bloquea la captura, la pantalla muestra
                 <div class="keybind"><kbd>↑</kbd> / <kbd>↓</kbd> <span>Ajustar ganancia RF</span></div><br>
                 <div class="keybind"><kbd>b</kbd> <span>Configurar ancho de banda (modal)</span></div><br>
                 <div class="keybind"><kbd>w</kbd> / <kbd>W</kbd> <span>Ampliar / reducir ancho de canal (×2 / ÷2)</span></div><br>
-                <div class="keybind"><kbd>Space</kbd> <span>Toggle cursor activo/inactivo</span></div><br>
+                <div class="keybind"><kbd>Space</kbd> <span>Toggle cursor activo/inactivo + mute</span></div><br>
                 <div class="keybind"><kbd>/</kbd> <span>Abrir <strong>command palette</strong></span></div><br>
                 <div class="keybind"><kbd>?</kbd> <span>Mostrar ayuda</span></div><br>
                 <div class="keybind"><kbd>q</kbd> / <kbd>Esc</kbd> <span>Salir</span></div>
+            </div>
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1rem;">
+            <div>
+                <h3 style="margin-top: 0;">Audio & VFOs</h3>
+                <div class="keybind"><kbd>v</kbd> / <kbd>V</kbd> <span>Volumen arriba/abajo (±5)</span></div><br>
+                <div class="keybind"><kbd>m</kbd> <span>Pinear VFO en posición del cursor</span></div><br>
+                <div class="keybind"><kbd>x</kbd> <span>Abrir modal de borrado de VFO</span></div>
+            </div>
+            <div>
+                <h3 style="margin-top: 0;">Waterfall</h3>
+                <div class="keybind"><kbd>t</kbd> / <kbd>T</kbd> <span>Aumentar / reducir tiempo waterfall (±5s, rango 5–120s)</span></div>
+            </div>
             </div>
         </div>
     </section>
@@ -1072,6 +1167,48 @@ Resultado: nunca se bloquea la captura, la pantalla muestra
                         <td style="padding: 0.4rem 0.5rem;">—</td>
                         <td style="padding: 0.4rem 0.5rem;"><kbd>PgUp</kbd> / <kbd>PgDn</kbd></td>
                     </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 0.4rem 0.5rem;"><code>output</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Seleccionar dispositivo de audio</td>
+                        <td style="padding: 0.4rem 0.5rem;">—</td>
+                        <td style="padding: 0.4rem 0.5rem;">—</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 0.4rem 0.5rem;"><code>squelch</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Establecer umbral de squelch (dB)</td>
+                        <td style="padding: 0.4rem 0.5rem;"><code>&lt;dB&gt;</code> (opcional; sin valor = desactivar)</td>
+                        <td style="padding: 0.4rem 0.5rem;">—</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 0.4rem 0.5rem;"><code>vfo-add</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Añadir VFO en frecuencia</td>
+                        <td style="padding: 0.4rem 0.5rem;"><code>&lt;freq&gt;</code> (obligatorio)</td>
+                        <td style="padding: 0.4rem 0.5rem;"><kbd>m</kbd></td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 0.4rem 0.5rem;"><code>vfo-clear</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Eliminar todos los VFOs</td>
+                        <td style="padding: 0.4rem 0.5rem;">—</td>
+                        <td style="padding: 0.4rem 0.5rem;">—</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 0.4rem 0.5rem;"><code>vfo-remove</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Eliminar VFO por ID</td>
+                        <td style="padding: 0.4rem 0.5rem;"><code>&lt;id&gt;</code> (obligatorio)</td>
+                        <td style="padding: 0.4rem 0.5rem;"><kbd>x</kbd></td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 0.4rem 0.5rem;"><code>volume</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Establecer volumen (0–100)</td>
+                        <td style="padding: 0.4rem 0.5rem;"><code>&lt;valor&gt;</code> (obligatorio)</td>
+                        <td style="padding: 0.4rem 0.5rem;"><kbd>v</kbd>/<kbd>V</kbd></td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 0.4rem 0.5rem;"><code>waterfall</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Establecer tiempo waterfall (segundos)</td>
+                        <td style="padding: 0.4rem 0.5rem;"><code>&lt;segundos&gt;</code> (obligatorio, 5–120)</td>
+                        <td style="padding: 0.4rem 0.5rem;"><kbd>t</kbd>/<kbd>T</kbd></td>
+                    </tr>
                     <tr>
                         <td style="padding: 0.4rem 0.5rem;"><code>zoom-in</code> / <code>zoom-out</code></td>
                         <td style="padding: 0.4rem 0.5rem;">Zoom ancho de banda</td>
@@ -1088,7 +1225,14 @@ Resultado: nunca se bloquea la captura, la pantalla muestra
             <div class="highlight-box">
                 <code>/frequency 118.1M</code> → Salta a 118.1 MHz<br>
                 <code>/channelbw 50k</code> → Establece ancho de canal a 50 kHz<br>
-                <code>/bandwidth 500k</code> → Establece sample rate a 500 kHz
+                <code>/bandwidth 500k</code> → Establece sample rate a 500 kHz<br>
+                <code>/volume 80</code> → Establece volumen al 80%<br>
+                <code>/squelch -60</code> → Establece umbral de squelch a -60 dB<br>
+                <code>/squelch</code> → Desactiva squelch<br>
+                <code>/waterfall 60</code> → Muestra 60 segundos de historial<br>
+                <code>/vfo-add 118.1M</code> → Pinea un VFO a 118.1 MHz<br>
+                <code>/vfo-remove 3</code> → Elimina VFO #3<br>
+                <code>/vfo-clear</code> → Elimina todos los VFOs
             </div>
             <p style="margin-top: 0.5rem;">Sufijos soportados: <code>M</code> (MHz), <code>k</code> (kHz), <code>G</code> (GHz), o Hz sin sufijo.</p>
         </div>
@@ -1123,7 +1267,11 @@ Resultado: nunca se bloquea la captura, la pantalla muestra
             </div>
             <div class="crate-item">
                 <code>rtlsdr</code>
-                <div class="desc">Bindings Rust para librtlsdr. Control del dongle USB.</div>
+                <div class="desc">Bindings Rust para librtlsdr. Control del dongle USB. (optional, feature-gated)</div>
+            </div>
+            <div class="crate-item">
+                <code>cpal</code>
+                <div class="desc">Cross-platform audio I/O. Salida de audio demodulado.</div>
             </div>
             <div class="crate-item">
                 <code>num-complex</code>

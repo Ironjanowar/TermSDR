@@ -4,9 +4,9 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-199%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-304%20passing-brightgreen)](#testing)
 
-A terminal-based Software Defined Radio application built with Rust and [ratatui](https://github.com/ratatui/ratatui). Real-time spectrum analysis and waterfall display right in your terminal.
+A terminal-based Software Defined Radio application built with Rust and [ratatui](https://github.com/ratatui/ratatui). Real-time spectrum analysis, waterfall display, and AM audio demodulation right in your terminal.
 
 <!-- TODO: Add screenshot/GIF -->
 
@@ -15,24 +15,39 @@ A terminal-based Software Defined Radio application built with Rust and [ratatui
 ## ✨ Features
 
 - **Real-time spectrum + waterfall display** — dual-pane visualization with auto-scaling dB range
+- **AM audio demodulation** — tune the cursor to a signal and hear it live; the cursor acts as your tuner
+- **RTL-SDR hardware support** — use a real RTL-SDR dongle (compile with `--features rtlsdr`)
+- **Multiple VFOs** — pin up to 8 independent Variable Frequency Oscillators, each with its own frequency, channel bandwidth, and color; all VFOs are mixed to mono output simultaneously
 - **Command palette** (`/`) — VSCode-style command palette with autocompletion, parameterized commands, and error handling
 - **Cursor system** — frequency cursor with active/inactive states, dB readout at cursor position
 - **Channel bandwidth visualization** — dashed lines showing channel boundaries around cursor
+- **Volume & squelch controls** — adjust volume with `v`/`V`, set squelch threshold via command palette
+- **Configurable waterfall time span** — adjust how many seconds of history the waterfall shows (`t`/`T`, 5–120 s)
 - **Synthetic test signals** — develop and test without hardware using built-in signal generator
-- **3-thread pipeline architecture** — Capture → DSP/FFT → TUI for smooth, non-blocking operation
-- **Source abstraction** — TestSource, File replay, and RTL-SDR (hardware support in progress)
+- **4-thread pipeline architecture** — Capture → DSP/FFT → Audio demod → TUI for smooth, non-blocking operation
+- **Source abstraction** — TestSource, File replay, and RTL-SDR hardware
+- **Source selection screen** — interactive startup screen to pick your signal source (auto-detects RTL-SDR devices)
 - **Frequency suffixes** — use `100M`, `118.1M`, `433.92k`, `1.42G` anywhere frequencies are expected
 
 ## 📦 Installation
 
-### From Source
+### Prerequisites
 
-Requires [Rust toolchain](https://rustup.rs/) (1.70+):
+- [Rust toolchain](https://rustup.rs/) (1.70+)
+- ALSA development libraries (Linux): `libasound2-dev` or equivalent
+- **For RTL-SDR hardware support:** `librtlsdr-dev` (e.g. `sudo apt install librtlsdr-dev`)
+
+### From Source
 
 ```bash
 git clone https://github.com/Ironjanowar/TermSDR.git
 cd TermSDR
+
+# Without RTL-SDR hardware (test signals & file replay only)
 cargo build --release
+
+# With RTL-SDR hardware support
+cargo build --release --features rtlsdr
 ```
 
 The binary will be at `target/release/termsdr`.
@@ -58,6 +73,9 @@ cargo run -- --test --gain 30
 
 # Replay from IQ file
 cargo run -- --file recording.iq -f 100M
+
+# With RTL-SDR hardware (requires --features rtlsdr)
+cargo run --features rtlsdr
 
 # Full example
 cargo run -- --test -f 433.92M -s 1M --gain 20 --fft-size 4096
@@ -86,6 +104,7 @@ cargo run -- --test -f 433.92M -s 1M --gain 20 --fft-size 4096
 | `PgUp` / `PgDn` | Coarse tune ±1 MHz |
 | `f` | Enter frequency input mode |
 | `+` / `-` | Zoom in / out (adjust bandwidth) |
+| `c` | Center cursor on screen |
 
 ### Control
 
@@ -94,8 +113,26 @@ cargo run -- --test -f 433.92M -s 1M --gain 20 --fft-size 4096
 | `↑` / `↓` | Increase / decrease RF gain |
 | `b` | Enter bandwidth input mode |
 | `w` / `W` | Widen / narrow channel bandwidth (×2 / ÷2) |
-| `c` | Center cursor on screen |
-| `Space` | Toggle cursor active / inactive |
+| `Space` | Toggle cursor active / inactive (also mutes/unmutes audio) |
+
+### Audio & VFOs
+
+| Key | Action |
+|-----|--------|
+| `v` / `V` | Volume up / down (+5 / -5, range 0–100) |
+| `m` | Pin a VFO at current cursor position (max 8) |
+| `x` | Open VFO delete modal (press VFO number to remove) |
+
+### Waterfall
+
+| Key | Action |
+|-----|--------|
+| `t` / `T` | Increase / decrease waterfall time span by 5 s (range 5–120 s) |
+
+### General
+
+| Key | Action |
+|-----|--------|
 | `/` | **Open command palette** |
 | `?` | Show help overlay |
 | `q` / `Esc` | Quit |
@@ -114,7 +151,7 @@ Press `/` to open the command palette — a powerful way to execute any action w
 5. Press `Enter` to execute
 6. Press `Esc` to close
 
-### Commands
+### Commands (22 total)
 
 | Command | Description | Parameter | Hotkey |
 |---------|-------------|-----------|--------|
@@ -125,12 +162,19 @@ Press `/` to open the command palette — a powerful way to execute any action w
 | `gain+` | Increase gain by 1 dB | — | `↑` |
 | `gain-` | Decrease gain by 1 dB | — | `↓` |
 | `help` | Show keyboard shortcuts | — | `?` |
+| `output` | Select audio output device | — | — |
 | `quit` | Quit application | — | `q` |
+| `squelch` | Set squelch threshold (dB) | `<dB>` (optional; omit to disable) | — |
 | `toggle-cursor` | Toggle cursor on/off | — | `Space` |
 | `tune+` | Tune up 25 kHz | — | `←` |
 | `tune-` | Tune down 25 kHz | — | `→` |
 | `tune-coarse+` | Tune up 1 MHz | — | `PgUp` |
 | `tune-coarse-` | Tune down 1 MHz | — | `PgDn` |
+| `vfo-add` | Add VFO at frequency | `<freq>` (required, e.g. `118.1M`) | `m` |
+| `vfo-clear` | Remove all VFOs | — | — |
+| `vfo-remove` | Remove VFO by ID | `<id>` (required) | `x` |
+| `volume` | Set volume (0–100) | `<value>` (required) | `v`/`V` |
+| `waterfall` | Set waterfall time span | `<seconds>` (required, 5–120) | `t`/`T` |
 | `zoom-in` | Zoom in (decrease bandwidth) | — | `+` |
 | `zoom-out` | Zoom out (increase bandwidth) | — | `-` |
 
@@ -142,31 +186,59 @@ Commands that accept parameters let you set exact values:
 /frequency 118.1M     → Jump to 118.1 MHz
 /channelbw 50k        → Set channel bandwidth to 50 kHz
 /bandwidth 500k       → Set sample rate to 500 kHz
+/volume 80            → Set volume to 80%
+/squelch -60          → Set squelch threshold to -60 dB
+/squelch              → Disable squelch
+/waterfall 60         → Set waterfall to show 60 seconds of history
+/vfo-add 118.1M       → Pin a VFO at 118.1 MHz
+/vfo-remove 3         → Remove VFO #3
+/vfo-clear            → Remove all VFOs
 ```
 
 Frequency suffixes supported: `M` (MHz), `k` (kHz), `G` (GHz), or raw Hz.
 
 ### Error Handling
 
-- Commands that **require** a parameter (`frequency`, `bandwidth`) will show an error if invoked without one
+- Commands that **require** a parameter (`frequency`, `bandwidth`, `volume`, etc.) will show an error if invoked without one
 - Invalid parameter values (e.g. `frequency abc`) show a descriptive error message
 - Errors are displayed in the palette — the palette stays open so you can correct and retry
 - Errors clear automatically when you type or delete
 
+## 📡 Multiple VFOs
+
+TermSDR supports up to **8 simultaneous VFOs** (Variable Frequency Oscillators), letting you monitor multiple frequencies at once within your visible bandwidth.
+
+### Workflow
+
+1. **Tune** the cursor to a frequency of interest
+2. Press `m` to **pin a VFO** at the cursor position — it captures the current frequency and channel bandwidth
+3. Each VFO gets a unique **color** (Red, Green, Blue, Magenta, Cyan, etc.) and **ID number** (1–8)
+4. VFOs appear as colored vertical lines with bandwidth markers on both the **spectrum** and **waterfall** displays
+5. All pinned VFOs are **demodulated simultaneously** and mixed to mono audio output
+6. Press `x` to open the **delete modal**, then press the VFO's number to remove it
+
+### VFO Management
+
+- **Pin:** `m` (at cursor position) or `/vfo-add 118.1M` (at specific frequency)
+- **Delete one:** `x` → press number, or `/vfo-remove 3`
+- **Delete all:** `/vfo-clear`
+- **Max 8** VFOs at a time; color wraps if you somehow exceed the palette
+
 ## 🏗️ Architecture
 
-TermSDR uses a **3-thread pipeline** for smooth real-time operation:
+TermSDR uses a **4-thread pipeline** for smooth real-time operation:
 
 ```
-┌─────────────┐      ┌─────────────┐      ┌─────────────┐
-│   Capture   │ IQ → │   DSP/FFT   │ dB → │     TUI     │
-│  (Thread 1) │      │  (Thread 2) │      │  (Thread 3) │
-└─────────────┘      └─────────────┘      └─────────────┘
+┌─────────────┐      ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
+│   Capture   │ IQ → │   DSP/FFT   │ dB → │    Audio    │      │     TUI     │
+│  (Thread 1) │      │  (Thread 2) │      │  (Thread 3) │      │  (Thread 4) │
+└─────────────┘      └─────────────┘      └─────────────┘      └─────────────┘
 ```
 
 - **Thread 1 — Capture**: Reads IQ samples from the configured source (TestSource, File, or RTL-SDR) at the specified sample rate
 - **Thread 2 — DSP**: Applies Hann windowing and computes FFT, converts to dB power spectrum
-- **Thread 3 — TUI**: Renders spectrum + waterfall display, handles keyboard input at ~30 FPS
+- **Thread 3 — Audio**: AM demodulation, per-VFO channel extraction, mono mix, volume/squelch, output via cpal
+- **Thread 4 — TUI**: Renders spectrum + waterfall display, handles keyboard input at ~30 FPS
 
 Threads communicate via bounded `crossbeam-channel` queues with non-blocking sends to prevent backpressure.
 
@@ -177,8 +249,8 @@ All signal sources implement the `Source` trait:
 | Source | Status | Description |
 |--------|--------|-------------|
 | `TestSource` | ✅ Ready | Synthetic signals with configurable peaks + noise floor |
-| `FileSource` | 🔲 Stub | Replay from IQ recordings |
-| `RtlSdrSource` | 🔲 Stub | Real hardware via librtlsdr |
+| `FileSource` | ✅ Ready | Replay from IQ recordings |
+| `RtlSdrSource` | ✅ Ready | Real hardware via librtlsdr (requires `--features rtlsdr`) |
 
 ### Project Structure
 
@@ -188,17 +260,22 @@ src/
 ├── types.rs                # IqSample, FftResult, AppConfig, SourceType
 ├── config.rs               # CLI parsing (clap) + frequency parser
 ├── lib.rs                  # Module declarations
+├── audio/
+│   ├── mod.rs              # Audio control, VFO management, pipeline
+│   ├── demod.rs            # AM demodulation
+│   ├── cpal_sink.rs        # cpal audio output
+│   └── test_signal.rs      # Audio test utilities
 ├── capture/
 │   ├── mod.rs              # Source trait + dispatch
 │   ├── test_signal.rs      # Synthetic signal generator
-│   ├── file.rs             # IQ file replay (stub)
-│   └── rtlsdr.rs           # RTL-SDR hardware (stub)
+│   ├── file.rs             # IQ file replay
+│   └── rtlsdr.rs           # RTL-SDR hardware
 ├── dsp/
 │   ├── mod.rs              # DSP pipeline
 │   └── fft.rs              # FFT + Hann window + dB conversion
 └── ui/
-    ├── mod.rs              # App state, event loop, key handling
-    ├── command_palette.rs  # Command palette: registry, state, execution
+    ├── mod.rs              # App state, event loop, key handling, VFO management
+    ├── command_palette.rs  # Command palette: registry, state, execution (22 commands)
     ├── spectrum.rs         # Spectrum display widget
     ├── waterfall.rs        # Waterfall display widget
     ├── colors.rs           # Color utilities
@@ -213,6 +290,9 @@ cargo build
 
 # Release build (optimized)
 cargo build --release
+
+# With RTL-SDR support
+cargo build --release --features rtlsdr
 
 # Run directly
 cargo run -- --test
@@ -233,20 +313,26 @@ cargo test -- --nocapture
 cargo test command_palette
 ```
 
-Currently: **199 tests** (195 unit + 4 integration) covering types, FFT, capture, UI state, command palette, and end-to-end pipeline validation.
+Currently: **304 tests** (300 unit + 4 integration) covering types, FFT, capture, UI state, command palette, audio, VFOs, and end-to-end pipeline validation.
 
 ## 🗺️ Roadmap
 
-### v0.2 (Next)
-- 🔊 Audio demodulation (AM for aviation, FM for broadcast)
-- 🔌 RTL-SDR hardware integration (requires `librtlsdr-dev`)
+### Done ✅
+- 📊 Real-time spectrum + waterfall display
+- 🎯 Command palette with 22 commands
+- 🔊 AM audio demodulation (cursor = tuner)
+- 🔌 RTL-SDR hardware integration
+- 📍 Multiple VFOs (up to 8, simultaneous demod)
+- 🔈 Volume & squelch controls
 - 📼 IQ file replay source
 
 ### Future
+- 📻 FM demodulation (broadcast radio)
+- 📻 SSB demodulation (ham radio, maritime)
 - 🌐 WebSocket server mode (headless backend + web frontend)
-- 📍 Multiple VFOs
 - 💾 Recording to IQ files
 - 📡 CubicSDR session import
+- 🎨 Configurable waterfall color palettes
 
 ## 📄 License
 

@@ -131,10 +131,11 @@ fn run_pipeline(config: AppConfig) -> Result<()> {
     // Thread 2: DSP
     let running_dsp = running.clone();
     let shared_avg_dsp = shared_averaging.clone();
+    let shared_freq_dsp = shared_center_freq.clone();
     let dsp_handle = thread::Builder::new()
         .name("dsp".into())
         .spawn(move || {
-            dsp_thread(fft_size, sample_rate, center_freq, iq_rx_dsp, fft_tx, running_dsp, shared_avg_dsp)
+            dsp_thread(fft_size, sample_rate, center_freq, iq_rx_dsp, fft_tx, running_dsp, shared_avg_dsp, shared_freq_dsp)
         })?;
 
     // Thread 4: Audio
@@ -252,9 +253,11 @@ fn dsp_thread(
     tx: Sender<FftResult>,
     running: Arc<AtomicBool>,
     shared_averaging: Arc<AtomicUsize>,
+    shared_center_freq: Option<Arc<AtomicU64>>,
 ) {
     let mut processor = FftProcessor::new(fft_size, 4);
     let mut current_avg = 4usize;
+    let mut current_center_freq = center_freq;
 
     while running.load(Ordering::Relaxed) {
         match rx.recv_timeout(Duration::from_millis(100)) {
@@ -265,7 +268,11 @@ fn dsp_thread(
                     processor.set_avg_count(new_avg);
                     current_avg = new_avg;
                 }
-                if let Some(result) = processor.process(&samples, center_freq, sample_rate) {
+                // Check for center freq change
+                if let Some(ref freq) = shared_center_freq {
+                    current_center_freq = f64::from_bits(freq.load(Ordering::Relaxed));
+                }
+                if let Some(result) = processor.process(&samples, current_center_freq, sample_rate) {
                     let _ = tx.try_send(result);
                 }
             }

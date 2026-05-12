@@ -3,7 +3,6 @@
 //! When compiled with the `rtlsdr` feature, provides full hardware access.
 //! Without the feature, provides stubs that return appropriate errors.
 
-use anyhow::{Result, bail};
 use crate::types::IqSample;
 use super::Source;
 
@@ -63,7 +62,6 @@ mod hw {
         device: rtlsdr_rs::RTLSDRDevice,
         sample_rate: f64,
         center_freq: f64,
-        raw_buffer: Vec<u8>,
     }
 
     // RTLSDRDevice is Send+Sync per the crate
@@ -113,14 +111,10 @@ mod hw {
             dev.reset_buffer()
                 .map_err(|e| anyhow!("Failed to reset buffer: {}", e))?;
 
-            // Pre-allocate buffer for max expected read size
-            let raw_buffer = vec![0u8; sample_rate as usize * 2];
-
             Ok(Self {
                 device: dev,
                 sample_rate,
                 center_freq,
-                raw_buffer,
             })
         }
     }
@@ -128,18 +122,12 @@ mod hw {
     impl Source for RtlSdrSource {
         fn read_samples(&mut self, buffer: &mut [IqSample]) -> Result<usize> {
             let bytes_needed = buffer.len() * 2;
-            if self.raw_buffer.len() < bytes_needed {
-                self.raw_buffer.resize(bytes_needed, 0);
-            }
 
-            let bytes_read = self.device
-                .read_sync(&mut self.raw_buffer[..bytes_needed], bytes_needed as i32)
+            let raw_data = self.device
+                .read_sync(bytes_needed)
                 .map_err(|e| anyhow::anyhow!("RTL-SDR read error: {}", e))?;
 
-            let samples = convert_u8_to_iq(
-                &self.raw_buffer[..bytes_read as usize],
-                buffer,
-            );
+            let samples = convert_u8_to_iq(&raw_data, buffer);
             Ok(samples)
         }
 

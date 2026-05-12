@@ -1,0 +1,1214 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TermSDR — Audio Demodulation: Conceptos</title>
+    <style>
+        :root {
+            --bg: #0a0a0f;
+            --bg2: #12121a;
+            --bg3: #1a1a2e;
+            --accent: #00d4aa;
+            --accent2: #7b68ee;
+            --accent3: #ff6b6b;
+            --accent4: #ffa726;
+            --text: #e0e0e0;
+            --text-dim: #888;
+            --border: #2a2a3e;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            overflow-x: hidden;
+        }
+
+        /* Header */
+        .hero {
+            background: linear-gradient(135deg, var(--bg2) 0%, var(--bg3) 50%, #16213e 100%);
+            border-bottom: 1px solid var(--border);
+            padding: 3rem 2rem;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: repeating-linear-gradient(
+                0deg,
+                transparent,
+                transparent 2px,
+                rgba(0, 212, 170, 0.03) 2px,
+                rgba(0, 212, 170, 0.03) 4px
+            );
+            pointer-events: none;
+        }
+
+        .hero h1 {
+            font-size: 2.8rem;
+            font-weight: 700;
+            background: linear-gradient(90deg, var(--accent), var(--accent2));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 0.5rem;
+        }
+
+        .hero .subtitle {
+            color: var(--text-dim);
+            font-size: 1.1rem;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        /* Layout */
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        /* Sections */
+        section {
+            margin-bottom: 3rem;
+        }
+
+        h2 {
+            font-size: 1.6rem;
+            color: var(--accent);
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        h2 .emoji { font-size: 1.4rem; }
+
+        h3 {
+            font-size: 1.2rem;
+            color: var(--accent2);
+            margin: 1.5rem 0 0.8rem;
+        }
+
+        p { margin-bottom: 1rem; }
+
+        /* Concept cards */
+        .concept-card {
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            transition: border-color 0.3s;
+        }
+
+        .concept-card:hover {
+            border-color: var(--accent);
+        }
+
+        .concept-card h3 {
+            margin-top: 0;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .concept-card .analogy {
+            background: var(--bg3);
+            border-left: 3px solid var(--accent2);
+            padding: 0.8rem 1rem;
+            border-radius: 0 8px 8px 0;
+            margin: 0.8rem 0;
+            font-style: italic;
+            color: #bbb;
+        }
+
+        /* Diagram */
+        .diagram {
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 2rem;
+            margin: 1.5rem 0;
+            overflow-x: auto;
+        }
+
+        .diagram pre {
+            font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+            font-size: 0.85rem;
+            color: var(--accent);
+            line-height: 1.5;
+            margin: 0;
+        }
+
+        /* Pipeline visualization */
+        .pipeline {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0;
+            align-items: stretch;
+            margin: 1.5rem 0;
+        }
+
+        .pipeline-stage {
+            flex: 1;
+            min-width: 130px;
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1rem;
+            position: relative;
+            text-align: center;
+        }
+
+        .pipeline-stage:not(:last-child)::after {
+            content: '→';
+            position: absolute;
+            right: -16px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 1.5rem;
+            color: var(--accent);
+            z-index: 1;
+        }
+
+        .pipeline-stage .stage-num {
+            display: inline-block;
+            background: var(--accent);
+            color: var(--bg);
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            line-height: 28px;
+            font-weight: 700;
+            font-size: 0.85rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .pipeline-stage h4 {
+            color: var(--accent);
+            margin-bottom: 0.5rem;
+            font-size: 0.9rem;
+        }
+
+        .pipeline-stage p {
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            margin: 0;
+        }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            font-size: 0.9rem;
+        }
+
+        th {
+            background: var(--bg3);
+            color: var(--accent);
+            padding: 0.8rem 1rem;
+            text-align: left;
+            border-bottom: 2px solid var(--accent);
+            font-weight: 600;
+        }
+
+        td {
+            padding: 0.7rem 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        tr:hover td {
+            background: var(--bg2);
+        }
+
+        /* Code */
+        code {
+            background: var(--bg3);
+            padding: 0.1rem 0.4rem;
+            border-radius: 3px;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 0.85em;
+        }
+
+        /* Highlight box */
+        .highlight-box {
+            background: linear-gradient(135deg, rgba(0,212,170,0.08), rgba(123,104,238,0.08));
+            border: 1px solid var(--accent);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+        }
+
+        .warning-box {
+            background: linear-gradient(135deg, rgba(255,167,38,0.08), rgba(255,107,107,0.08));
+            border: 1px solid var(--accent4);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+        }
+
+        .formula {
+            text-align: center;
+            font-size: 1.1rem;
+            padding: 1rem;
+            color: var(--accent);
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        /* TOC */
+        .toc {
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .toc h3 { margin-top: 0; color: var(--text); }
+
+        .toc ol {
+            padding-left: 1.5rem;
+        }
+
+        .toc li {
+            margin: 0.4rem 0;
+        }
+
+        .toc a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .toc a:hover {
+            text-decoration: underline;
+        }
+
+        kbd {
+            display: inline-block;
+            background: var(--bg3);
+            border: 1px solid var(--border);
+            border-bottom: 2px solid #444;
+            border-radius: 4px;
+            padding: 0.15rem 0.5rem;
+            font-family: monospace;
+            font-size: 0.85rem;
+            color: var(--accent);
+        }
+
+        /* Signal visualization */
+        .signal-canvas {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            margin: 1rem 0;
+            overflow: hidden;
+        }
+
+        /* Footer */
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-dim);
+            font-size: 0.85rem;
+            border-top: 1px solid var(--border);
+        }
+
+        /* Responsive */
+        @media (max-width: 700px) {
+            .hero h1 { font-size: 2rem; }
+            .pipeline { flex-direction: column; gap: 1rem; }
+            .pipeline-stage:not(:last-child)::after {
+                content: '↓';
+                right: 50%;
+                top: auto;
+                bottom: -18px;
+                transform: translateX(50%);
+            }
+            .container { padding: 1rem; }
+        }
+
+        html { scroll-behavior: smooth; }
+
+        ul { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin: 0.3rem 0; }
+    </style>
+</head>
+<body>
+
+<div class="hero">
+    <h1>🔊 Audio Demodulation</h1>
+    <p class="subtitle">Guía de conceptos para TermSDR v0.2 — De ondas de radio a audio que puedes escuchar</p>
+</div>
+
+<div class="container">
+
+    <nav class="toc">
+        <h3>📑 Índice</h3>
+        <ol>
+            <li><a href="#what-is-demod">¿Qué es demodulación?</a></li>
+            <li><a href="#am">AM (Amplitude Modulation)</a></li>
+            <li><a href="#pipeline">El pipeline de demodulación</a></li>
+            <li><a href="#freq-shift">Paso 1: Frequency Shifting</a></li>
+            <li><a href="#lpf">Paso 2: Filtro paso-bajo (LPF)</a></li>
+            <li><a href="#decimation">Paso 3: Decimación</a></li>
+            <li><a href="#envelope">Paso 4: Detección de envolvente (AM demod)</a></li>
+            <li><a href="#dc-removal">Paso 5: Eliminación de DC</a></li>
+            <li><a href="#sample-rates">Matemáticas del sample rate</a></li>
+            <li><a href="#squelch">Squelch</a></li>
+            <li><a href="#architecture">Arquitectura en TermSDR</a></li>
+            <li><a href="#cpal">cpal y la salida de audio</a></li>
+        </ol>
+    </nav>
+
+    <!-- 1. What is Demodulation -->
+    <section id="what-is-demod">
+        <h2><span class="emoji">📻</span> ¿Qué es demodulación?</h2>
+
+        <div class="concept-card">
+            <h3>🎵 Extraer la información de una onda de radio</h3>
+            <p>
+                Las señales de radio funcionan así: se toma información (voz de un piloto, música, datos)
+                y se "monta" sobre una onda portadora de alta frecuencia. Este proceso se llama
+                <strong>modulación</strong>. La frecuencia que ves en tu radio (ej: 118.1 MHz) es la frecuencia
+                de esa portadora.
+            </p>
+            <p>
+                <strong>Demodulación</strong> es el proceso inverso: tomar la señal de radio y extraer
+                la información que lleva dentro. En nuestro caso, extraer el audio de voz de las
+                comunicaciones de aviación.
+            </p>
+
+            <div class="analogy">
+                💡 <strong>Analogía:</strong> La portadora es como un sobre de correo. La modulación es meter
+                la carta (tu voz) dentro del sobre. La demodulación es abrir el sobre y leer la carta.
+                La frecuencia (118.1 MHz) es la dirección del sobre — te dice dónde buscar, pero no es el mensaje.
+            </div>
+
+            <div class="diagram">
+<pre>
+  VOZ DEL PILOTO               SEÑAL DE RADIO                    VOZ RECUPERADA
+  (audio ~300-3000 Hz)          (118.1 MHz portadora)            (audio ~300-3000 Hz)
+
+  ┌─────────────┐             ┌─────────────────────┐           ┌─────────────┐
+  │ ╱╲  ╱╲      │   MODULAR   │ ┃╱╲╱╲╱┃╱╲╱╲╱┃      │  DEMOD   │ ╱╲  ╱╲      │
+  │╱  ╲╱  ╲──── │ ──────────► │ ┃     ┃     ┃ ──── │ ───────► │╱  ╲╱  ╲──── │
+  │             │              │ ┃╲╱╲╱╲┃╲╱╲╱╲┃      │           │             │
+  └─────────────┘              └─────────────────────┘           └─────────────┘
+                               La amplitud varía con
+                               la voz (esto es AM)
+</pre>
+            </div>
+        </div>
+    </section>
+
+    <!-- 2. AM -->
+    <section id="am">
+        <h2><span class="emoji">📡</span> AM (Amplitude Modulation)</h2>
+
+        <div class="concept-card">
+            <h3>📊 ¿Cómo funciona AM?</h3>
+            <p>
+                En AM, la información se codifica variando la <strong>amplitud</strong> (la "altura") de
+                la onda portadora. Cuando el piloto habla más fuerte, la amplitud de la portadora aumenta.
+                Cuando hay silencio, la amplitud es constante.
+            </p>
+
+            <div class="diagram">
+<pre>
+  PORTADORA PURA (sin modular)        SEÑAL AM (portadora modulada con audio)
+  Amplitud constante                   Amplitud varía con el audio
+
+  ↑                                    ↑
+  │ ╱╲╱╲╱╲╱╲╱╲╱╲╱╲╱╲╱╲╱╲╱╲         │    ╱╲     ╱╲
+  │                                    │ ╱╲╱╲╱╲╱╲  ╱╲╱╲╱╲╱╲
+  │                                    │           ╱╲╱╲╱╲╱╲
+  │                                    │
+  └──────────────────────── → t        └──────────────────────── → t
+
+  Frecuencia: 118.1 MHz               Frecuencia: 118.1 MHz
+  Información: ninguna                 Información: ¡la voz del piloto!
+</pre>
+            </div>
+
+            <p>La fórmula matemática de una señal AM es:</p>
+            <div class="formula">
+                señal(t) = [1 + m · audio(t)] · cos(2π · f_portadora · t)
+            </div>
+            <p>
+                Donde <code>m</code> es el <strong>índice de modulación</strong> (0 a 1, cuánto varía la amplitud)
+                y <code>audio(t)</code> es la señal de voz normalizada.
+            </p>
+        </div>
+
+        <div class="concept-card">
+            <h3>✈️ ¿Por qué la aviación usa AM?</h3>
+            <p>
+                La aviación usa AM en vez de FM por varias razones importantes:
+            </p>
+            <ul>
+                <li>
+                    <strong>Todos escuchan a todos:</strong> En AM, si dos pilotos hablan a la vez,
+                    ambas señales se suman y puedes escuchar (distorsionado) que hay dos personas hablando.
+                    En FM, la señal más fuerte "captura" completamente al receptor y la débil desaparece.
+                    Esto es peligroso en aviación.
+                </li>
+                <li>
+                    <strong>Simplex:</strong> Todos los aviones y la torre transmiten y reciben en la misma
+                    frecuencia. AM permite detectar colisiones de transmisión.
+                </li>
+                <li>
+                    <strong>Rango:</strong> AM llega más lejos con la misma potencia.
+                </li>
+                <li>
+                    <strong>Simplicidad:</strong> Los receptores AM son más sencillos (importante para redundancia
+                    en aviación).
+                </li>
+            </ul>
+
+            <div class="highlight-box">
+                <strong>Banda aérea:</strong> 118.000 — 136.975 MHz<br>
+                <strong>Spacing:</strong> 8.33 kHz (Europa) o 25 kHz (estándar)<br>
+                <strong>Modulación:</strong> AM (DSB — Double Side Band)<br>
+                <strong>Ancho de canal:</strong> ~6 kHz de audio útil (voz)
+            </div>
+        </div>
+    </section>
+
+    <!-- 3. Pipeline Overview -->
+    <section id="pipeline">
+        <h2><span class="emoji">⚡</span> El pipeline de demodulación</h2>
+
+        <div class="concept-card">
+            <h3>🔗 De IQ samples a audio: 5 pasos</h3>
+            <p>
+                El RTL-SDR nos da 2 millones de muestras IQ por segundo cubriendo ~2 MHz de ancho de banda.
+                Pero solo queremos escuchar <strong>un canal estrecho</strong> (25 kHz) en una frecuencia
+                concreta. El pipeline transforma esos datos IQ en audio que puedes escuchar:
+            </p>
+        </div>
+
+        <div class="pipeline">
+            <div class="pipeline-stage">
+                <div class="stage-num">1</div>
+                <h4>Freq Shift</h4>
+                <p>Centrar la señal de interés en 0 Hz</p>
+            </div>
+            <div class="pipeline-stage">
+                <div class="stage-num">2</div>
+                <h4>LPF</h4>
+                <p>Filtrar: quedarnos solo con el canal</p>
+            </div>
+            <div class="pipeline-stage">
+                <div class="stage-num">3</div>
+                <h4>Decimation</h4>
+                <p>Reducir samples: 2M → 48K</p>
+            </div>
+            <div class="pipeline-stage">
+                <div class="stage-num">4</div>
+                <h4>AM Demod</h4>
+                <p>Extraer audio: |z| = √(I²+Q²)</p>
+            </div>
+            <div class="pipeline-stage">
+                <div class="stage-num">5</div>
+                <h4>DC Remove</h4>
+                <p>Quitar offset de la portadora</p>
+            </div>
+        </div>
+
+        <div class="diagram">
+<pre>
+  RTL-SDR (2.048 MHz, ~2M samples/s)
+     │
+     │  Datos IQ: TODO el espectro visible (ej: 117-119 MHz)
+     │  Contiene TODAS las señales en ese rango
+     │
+     ▼
+  ┌──────────────────┐
+  │ 1. FREQ SHIFT    │  "Mueve" la frecuencia del cursor (ej: 118.1 MHz)
+  │    mix to DC     │   al centro (0 Hz). Como sintonizar una radio.
+  └────────┬─────────┘
+           │  Ahora la señal de 118.1 MHz está en 0 Hz
+           │  pero las demás señales siguen ahí alrededor
+           ▼
+  ┌──────────────────┐
+  │ 2. LOW-PASS      │  Filtra: solo deja pasar ±12.5 kHz alrededor
+  │    FILTER        │  de 0 Hz. Elimina todas las demás señales.
+  └────────┬─────────┘
+           │  Solo queda la señal de 118.1 MHz (centrada en 0 Hz)
+           │  Pero seguimos a 2M samples/s (desperdicio)
+           ▼
+  ┌──────────────────┐
+  │ 3. DECIMATION    │  Tiramos 41 de cada 42 muestras.
+  │    ÷42           │  Solo necesitamos ~48K para audio.
+  └────────┬─────────┘
+           │  Ahora: ~48,000 samples/s (audio-rate)
+           │  Señal IQ estrecha, centrada en 0 Hz
+           ▼
+  ┌──────────────────┐
+  │ 4. AM DEMOD      │  audio = √(I² + Q²)
+  │    envelope      │  La amplitud de la señal IQ ES el audio.
+  └────────┬─────────┘
+           │  Señal de audio real (float, 48 kHz)
+           │  Pero tiene un offset DC (la portadora)
+           ▼
+  ┌──────────────────┐
+  │ 5. DC REMOVAL    │  Filtro high-pass: quita la componente
+  │    high-pass     │  de frecuencia 0 (el offset constante).
+  └────────┬─────────┘
+           │
+           ▼
+     🔊 Audio PCM 48 kHz → cpal → altavoces
+</pre>
+        </div>
+    </section>
+
+    <!-- 4. Frequency Shifting -->
+    <section id="freq-shift">
+        <h2><span class="emoji">🎚️</span> Paso 1: Frequency Shifting</h2>
+
+        <div class="concept-card">
+            <h3>🔄 ¿Por qué mover la señal a 0 Hz?</h3>
+            <p>
+                El RTL-SDR captura un bloque de ~2 MHz de ancho. Dentro de ese bloque hay muchas señales
+                en diferentes frecuencias. Nosotros queremos escuchar <strong>solo una</strong>: la que
+                está bajo el cursor.
+            </p>
+            <p>
+                El primer paso es "mover" esa señal al centro del espectro (frecuencia 0, también llamada
+                <strong>baseband</strong> o <strong>DC</strong>). Una vez centrada, podemos filtrar fácilmente
+                todo lo demás.
+            </p>
+
+            <div class="analogy">
+                💡 <strong>Analogía:</strong> Imagina una piscina con muchas olas de diferentes tamaños
+                propagándose. Quieres medir solo una ola concreta. En vez de correr detrás de ella,
+                te subes a un barco que se mueve a la misma velocidad que la ola — ahora la ola
+                está "quieta" relativa a ti (centrada) y puedes medirla fácilmente. Frequency shifting
+                es subirte al barco.
+            </div>
+
+            <div class="diagram">
+<pre>
+  ANTES del frequency shift:
+
+  Potencia ↑
+           │            ┃          ┃ ←cursor
+           │    ┃       ┃┃    ┃    ┃┃      ┃
+           │  ┃ ┃┃    ┃┃┃┃  ┃ ┃┃  ┃┃┃   ┃ ┃
+           └──┸─┸┸────┸┸┸┸──┸─┸┸──┸┸┸────┸─┸──── → freq
+              117.0    117.5    118.0   118.5 MHz
+              └──────── rango visible (2 MHz) ────────┘
+
+
+  DESPUÉS del frequency shift (centrado en cursor = 118.1 MHz):
+
+  Potencia ↑
+           │                  ┃ ← nuestra señal, ahora en 0 Hz
+           │        ┃         ┃┃        ┃
+           │  ┃   ┃ ┃┃    ┃┃  ┃┃  ┃   ┃ ┃
+           └──┸───┸─┸┸────┸┸──┸┸──┸───┸─┸──── → freq
+             -1.0   -0.5     0    +0.5  +1.0 MHz
+                              ↑
+                           baseband (DC)
+</pre>
+            </div>
+        </div>
+
+        <div class="concept-card">
+            <h3>🧮 ¿Cómo funciona?</h3>
+            <p>
+                Se multiplica cada muestra IQ por un <strong>oscilador local</strong> (una señal sintética
+                que gira a la frecuencia opuesta). Esto "cancela" la frecuencia de la portadora, dejando
+                la señal en 0 Hz.
+            </p>
+
+            <div class="formula">
+                shifted[n] = sample[n] × e<sup>-j2π·f_offset·n/sample_rate</sup>
+            </div>
+
+            <p>Donde:</p>
+            <ul>
+                <li><code>f_offset</code> = frecuencia del cursor − frecuencia central del RTL-SDR</li>
+                <li><code>e<sup>-j2πft</sup></code> = <code>cos(2πft) − j·sin(2πft)</code> (un "giro" en el plano complejo)</li>
+                <li>La multiplicación compleja mueve todo el espectro por <code>-f_offset</code></li>
+            </ul>
+
+            <div class="analogy">
+                💡 <strong>En la práctica:</strong> Si el RTL-SDR está centrado en 118.0 MHz y el cursor
+                está en 118.1 MHz, el offset es +0.1 MHz. Multiplicamos por un oscilador de -0.1 MHz
+                para mover la señal de 118.1 MHz a 0 Hz. Es la misma operación que un receptor de radio
+                superheterodino, pero en software.
+            </div>
+        </div>
+    </section>
+
+    <!-- 5. Low-Pass Filter -->
+    <section id="lpf">
+        <h2><span class="emoji">🫧</span> Paso 2: Filtro paso-bajo (LPF)</h2>
+
+        <div class="concept-card">
+            <h3>🚿 ¿Por qué filtrar?</h3>
+            <p>
+                Después del frequency shift, nuestra señal de interés está centrada en 0 Hz.
+                Pero <strong>todas las demás señales siguen ahí</strong>, en otras frecuencias.
+                El filtro paso-bajo deja pasar solo las frecuencias cercanas a 0 Hz (nuestro canal)
+                y elimina todo lo demás.
+            </p>
+
+            <div class="diagram">
+<pre>
+  ANTES del filtro:
+
+  ↑                  ┃ nuestra señal
+  │     ┃            ┃┃          ┃        otras señales
+  │  ┃  ┃┃     ┃   ┃┃┃┃     ┃   ┃┃   ┃   que no queremos
+  └──┸──┸┸─────┸───┸┸┸┸─────┸───┸┸───┸──── → freq
+    -1.0 MHz        0 Hz         +1.0 MHz
+
+
+  DESPUÉS del filtro (corte: ±12.5 kHz):
+
+  ↑                  ┃ solo nuestra señal
+  │                  ┃┃
+  │              ┃┃  ┃┃┃┃                  todo lo demás: eliminado
+  └──────────────┸┸──┸┸┸┸────────────────── → freq
+             -12.5kHz  0  +12.5kHz
+             └── zona de paso ──┘
+</pre>
+            </div>
+        </div>
+
+        <div class="concept-card">
+            <h3>🔧 Filtro FIR (Finite Impulse Response)</h3>
+            <p>
+                Usamos un filtro <strong>FIR</strong>, que funciona como una media ponderada deslizante:
+                para calcular cada muestra de salida, toma varias muestras de entrada y las multiplica
+                por unos coeficientes (llamados <strong>taps</strong>).
+            </p>
+
+            <div class="formula">
+                y[n] = Σ (h[k] × x[n-k])&nbsp;&nbsp;&nbsp;para k = 0, 1, ..., M
+            </div>
+
+            <p>
+                Los coeficientes <code>h[k]</code> se diseñan con el método <strong>windowed sinc</strong>:
+            </p>
+            <ul>
+                <li><strong>Sinc:</strong> El filtro paso-bajo ideal es una función sinc <code>sin(x)/x</code></li>
+                <li><strong>Truncar:</strong> La sinc es infinita, así que la cortamos a M taps</li>
+                <li><strong>Window:</strong> Multiplicamos por una ventana (Blackman) para reducir artefactos del corte</li>
+            </ul>
+
+            <div class="analogy">
+                💡 <strong>Analogía:</strong> Imagina que estás en una fiesta ruidosa (todas las señales de radio)
+                y quieres escuchar solo a la persona de enfrente (tu señal). El filtro FIR es como un
+                micrófono direccional: apunta hacia la persona y atenúa todo el ruido de alrededor.
+                Más "taps" = micrófono más preciso pero más caro de calcular.
+            </div>
+
+            <table>
+                <tr><th>Parámetro</th><th>Valor típico</th><th>Efecto</th></tr>
+                <tr><td>Taps (coeficientes)</td><td>64-128</td><td>Más taps = filtro más selectivo, más CPU</td></tr>
+                <tr><td>Frecuencia de corte</td><td>channel_bw / 2</td><td>Para 25 kHz: corte a 12.5 kHz</td></tr>
+                <tr><td>Ventana</td><td>Blackman</td><td>Buena atenuación en la banda de rechazo (~58 dB)</td></tr>
+            </table>
+        </div>
+    </section>
+
+    <!-- 6. Decimation -->
+    <section id="decimation">
+        <h2><span class="emoji">📉</span> Paso 3: Decimación</h2>
+
+        <div class="concept-card">
+            <h3>✂️ ¿Por qué reducir muestras?</h3>
+            <p>
+                Después de filtrar, nuestra señal ocupa solo ~25 kHz de ancho de banda, pero seguimos
+                teniendo <strong>2,048,000 muestras por segundo</strong>. Es un desperdicio enorme: para
+                audio de voz (que llega hasta ~3-4 kHz) solo necesitamos ~48,000 muestras por segundo.
+            </p>
+            <p>
+                La <strong>decimación</strong> consiste en quedarnos con 1 de cada N muestras, tirando
+                el resto. Con un factor de 42, pasamos de ~2M a ~48K muestras por segundo.
+            </p>
+
+            <div class="diagram">
+<pre>
+  ANTES de decimar (2,048,000 samples/s):
+
+  muestra: ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ...
+           0 1 2 3 4 5 6 7 8 ...                    41 42 43 ...
+
+
+  DESPUÉS de decimar (÷42 → ~48,762 samples/s):
+
+  muestra: ●                                         ●
+           0                                         42
+           ↑                                          ↑
+           nos quedamos con 1 de cada 42
+</pre>
+            </div>
+        </div>
+
+        <div class="warning-box">
+            <h3 style="color: var(--accent4); margin-top: 0;">⚠️ ¡Filtrar ANTES de decimar!</h3>
+            <p>
+                Si decimas sin filtrar primero, las frecuencias altas se "pliegan" sobre las bajas
+                (un fenómeno llamado <strong>aliasing</strong>). Es como un efecto estroboscópico:
+                una rueda girando rápido parece ir hacia atrás en vídeo si no tienes suficientes
+                frames por segundo.
+            </p>
+            <p>
+                El filtro paso-bajo del paso 2 elimina todas las frecuencias por encima de
+                lo que podemos representar con la nueva tasa de muestreo. <strong>Por eso el orden
+                es: filtrar primero, decimar después.</strong>
+            </p>
+        </div>
+    </section>
+
+    <!-- 7. Envelope Detection -->
+    <section id="envelope">
+        <h2><span class="emoji">🎵</span> Paso 4: Detección de envolvente (AM demod)</h2>
+
+        <div class="concept-card">
+            <h3>📐 La demodulación AM más simple del mundo</h3>
+            <p>
+                Aquí es donde ocurre la magia. Para AM, demodular es <strong>sorprendentemente sencillo</strong>:
+                solo tienes que calcular la <strong>magnitud</strong> (el "tamaño") de cada muestra IQ.
+            </p>
+
+            <div class="formula">
+                audio[n] = |z[n]| = √(I[n]² + Q[n]²)
+            </div>
+
+            <p>
+                ¿Por qué funciona? Recuerda que en AM, la información está en la <strong>amplitud</strong>
+                de la señal. La magnitud de una muestra IQ ES la amplitud instantánea. Al calcular la
+                magnitud de cada muestra, estamos literalmente leyendo la información que el transmisor
+                codificó.
+            </p>
+
+            <div class="diagram">
+<pre>
+  SEÑAL IQ (compleja, en el plano I-Q):
+
+  Q ↑           Cada muestra es un punto que gira.
+    │     ●     La DISTANCIA al centro = amplitud = audio.
+    │   ╱
+    │  ╱  r = √(I² + Q²) ← ESTO es el audio
+    │ ╱
+    │╱
+    └──────────── → I
+
+
+  RESULTADO (audio real):
+
+  Amplitud ↑
+           │  ╱╲     ╱╲
+           │ ╱  ╲   ╱  ╲        ← Voz del piloto
+           │╱    ╲ ╱    ╲───
+           └─────────────────── → tiempo
+</pre>
+            </div>
+
+            <div class="analogy">
+                💡 <strong>Comparación con FM:</strong> En FM la información está en la <em>frecuencia</em>
+                (la velocidad de giro del punto IQ), no en la amplitud. Para FM necesitas calcular
+                la derivada de la fase — más complejo. Para AM, la magnitud es suficiente.
+                Por eso empezamos con AM.
+            </div>
+        </div>
+    </section>
+
+    <!-- 8. DC Removal -->
+    <section id="dc-removal">
+        <h2><span class="emoji">⚡</span> Paso 5: Eliminación de DC</h2>
+
+        <div class="concept-card">
+            <h3>📊 ¿De dónde sale el DC offset?</h3>
+            <p>
+                Recuerda la fórmula AM: <code>señal = [1 + m·audio(t)] × cos(2πft)</code>.
+                Ese "1" es la portadora sin modular. Cuando calculas la magnitud para demodular,
+                ese "1" se convierte en un valor constante sumado al audio: un <strong>offset DC</strong>.
+            </p>
+            <p>
+                Si no lo eliminas, el audio tendría una componente constante que no es sonido —
+                solo consumiría rango dinámico y podría causar "pops" en los altavoces.
+            </p>
+
+            <div class="diagram">
+<pre>
+  ANTES de DC removal:                 DESPUÉS de DC removal:
+
+  Amplitud ↑                           Amplitud ↑
+     1.5   │   ╱╲     ╱╲                  0.5  │   ╱╲     ╱╲
+     1.0   │──╱──╲───╱──╲─── ← DC         0.0  │──╱──╲───╱──╲───
+     0.5   │ ╱    ╲ ╱    ╲               -0.5  │ ╱    ╲ ╱    ╲
+     0.0   │╱      ╲      ╲                    │╱      ╲      ╲
+           └──────────────── → t               └──────────────── → t
+           La señal "flota"                     Centrada en cero ✓
+           sobre 1.0
+</pre>
+            </div>
+        </div>
+
+        <div class="concept-card">
+            <h3>🔧 Filtro IIR high-pass simple</h3>
+            <p>
+                Se elimina con un filtro high-pass muy simple — un IIR (Infinite Impulse Response)
+                de primer orden:
+            </p>
+
+            <div class="formula">
+                y[n] = x[n] − x[n−1] + α · y[n−1]
+            </div>
+
+            <p>Donde:</p>
+            <ul>
+                <li><code>α ≈ 0.995</code> — Controla la frecuencia de corte (~3 Hz a 48 kHz sample rate)</li>
+                <li><code>x[n] − x[n−1]</code> — Diferencia entre muestras consecutivas (elimina lo constante)</li>
+                <li><code>α · y[n−1]</code> — Realimentación que mantiene las frecuencias bajas del audio (pero no DC)</li>
+            </ul>
+
+            <div class="analogy">
+                💡 <strong>Efecto práctico:</strong> Este filtro elimina todo lo que cambia muy lentamente
+                (frecuencias menores a ~3 Hz) — eso incluye el DC offset y cualquier drift lento.
+                La voz humana (300-3000 Hz) pasa sin problemas.
+            </div>
+        </div>
+    </section>
+
+    <!-- 9. Sample Rate Math -->
+    <section id="sample-rates">
+        <h2><span class="emoji">🧮</span> Matemáticas del sample rate</h2>
+
+        <div class="concept-card">
+            <h3>📐 Los números concretos de nuestro pipeline</h3>
+
+            <table>
+                <tr><th>Etapa</th><th>Sample Rate</th><th>Ancho de banda</th><th>Notas</th></tr>
+                <tr>
+                    <td><strong>RTL-SDR input</strong></td>
+                    <td>2,048,000 Hz</td>
+                    <td>~2 MHz</td>
+                    <td>Todo el espectro visible</td>
+                </tr>
+                <tr>
+                    <td><strong>Post-filtro</strong></td>
+                    <td>2,048,000 Hz</td>
+                    <td>25 kHz</td>
+                    <td>Solo el canal de interés (misma tasa, menos info útil)</td>
+                </tr>
+                <tr>
+                    <td><strong>Post-decimación</strong></td>
+                    <td>~48,762 Hz</td>
+                    <td>25 kHz</td>
+                    <td>2,048,000 ÷ 42 = 48,762 Hz</td>
+                </tr>
+                <tr>
+                    <td><strong>Audio output</strong></td>
+                    <td>48,000 Hz</td>
+                    <td>~24 kHz máx</td>
+                    <td>Estándar PCM. Calidad de sobra para voz.</td>
+                </tr>
+            </table>
+
+            <div class="highlight-box">
+                <h3 style="color: var(--accent); margin-top: 0;">Factor de decimación</h3>
+                <div class="formula">
+                    factor = floor(sample_rate_entrada / sample_rate_salida)<br>
+                    factor = floor(2,048,000 / 48,000) = <strong>42</strong><br><br>
+                    sample_rate_real = 2,048,000 / 42 = <strong>48,762 Hz</strong>
+                </div>
+                <p style="margin-bottom: 0;">
+                    Hay una pequeña diferencia entre 48,762 Hz y los 48,000 Hz que espera cpal.
+                    Esto se puede manejar con un pequeño resampler o ajustando ligeramente la tasa
+                    de producción. En la práctica, la diferencia (~1.6%) es imperceptible para voz.
+                </p>
+            </div>
+        </div>
+
+        <div class="concept-card">
+            <h3>📏 ¿Por qué 48 kHz?</h3>
+            <p>
+                El <strong>Teorema de Nyquist</strong> dice que para representar una señal de frecuencia F,
+                necesitas al menos 2×F muestras por segundo. La voz humana llega hasta ~4 kHz, así que
+                8 kHz sería suficiente. Pero 48 kHz es un estándar de audio digital que da margen extra
+                y es soportado universalmente por tarjetas de sonido.
+            </p>
+            <table>
+                <tr><th>Sample Rate</th><th>Frecuencia máxima</th><th>Uso</th></tr>
+                <tr><td>8,000 Hz</td><td>4 kHz</td><td>Telefonía</td></tr>
+                <tr><td>22,050 Hz</td><td>11 kHz</td><td>Radio AM de calidad</td></tr>
+                <tr><td>44,100 Hz</td><td>22 kHz</td><td>CD de audio</td></tr>
+                <tr><td><strong>48,000 Hz</strong></td><td>24 kHz</td><td><strong>Nuestro output</strong></td></tr>
+                <tr><td>96,000 Hz</td><td>48 kHz</td><td>Audio profesional</td></tr>
+            </table>
+        </div>
+    </section>
+
+    <!-- 10. Squelch -->
+    <section id="squelch">
+        <h2><span class="emoji">🔇</span> Squelch</h2>
+
+        <div class="concept-card">
+            <h3>🤫 ¿Qué es el squelch?</h3>
+            <p>
+                Cuando nadie está transmitiendo en una frecuencia, lo que escuchas es
+                <strong>ruido blanco</strong> — un sonido constante de "chhhhh" que es molesto y cansa.
+                El <strong>squelch</strong> es un mecanismo que <strong>silencia automáticamente</strong>
+                el audio cuando no hay señal real.
+            </p>
+
+            <div class="analogy">
+                💡 <strong>Analogía:</strong> Es como un micrófono con noise gate en un estudio de grabación.
+                Cuando nadie habla, el micro se silencia automáticamente para que no se escuche el ruido
+                de fondo. Cuando alguien habla (la señal supera el umbral), el audio se activa.
+            </div>
+        </div>
+
+        <div class="concept-card">
+            <h3>⚙️ ¿Cómo funciona?</h3>
+            <p>El concepto es simple:</p>
+            <ol>
+                <li>Mide la <strong>potencia</strong> de la señal en el canal (antes o después del demod)</li>
+                <li>Compara con un <strong>umbral</strong> en dB (configurado por el usuario)</li>
+                <li>Si la potencia es <strong>mayor</strong> que el umbral → audio activado 🔊</li>
+                <li>Si la potencia es <strong>menor</strong> que el umbral → silencio 🔇</li>
+            </ol>
+
+            <div class="diagram">
+<pre>
+  Potencia de señal en el tiempo:
+
+  dB ↑
+  -30│                    ┌────┐
+  -40│          ┌──┐      │    │         ┌─┐
+  -50│──────────│  │──────│    │─────────│ │────── umbral squelch
+  -60│          │  │      │    │         │ │
+  -70│          │  │      │    │         │ │
+  -80│██████████│  │██████│    │█████████│ │██████
+     └──────────┴──┴──────┴────┴─────────┴─┴────── → tiempo
+
+  Audio: 🔇 mute  🔊 ON  🔇 mute  🔊 ON    🔇    🔊   🔇
+
+  Solo escuchas cuando hay transmisión real.
+  Entre transmisiones: silencio total.
+</pre>
+            </div>
+        </div>
+
+        <div class="concept-card">
+            <h3>✈️ ¿Por qué es esencial para aviación?</h3>
+            <p>
+                En una frecuencia de aviación, un piloto puede transmitir durante 5-10 segundos
+                y luego hay silencio durante minutos. Sin squelch, estarías escuchando ruido blanco
+                el 99% del tiempo esperando la próxima transmisión. Con squelch, solo escuchas cuando
+                alguien realmente está hablando.
+            </p>
+            <p>
+                En TermSDR, el squelch se configura con el comando <code>squelch &lt;dB&gt;</code>.
+                Un valor típico sería <code>squelch -50</code> (silencia cuando la señal está por
+                debajo de -50 dB).
+            </p>
+        </div>
+    </section>
+
+    <!-- 11. Architecture -->
+    <section id="architecture">
+        <h2><span class="emoji">🏗️</span> Arquitectura en TermSDR</h2>
+
+        <div class="concept-card">
+            <h3>🧵 Pipeline de 4 hilos</h3>
+            <p>
+                TermSDR v0.2 usa <strong>4 hilos</strong> que corren en paralelo, comunicados por
+                canales de mensajes:
+            </p>
+
+            <div class="diagram">
+<pre>
+  ┌─────────────────────┐
+  │  Thread 1: CAPTURE   │  Lee IQ samples del hardware/test/archivo
+  │  (RTL-SDR / Test)    │  ~2M muestras/segundo
+  └──────────┬──────────┘
+             │
+             │  broadcast (IQ data duplicado a 2 consumidores)
+             │
+      ┌──────┴──────┐
+      │             │
+      ▼             ▼
+  ┌─────────┐   ┌─────────────────┐
+  │ Thread 2│   │ Thread 4: AUDIO  │
+  │ DSP/FFT │   │                  │
+  │         │   │ freq shift       │
+  │ window  │   │ → LPF            │
+  │ → FFT   │   │ → decimate       │
+  │ → dB    │   │ → AM demod       │
+  └────┬────┘   │ → DC removal     │
+       │        │ → volume/squelch │
+       ▼        │ → AudioSink      │
+  ┌─────────┐   └──────────────────┘
+  │ Thread 3│           │
+  │ TUI     │           ▼
+  │         │   ┌──────────────────┐
+  │ spectrum│   │ AudioSink (trait) │
+  │ waterf. │   │                  │
+  │ status  │   │ • CpalSink       │  → 🔊 altavoces
+  │ palette │   │ • NullSink       │  → tests
+  │ controls│   │ • WebSocketSink  │  → futuro (headless)
+  └─────────┘   └──────────────────┘
+</pre>
+            </div>
+        </div>
+
+        <div class="concept-card">
+            <h3>📬 Comunicación entre hilos</h3>
+            <p>Los hilos se comunican por canales sin bloqueo:</p>
+
+            <table>
+                <tr><th>Canal</th><th>De → A</th><th>Contenido</th></tr>
+                <tr>
+                    <td><strong>IQ → DSP</strong></td>
+                    <td>Capture → DSP/FFT</td>
+                    <td><code>Vec&lt;Complex&lt;f32&gt;&gt;</code> — bloques IQ</td>
+                </tr>
+                <tr>
+                    <td><strong>IQ → Audio</strong></td>
+                    <td>Capture → Audio</td>
+                    <td><code>Vec&lt;Complex&lt;f32&gt;&gt;</code> — mismos bloques IQ</td>
+                </tr>
+                <tr>
+                    <td><strong>FFT → TUI</strong></td>
+                    <td>DSP/FFT → TUI</td>
+                    <td><code>FftResult</code> — espectro en dB</td>
+                </tr>
+                <tr>
+                    <td><strong>Control → Audio</strong></td>
+                    <td>TUI → Audio</td>
+                    <td>Mensajes: SetFreq, SetVolume, SetSquelch, Mute</td>
+                </tr>
+            </table>
+
+            <div class="analogy">
+                💡 <strong>¿Por qué un hilo separado para audio?</strong> El audio necesita producir
+                muestras a un ritmo <em>constante</em> (48,000/s, sin interrupciones). Si compartiera
+                hilo con el FFT o la TUI, cualquier lag del rendering haría que el audio tartamudeara.
+                Un hilo dedicado garantiza que el flujo de audio es suave.
+            </div>
+        </div>
+
+        <div class="concept-card">
+            <h3>🔌 AudioSink: abstracción para el futuro</h3>
+            <p>
+                El hilo de audio no sabe <em>dónde</em> va el audio — solo lo produce. El destino
+                se abstrae con el trait <code>AudioSink</code>:
+            </p>
+
+            <div class="diagram">
+<pre>
+  trait AudioSink {
+      fn write(&mut self, samples: &[f32]) -> Result<()>;
+      fn sample_rate(&self) -> u32;
+  }
+
+  Implementaciones:
+  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐
+  │  CpalSink    │  │  NullSink    │  │  WebSocketSink   │
+  │  (v0.2)      │  │  (testing)   │  │  (futuro)        │
+  │              │  │              │  │                  │
+  │  → altavoces │  │  → /dev/null │  │  → cliente web   │
+  │  via cpal    │  │  (verifica   │  │  (headless mode) │
+  │              │  │   en tests)  │  │                  │
+  └──────────────┘  └──────────────┘  └──────────────────┘
+</pre>
+            </div>
+            <p>
+                Esto significa que en el futuro, cuando TermSDR tenga modo headless (sin terminal),
+                simplemente se cambia el sink de <code>CpalSink</code> a <code>WebSocketSink</code>
+                y el audio viaja por red al cliente web en vez de a los altavoces locales.
+                <strong>Sin cambiar una línea del pipeline de demodulación.</strong>
+            </p>
+        </div>
+    </section>
+
+    <!-- 12. cpal -->
+    <section id="cpal">
+        <h2><span class="emoji">🔊</span> cpal y la salida de audio</h2>
+
+        <div class="concept-card">
+            <h3>📦 ¿Qué es cpal?</h3>
+            <p>
+                <a href="https://github.com/RustAudio/cpal" style="color: var(--accent);">cpal</a>
+                (Cross-Platform Audio Library) es la librería estándar de Rust para reproducir y
+                grabar audio. Funciona en Linux (ALSA/PulseAudio/PipeWire), macOS (CoreAudio),
+                y Windows (WASAPI).
+            </p>
+        </div>
+
+        <div class="concept-card">
+            <h3>⚙️ ¿Cómo funciona internamente?</h3>
+            <p>cpal funciona con un modelo de <strong>callbacks</strong>:</p>
+            <ol>
+                <li>Abres un <strong>stream de salida</strong> en un dispositivo de audio</li>
+                <li>Le das una <strong>función callback</strong></li>
+                <li>El sistema operativo llama a tu callback cada vez que necesita más audio</li>
+                <li>Tu callback llena un buffer con muestras de audio</li>
+                <li>El sistema las envía a la tarjeta de sonido</li>
+            </ol>
+
+            <div class="diagram">
+<pre>
+  Nuestro hilo de audio                     cpal / sistema operativo
+  ─────────────────────                     ─────────────────────────
+
+  demod pipeline                            callback del stream
+  produce audio     ──►  ring buffer  ──►   lee audio del buffer  ──►  🔊
+  a su ritmo              (lock-free)       cuando el SO lo pide
+                                            (cada ~5-10ms)
+
+  El ring buffer desacopla los dos lados:
+  - Nuestro pipeline produce a ~48K samples/s
+  - cpal consume a exactamente 48K samples/s
+  - El buffer absorbe las diferencias de timing
+</pre>
+            </div>
+
+            <div class="analogy">
+                💡 <strong>¿Por qué un ring buffer?</strong> El callback de cpal se ejecuta en un hilo
+                del sistema operativo con alta prioridad. No puede esperar ni hacer operaciones lentas.
+                El ring buffer lock-free permite que nuestro hilo escriba y el callback de cpal lea
+                <em>sin ningún tipo de lock</em>. Si el buffer se queda vacío (underrun), se rellena
+                con silencio.
+            </div>
+        </div>
+
+        <div class="concept-card">
+            <h3>🎛️ Parámetros del stream de audio</h3>
+            <table>
+                <tr><th>Parámetro</th><th>Valor</th><th>Notas</th></tr>
+                <tr><td>Sample rate</td><td>48,000 Hz</td><td>Estándar, compatible con todo</td></tr>
+                <tr><td>Canales</td><td>1 (mono)</td><td>Voz de radio es mono</td></tr>
+                <tr><td>Formato</td><td>f32</td><td>Float 32-bit, rango [-1.0, 1.0]</td></tr>
+                <tr><td>Buffer</td><td>~1024 frames</td><td>~21ms de latencia. Buen balance.</td></tr>
+            </table>
+        </div>
+    </section>
+
+</div>
+
+<footer>
+    📡 TermSDR v0.2 — Audio Demodulation Concepts | <a href="concepts-and-architecture.html" style="color: var(--accent);">← Conceptos v0.1</a>
+</footer>
+
+</body>
+</html>

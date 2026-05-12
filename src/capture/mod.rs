@@ -17,4 +17,10 @@ pub trait Source: Send {
 
     /// Get the center frequency in Hz.
     fn center_freq(&self) -> f64;
+
+    /// Retune the source to a new center frequency (if supported by hardware).
+    /// Default implementation does nothing.
+    fn set_center_freq(&mut self, _freq: f64) -> Result<()> {
+        Ok(())
+    }
 }

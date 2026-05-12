@@ -94,7 +94,7 @@ fn run_pipeline(config: AppConfig) -> Result<()> {
 
     // Shared center frequency for TestSource reactivity
     let shared_center_freq = match &config.source {
-        SourceType::Test { .. } => {
+        SourceType::Test { .. } | SourceType::RtlSdr { .. } => {
             Some(Arc::new(AtomicU64::new(center_freq.to_bits())))
         }
         _ => None,
@@ -164,8 +164,8 @@ fn capture_thread(
     let mut source: Box<dyn Source> = match source_type {
         SourceType::Test { signals } => {
             let mut src = TestSource::new(sample_rate, center_freq, signals, 0.02);
-            if let Some(freq) = shared_center_freq {
-                src = src.with_shared_freq(freq);
+            if let Some(ref freq) = shared_center_freq {
+                src = src.with_shared_freq(freq.clone());
             }
             Box::new(src)
         }
@@ -188,8 +188,21 @@ fn capture_thread(
     let block_duration = Duration::from_secs_f64(block_size as f64 / sample_rate);
     let mut buffer = vec![IqSample::new(0.0, 0.0); block_size];
 
+    let mut current_center_freq = center_freq;
+
     while running.load(Ordering::Relaxed) {
         let start = Instant::now();
+
+        // Check for frequency change from UI
+        if let Some(ref shared_freq) = shared_center_freq {
+            let new_freq = f64::from_bits(shared_freq.load(Ordering::Relaxed));
+            if (new_freq - current_center_freq).abs() > 1.0 {
+                if let Err(e) = source.set_center_freq(new_freq) {
+                    eprintln!("Retune error: {}", e);
+                }
+                current_center_freq = new_freq;
+            }
+        }
 
         match source.read_samples(&mut buffer) {
             Ok(_) => {

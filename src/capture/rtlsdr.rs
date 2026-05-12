@@ -138,6 +138,14 @@ mod hw {
         fn center_freq(&self) -> f64 {
             self.center_freq
         }
+
+        fn set_center_freq(&mut self, freq: f64) -> Result<()> {
+            self.device
+                .set_center_freq(freq as u32)
+                .map_err(|e| anyhow::anyhow!("Failed to retune RTL-SDR: {}", e))?;
+            self.center_freq = freq;
+            Ok(())
+        }
     }
 }
 

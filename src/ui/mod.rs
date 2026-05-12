@@ -1,4 +1,5 @@
 pub mod colors;
+pub mod command_palette;
 pub mod spectrum;
 pub mod status_bar;
 pub mod waterfall;
@@ -22,6 +23,7 @@ use ratatui::{
 };
 
 use crate::types::{AppConfig, FftResult, SourceType};
+use command_palette::{CommandAction, CommandPalette};
 use spectrum::SpectrumWidget;
 use status_bar::{DisplaySource, StatusBarWidget};
 use waterfall::WaterfallWidget;
@@ -65,6 +67,10 @@ pub struct App {
     pub show_help: bool,
     /// Channel bandwidth in Hz.
     pub channel_bw: f64,
+    /// Command palette active.
+    pub command_palette_active: bool,
+    /// Command palette state.
+    pub command_palette: CommandPalette,
     /// Frame timing.
     frame_count: u64,
     last_fps_update: Instant,
@@ -91,6 +97,8 @@ impl App {
             cursor_active: true,
             show_help: false,
             channel_bw: 25_000.0,
+            command_palette_active: false,
+            command_palette: CommandPalette::new(),
             frame_count: 0,
             last_fps_update: Instant::now(),
             last_frame_count: 0,
@@ -138,6 +146,43 @@ impl App {
         // Help modal takes priority — any key closes it
         if self.show_help {
             self.show_help = false;
+            return;
+        }
+
+        // Command palette handling
+        if self.command_palette_active {
+            match key.code {
+                KeyCode::Esc => {
+                    self.command_palette_active = false;
+                }
+                KeyCode::Enter => {
+                    match self.command_palette.execute() {
+                        Ok(action) => {
+                            self.command_palette_active = false;
+                            self.apply_command_action(action);
+                        }
+                        Err(msg) => {
+                            self.command_palette.error = Some(msg);
+                        }
+                    }
+                }
+                KeyCode::Up => {
+                    self.command_palette.select_up();
+                }
+                KeyCode::Down => {
+                    self.command_palette.select_down();
+                }
+                KeyCode::Tab => {
+                    self.command_palette.autocomplete();
+                }
+                KeyCode::Backspace => {
+                    self.command_palette.backspace();
+                }
+                KeyCode::Char(c) => {
+                    self.command_palette.type_char(c);
+                }
+                _ => {}
+            }
             return;
         }
 
@@ -264,7 +309,39 @@ impl App {
             KeyCode::Char('W') => {
                 self.channel_bw = (self.channel_bw / 2.0).max(1_000.0);
             }
+            KeyCode::Char('/') => {
+                self.command_palette.reset();
+                self.command_palette_active = true;
+            }
             _ => {}
+        }
+    }
+
+    /// Apply a command action from the command palette.
+    fn apply_command_action(&mut self, action: CommandAction) {
+        match action {
+            CommandAction::SetFrequency(f) => self.config.center_freq = f,
+            CommandAction::SetBandwidth(bw) => self.config.sample_rate = bw,
+            CommandAction::SetChannelBw(bw) => self.channel_bw = bw,
+            CommandAction::WidenChannelBw => self.channel_bw = (self.channel_bw * 2.0).min(1_000_000.0),
+            CommandAction::CenterCursor => self.cursor_freq = self.config.center_freq,
+            CommandAction::GainUp => {
+                let g = self.config.gain.unwrap_or(0.0);
+                self.config.gain = Some((g + 1.0).min(50.0));
+            }
+            CommandAction::GainDown => {
+                let g = self.config.gain.unwrap_or(0.0);
+                self.config.gain = Some((g - 1.0).max(0.0));
+            }
+            CommandAction::ShowHelp => self.show_help = true,
+            CommandAction::Quit => self.should_quit = true,
+            CommandAction::ToggleCursor => self.cursor_active = !self.cursor_active,
+            CommandAction::TuneUp => self.config.center_freq += 25_000.0,
+            CommandAction::TuneDown => self.config.center_freq -= 25_000.0,
+            CommandAction::TuneCoarseUp => self.config.center_freq += 1_000_000.0,
+            CommandAction::TuneCoarseDown => self.config.center_freq -= 1_000_000.0,
+            CommandAction::ZoomIn => self.config.sample_rate = (self.config.sample_rate * 0.8).max(256_000.0),
+            CommandAction::ZoomOut => self.config.sample_rate = (self.config.sample_rate * 1.25).min(3_200_000.0),
         }
     }
 
@@ -428,6 +505,11 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
     if app.show_help {
         draw_help_modal(frame, size);
     }
+
+    // Command palette modal
+    if app.command_palette_active {
+        draw_command_palette(frame, size, &app.command_palette);
+    }
 }
 
 /// Draw the help/cheatsheet modal.
@@ -491,6 +573,10 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
             Span::styled("Show this help", Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
+            Span::styled("    /         ", Style::default().fg(Color::Cyan)),
+            Span::styled("Open command palette", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
             Span::styled("    q / Esc   ", Style::default().fg(Color::Cyan)),
             Span::styled("Quit", Style::default().fg(Color::White)),
         ]),
@@ -504,6 +590,144 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
     let area = centered_rect(60, 70, size);
     frame.render_widget(Clear, area);
     frame.render_widget(paragraph, area);
+}
+
+/// Draw the command palette modal.
+fn draw_command_palette(frame: &mut Frame, size: Rect, palette: &CommandPalette) {
+    let filtered = palette.filtered();
+    
+    // Calculate height: input(1) + error?(1) + separator(1) + results + border(2)
+    let max_visible = 12;
+    let result_count = filtered.len().min(max_visible);
+    let has_error = palette.error.is_some();
+    let error_rows: u16 = if has_error { 1 } else { 0 };
+    let total_height = (3 + error_rows + result_count as u16 + 2).min(size.height);
+    let width = (size.width * 60 / 100).max(40).min(size.width);
+    
+    let area = Rect {
+        x: (size.width - width) / 2,
+        y: size.height / 5,
+        width,
+        height: total_height,
+    };
+    
+    let block = Block::default()
+        .title(" / Command Palette ")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Cyan).bg(Color::Black));
+    
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    
+    // Inner area (inside borders)
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    
+    // Input line
+    if inner.height > 0 {
+        let input_area = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        };
+        let input_line = Paragraph::new(Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::Cyan)),
+            Span::styled(&palette.input, Style::default().fg(Color::White)),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+        ]));
+        frame.render_widget(input_line, input_area);
+    }
+    
+    // Error message (if any)
+    let error_offset: u16 = if has_error {
+        if inner.height > 1 {
+            let error_area = Rect {
+                x: inner.x,
+                y: inner.y + 1,
+                width: inner.width,
+                height: 1,
+            };
+            let error_text = palette.error.as_deref().unwrap_or("");
+            let error_line = Paragraph::new(Line::from(
+                Span::styled(format!("  ⚠ {}", error_text), Style::default().fg(Color::Red))
+            ));
+            frame.render_widget(error_line, error_area);
+        }
+        1
+    } else {
+        0
+    };
+    
+    // Separator
+    if inner.height > 1 + error_offset {
+        let sep_area = Rect {
+            x: inner.x,
+            y: inner.y + 1 + error_offset,
+            width: inner.width,
+            height: 1,
+        };
+        let sep = Paragraph::new(Line::from(
+            Span::styled("─".repeat(inner.width as usize), Style::default().fg(Color::DarkGray))
+        ));
+        frame.render_widget(sep, sep_area);
+    }
+    
+    // Command list
+    for (i, cmd) in filtered.iter().enumerate().take(max_visible) {
+        let row_y = inner.y + 2 + error_offset + i as u16;
+        if row_y >= inner.y + inner.height {
+            break;
+        }
+        let row_area = Rect {
+            x: inner.x,
+            y: row_y,
+            width: inner.width,
+            height: 1,
+        };
+        
+        let is_selected = i == palette.selected;
+        let (name_style, desc_style, hotkey_style) = if is_selected {
+            (
+                Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Black).bg(Color::Yellow),
+                Style::default().fg(Color::DarkGray).bg(Color::Yellow),
+            )
+        } else {
+            (
+                Style::default().fg(Color::Cyan),
+                Style::default().fg(Color::White),
+                Style::default().fg(Color::DarkGray),
+            )
+        };
+        
+        // Format: "  command_name    description    [hotkey]"
+        let name_width = 18;
+        let padded_name = format!("  {:<width$}", cmd.name, width = name_width);
+        let hotkey_text = format!("  [{}]", cmd.hotkey);
+        let desc_width = inner.width as usize - padded_name.len() - hotkey_text.len();
+        let padded_desc = if desc_width > 0 {
+            format!("{:<width$}", cmd.description, width = desc_width)
+        } else {
+            cmd.description.to_string()
+        };
+        
+        let line = Line::from(vec![
+            Span::styled(padded_name, name_style),
+            Span::styled(padded_desc, desc_style),
+            Span::styled(hotkey_text, hotkey_style),
+        ]);
+        let row = Paragraph::new(line);
+        if is_selected {
+            // Fill background for selected row
+            frame.render_widget(Clear, row_area);
+        }
+        frame.render_widget(row, row_area);
+    }
 }
 
 /// Show the source selection screen and return the user's choice.
@@ -1178,5 +1402,130 @@ mod tests {
         assert_eq!(app.config.gain, Some(0.0));
         app.handle_key(KeyEvent::from(KeyCode::Down));
         assert_eq!(app.config.gain, Some(0.0)); // capped
+    }
+
+    // === Command palette integration tests ===
+
+    #[test]
+    fn test_slash_opens_command_palette() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        assert!(app.command_palette_active);
+    }
+
+    #[test]
+    fn test_slash_not_in_freq_input_mode() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        app.freq_input_mode = true;
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        assert!(!app.command_palette_active);
+        assert_eq!(app.freq_input_buf, "/");
+    }
+
+    #[test]
+    fn test_slash_not_in_bw_input_mode() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        app.bw_input_mode = true;
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        assert!(!app.command_palette_active);
+        assert_eq!(app.bw_input_buf, "/");
+    }
+
+    #[test]
+    fn test_esc_closes_command_palette() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        assert!(app.command_palette_active);
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(!app.command_palette_active);
+        assert!(!app.should_quit); // Esc in palette should NOT quit
+    }
+
+    #[test]
+    fn test_command_palette_quit() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        // Type "quit" and press enter
+        for c in "quit".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(!app.command_palette_active);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_command_palette_channelbw_with_param() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        for c in "channelbw 50k".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(!app.command_palette_active);
+        assert!((app.channel_bw - 50_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_command_palette_frequency_with_param() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        for c in "frequency 118.1M".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(!app.command_palette_active);
+        assert!((app.config.center_freq - 118_100_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_command_palette_center() {
+        let mut config = AppConfig::default();
+        config.center_freq = 100_000_000.0;
+        let mut app = App::new(config);
+        app.cursor_freq = 99_000_000.0; // offset cursor
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        for c in "center".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!((app.cursor_freq - 100_000_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_command_palette_typing_does_not_leak() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        let orig_freq = app.config.center_freq;
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        // Type 'q' — should NOT quit, should go into palette input
+        app.handle_key(KeyEvent::from(KeyCode::Char('q')));
+        assert!(!app.should_quit);
+        assert!(app.command_palette_active);
+        assert_eq!(app.command_palette.input, "q");
+        // Press Esc to cancel
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(!app.command_palette_active);
+        assert!((app.config.center_freq - orig_freq).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_command_palette_tab_autocomplete() {
+        let config = AppConfig::default();
+        let mut app = App::new(config);
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        for c in "ch".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        // Should autocomplete to "channelbw " (with space since it accepts params)
+        assert_eq!(app.command_palette.input, "channelbw ");
     }
 }

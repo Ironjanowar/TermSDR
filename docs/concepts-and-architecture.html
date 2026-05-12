@@ -526,6 +526,7 @@
             <li><a href="#pipeline">Pipeline de 3 hilos</a></li>
             <li><a href="#structure">Estructura del proyecto</a></li>
             <li><a href="#controls">Controles</a></li>
+            <li><a href="#command-palette">Command Palette</a></li>
             <li><a href="#deps">Dependencias</a></li>
             <li><a href="#decisions">Decisiones del diseño</a></li>
             <li><a href="#roadmap">Roadmap</a></li>
@@ -947,8 +948,10 @@ Resultado: nunca se bloquea la captura, la pantalla muestra
             &nbsp;&nbsp;&nbsp;&nbsp;│   └── <span class="file">fft.rs</span> <span class="comment"># FFT + windowing + dB conversion</span><br>
             &nbsp;&nbsp;&nbsp;&nbsp;└── <span class="dir">ui/</span> <span class="comment"># Hilo 3: interfaz terminal</span><br>
             &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">mod.rs</span> <span class="comment"># App state + event loop</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">command_palette.rs</span> <span class="comment"># command palette: registro, estado, ejecución</span><br>
             &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">spectrum.rs</span> <span class="comment"># widget de espectro</span><br>
             &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">waterfall.rs</span> <span class="comment"># widget de waterfall</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="file">colors.rs</span> <span class="comment"># utilidades de color</span><br>
             &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└── <span class="file">status_bar.rs</span> <span class="comment"># barra de estado inferior</span>
         </div>
     </section>
@@ -960,19 +963,144 @@ Resultado: nunca se bloquea la captura, la pantalla muestra
         <div class="concept-card" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
             <div>
                 <h3 style="margin-top: 0;">Navegación</h3>
-                <div class="keybind"><kbd>←</kbd> / <kbd>→</kbd> <span>Frecuencia (paso fino, ~25 kHz)</span></div><br>
-                <div class="keybind"><kbd>PgUp</kbd> / <kbd>PgDn</kbd> <span>Frecuencia (paso grueso, ~1 MHz)</span></div><br>
-                <div class="keybind"><kbd>f</kbd> <span>Saltar a frecuencia (modal)</span></div><br>
-                <div class="keybind"><kbd>+</kbd> / <kbd>-</kbd> <span>Zoom ancho de banda</span></div>
+                <div class="keybind"><kbd>←</kbd> / <kbd>→</kbd> <span>Mover cursor / Sintonización fina (±25 kHz)</span></div><br>
+                <div class="keybind"><kbd>PgUp</kbd> / <kbd>PgDn</kbd> <span>Sintonización gruesa (±1 MHz)</span></div><br>
+                <div class="keybind"><kbd>f</kbd> <span>Saltar a frecuencia (modal de entrada)</span></div><br>
+                <div class="keybind"><kbd>+</kbd> / <kbd>-</kbd> <span>Zoom ancho de banda</span></div><br>
+                <div class="keybind"><kbd>c</kbd> <span>Centrar cursor en pantalla</span></div>
             </div>
             <div>
                 <h3 style="margin-top: 0;">Control</h3>
-                <div class="keybind"><kbd>↑</kbd> / <kbd>↓</kbd> <span>Ajustar ganancia</span></div><br>
-                <div class="keybind"><kbd>b</kbd> <span>Configurar ancho de banda</span></div><br>
+                <div class="keybind"><kbd>↑</kbd> / <kbd>↓</kbd> <span>Ajustar ganancia RF</span></div><br>
+                <div class="keybind"><kbd>b</kbd> <span>Configurar ancho de banda (modal)</span></div><br>
+                <div class="keybind"><kbd>w</kbd> / <kbd>W</kbd> <span>Ampliar / reducir ancho de canal (×2 / ÷2)</span></div><br>
                 <div class="keybind"><kbd>Space</kbd> <span>Toggle cursor activo/inactivo</span></div><br>
-                <div class="keybind"><kbd>m</kbd> <span>Poner marcador en cursor</span></div><br>
-                <div class="keybind"><kbd>q</kbd> <span>Salir</span></div>
+                <div class="keybind"><kbd>/</kbd> <span>Abrir <strong>command palette</strong></span></div><br>
+                <div class="keybind"><kbd>?</kbd> <span>Mostrar ayuda</span></div><br>
+                <div class="keybind"><kbd>q</kbd> / <kbd>Esc</kbd> <span>Salir</span></div>
             </div>
+        </div>
+    </section>
+
+    <!-- 10b. Command Palette -->
+    <section id="command-palette">
+        <h2><span class="emoji">🎯</span> Command Palette</h2>
+
+        <div class="concept-card">
+            <p>Pulsa <kbd>/</kbd> para abrir el <strong>command palette</strong> — una forma unificada de ejecutar cualquier acción de la aplicación, con autocompletado y parámetros.</p>
+
+            <h3>Cómo funciona</h3>
+            <ol style="margin: 1rem 0; padding-left: 1.5rem;">
+                <li>Pulsa <kbd>/</kbd> para abrir el palette</li>
+                <li>Escribe para filtrar comandos (case-insensitive, búsqueda por substring)</li>
+                <li>Usa <kbd>↑</kbd>/<kbd>↓</kbd> para navegar la lista filtrada</li>
+                <li>Pulsa <kbd>Tab</kbd> para autocompletar el comando seleccionado</li>
+                <li>Pulsa <kbd>Enter</kbd> para ejecutar</li>
+                <li>Pulsa <kbd>Esc</kbd> para cerrar</li>
+            </ol>
+        </div>
+
+        <div class="concept-card">
+            <h3>Comandos disponibles</h3>
+            <table style="width: 100%; border-collapse: collapse; margin-top: 1rem;">
+                <thead>
+                    <tr style="border-bottom: 2px solid var(--border);">
+                        <th style="text-align: left; padding: 0.5rem; color: var(--accent);">Comando</th>
+                        <th style="text-align: left; padding: 0.5rem; color: var(--accent);">Descripción</th>
+                        <th style="text-align: left; padding: 0.5rem; color: var(--accent);">Parámetro</th>
+                        <th style="text-align: left; padding: 0.5rem; color: var(--accent);">Hotkey</th>
+                    </tr>
+                </thead>
+                <tbody style="font-size: 0.9rem;">
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 0.4rem 0.5rem;"><code>bandwidth</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Establecer sample rate/ancho de banda</td>
+                        <td style="padding: 0.4rem 0.5rem;"><code>&lt;valor&gt;</code> (obligatorio)</td>
+                        <td style="padding: 0.4rem 0.5rem;"><kbd>b</kbd></td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 0.4rem 0.5rem;"><code>center</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Centrar cursor en pantalla</td>
+                        <td style="padding: 0.4rem 0.5rem;">—</td>
+                        <td style="padding: 0.4rem 0.5rem;"><kbd>c</kbd></td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 0.4rem 0.5rem;"><code>channelbw</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Establecer ancho de banda del canal</td>
+                        <td style="padding: 0.4rem 0.5rem;"><code>&lt;valor&gt;</code> (opcional, ej: <code>25k</code>, <code>50k</code>)</td>
+                        <td style="padding: 0.4rem 0.5rem;"><kbd>w</kbd>/<kbd>W</kbd></td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 0.4rem 0.5rem;"><code>frequency</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Saltar a frecuencia</td>
+                        <td style="padding: 0.4rem 0.5rem;"><code>&lt;valor&gt;</code> (obligatorio, ej: <code>118.1M</code>)</td>
+                        <td style="padding: 0.4rem 0.5rem;"><kbd>f</kbd></td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 0.4rem 0.5rem;"><code>gain+</code> / <code>gain-</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Subir / bajar ganancia 1 dB</td>
+                        <td style="padding: 0.4rem 0.5rem;">—</td>
+                        <td style="padding: 0.4rem 0.5rem;"><kbd>↑</kbd> / <kbd>↓</kbd></td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 0.4rem 0.5rem;"><code>help</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Mostrar atajos de teclado</td>
+                        <td style="padding: 0.4rem 0.5rem;">—</td>
+                        <td style="padding: 0.4rem 0.5rem;"><kbd>?</kbd></td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 0.4rem 0.5rem;"><code>quit</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Salir de la aplicación</td>
+                        <td style="padding: 0.4rem 0.5rem;">—</td>
+                        <td style="padding: 0.4rem 0.5rem;"><kbd>q</kbd></td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 0.4rem 0.5rem;"><code>toggle-cursor</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Activar/desactivar cursor</td>
+                        <td style="padding: 0.4rem 0.5rem;">—</td>
+                        <td style="padding: 0.4rem 0.5rem;"><kbd>Space</kbd></td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 0.4rem 0.5rem;"><code>tune+</code> / <code>tune-</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Sintonizar ±25 kHz</td>
+                        <td style="padding: 0.4rem 0.5rem;">—</td>
+                        <td style="padding: 0.4rem 0.5rem;"><kbd>←</kbd> / <kbd>→</kbd></td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 0.4rem 0.5rem;"><code>tune-coarse+</code> / <code>tune-coarse-</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Sintonizar ±1 MHz</td>
+                        <td style="padding: 0.4rem 0.5rem;">—</td>
+                        <td style="padding: 0.4rem 0.5rem;"><kbd>PgUp</kbd> / <kbd>PgDn</kbd></td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 0.4rem 0.5rem;"><code>zoom-in</code> / <code>zoom-out</code></td>
+                        <td style="padding: 0.4rem 0.5rem;">Zoom ancho de banda</td>
+                        <td style="padding: 0.4rem 0.5rem;">—</td>
+                        <td style="padding: 0.4rem 0.5rem;"><kbd>+</kbd> / <kbd>-</kbd></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="concept-card">
+            <h3>Comandos con parámetros</h3>
+            <p>Los comandos que aceptan parámetros permiten establecer valores exactos:</p>
+            <div class="highlight-box">
+                <code>/frequency 118.1M</code> → Salta a 118.1 MHz<br>
+                <code>/channelbw 50k</code> → Establece ancho de canal a 50 kHz<br>
+                <code>/bandwidth 500k</code> → Establece sample rate a 500 kHz
+            </div>
+            <p style="margin-top: 0.5rem;">Sufijos soportados: <code>M</code> (MHz), <code>k</code> (kHz), <code>G</code> (GHz), o Hz sin sufijo.</p>
+        </div>
+
+        <div class="concept-card">
+            <h3>Gestión de errores</h3>
+            <ul style="padding-left: 1.5rem;">
+                <li>Los comandos que <strong>requieren</strong> un parámetro (<code>frequency</code>, <code>bandwidth</code>) muestran un error si se ejecutan sin valor</li>
+                <li>Valores inválidos (ej: <code>frequency abc</code>) muestran un mensaje descriptivo en rojo</li>
+                <li>El palette se mantiene abierto con el error visible — puedes corregir y reintentar</li>
+                <li>Los errores se borran automáticamente al escribir o borrar caracteres</li>
+            </ul>
         </div>
     </section>
 

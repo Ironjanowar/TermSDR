@@ -24,6 +24,21 @@ fn main() -> Result<()> {
     let args = CliArgs::parse();
     let mut config = args.to_config()?;
 
+    // Handle bookmark import
+    if let Some(ref path) = args.import_bookmarks {
+        match termsdr::bookmarks::import_cubicsdr(path) {
+            Ok(bookmarks) => {
+                let count = bookmarks.len();
+                let mut store = termsdr::bookmarks::BookmarkStore::load();
+                for b in bookmarks {
+                    store.add(b);
+                }
+                println!("Imported {} bookmarks from {}", count, path);
+            }
+            Err(e) => eprintln!("Import failed: {}", e),
+        }
+    }
+
     // Determine source selection
     let selection = if args.test {
         // --test flag bypasses source selection

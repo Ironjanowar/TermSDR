@@ -28,6 +28,9 @@ impl CommandRegistry {
     pub fn new() -> Self {
         let mut commands = vec![
             Command { name: "bandwidth", description: "Set sample rate/bandwidth", accepts_param: true, requires_param: true, hotkey: "b" },
+            Command { name: "bookmark-add", description: "Save current freq as bookmark", accepts_param: true, requires_param: true, hotkey: "-" },
+            Command { name: "bookmark-remove", description: "Remove user bookmark by name", accepts_param: true, requires_param: true, hotkey: "-" },
+            Command { name: "bookmarks", description: "Open bookmarks browser", accepts_param: false, requires_param: false, hotkey: "-" },
             Command { name: "center", description: "Center cursor on screen", accepts_param: false, requires_param: false, hotkey: "c" },
             Command { name: "center-on-cursor", description: "Center bandwidth on cursor (retune)", accepts_param: false, requires_param: false, hotkey: "C" },
             Command { name: "channelbw", description: "Set channel bandwidth", accepts_param: true, requires_param: false, hotkey: "w/W" },
@@ -203,6 +206,15 @@ impl CommandPalette {
                     .map(CommandAction::SetBandwidth)
                     .map_err(|_| format!("Invalid bandwidth: '{}'", p))
             }
+            "bookmark-add" => {
+                let p = param.unwrap();
+                Ok(CommandAction::AddBookmark(p.to_string()))
+            }
+            "bookmark-remove" => {
+                let p = param.unwrap();
+                Ok(CommandAction::RemoveBookmark(p.to_string()))
+            }
+            "bookmarks" => Ok(CommandAction::ShowBookmarks),
             "center" => Ok(CommandAction::CenterCursor),
             "center-on-cursor" => Ok(CommandAction::CenterOnCursor),
             "channelbw" => {
@@ -318,6 +330,9 @@ pub enum CommandAction {
     RemoveVfo(usize),
     ClearVfos,
     SetDemodMode(DemodMode),
+    ShowBookmarks,
+    AddBookmark(String),
+    RemoveBookmark(String),
 }
 
 #[cfg(test)]
@@ -329,7 +344,7 @@ mod tests {
     #[test]
     fn test_registry_has_all_commands() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.all().len(), 24);
+        assert_eq!(reg.all().len(), 27);
     }
 
     #[test]
@@ -344,7 +359,7 @@ mod tests {
     #[test]
     fn test_registry_filter_empty_returns_all() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.filter("").len(), 24);
+        assert_eq!(reg.filter("").len(), 27);
     }
 
     #[test]
@@ -466,7 +481,7 @@ mod tests {
         for _ in 0..100 {
             palette.select_down();
         }
-        assert_eq!(palette.selected, 23); // 24 commands, index 23
+        assert_eq!(palette.selected, 26); // 27 commands, index 26
     }
 
     #[test]

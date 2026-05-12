@@ -1,5 +1,7 @@
 //! Demodulation pipeline: frequency shift → LPF → decimate → demod (AM/FM/NFM) → DC removal.
 
+use serde::{Serialize, Deserialize};
+
 use crate::types::IqSample;
 use std::f64::consts::PI;
 
@@ -8,7 +10,7 @@ use std::f64::consts::PI;
 // ============================================================================
 
 /// Demodulation mode for a VFO or cursor.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum DemodMode {
     /// Amplitude Modulation (aviation 118-137 MHz, HF)
     AM,

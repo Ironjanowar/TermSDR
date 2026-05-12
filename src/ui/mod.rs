@@ -26,6 +26,7 @@ use ratatui::{
 
 use crate::audio::AudioControl;
 use crate::audio::demod::DemodMode;
+use crate::bookmarks::{Bookmark, BookmarkStore, default_catalog};
 use crate::types::{AppConfig, FftResult, SourceType};
 use command_palette::{CommandAction, CommandPalette};
 use spectrum::SpectrumWidget;
@@ -109,6 +110,14 @@ pub struct App {
     pub next_vfo_id: usize,
     /// Whether VFO delete modal is shown.
     pub show_vfo_delete_modal: bool,
+    /// Bookmark store (user bookmarks).
+    pub bookmark_store: BookmarkStore,
+    /// Whether bookmarks modal is shown.
+    pub show_bookmarks_modal: bool,
+    /// Selected index in bookmarks modal.
+    pub bookmark_selected: usize,
+    /// Flattened bookmark list for the modal (catalog + user).
+    pub bookmark_list: Vec<Bookmark>,
     /// Audio control channel sender.
     pub audio_control_tx: Option<crossbeam_channel::Sender<AudioControl>>,
     /// Shared center frequency for TestSource reactivity.
@@ -149,6 +158,10 @@ impl App {
             vfos: Vec::new(),
             next_vfo_id: 1,
             show_vfo_delete_modal: false,
+            bookmark_store: BookmarkStore::load(),
+            show_bookmarks_modal: false,
+            bookmark_selected: 0,
+            bookmark_list: Vec::new(),
             audio_control_tx,
             shared_center_freq: None,
             demod_mode: DemodMode::AM,
@@ -170,6 +183,29 @@ impl App {
         if let Some(ref freq) = self.shared_center_freq {
             freq.store(self.config.center_freq.to_bits(), Ordering::Relaxed);
         }
+    }
+
+    /// Rebuild the flattened bookmark list for the modal.
+    fn rebuild_bookmark_list(&mut self) {
+        let mut list = default_catalog();
+        for b in &self.bookmark_store.user_bookmarks {
+            let mut b = b.clone();
+            b.category = "⭐ My Bookmarks".to_string();
+            list.push(b);
+        }
+        self.bookmark_list = list;
+    }
+
+    /// Tune to a bookmark: set freq, BW, mode, send audio controls.
+    fn tune_to_bookmark(&mut self, bookmark: &Bookmark) {
+        self.config.center_freq = bookmark.freq;
+        self.cursor_freq = bookmark.freq;
+        self.channel_bw = bookmark.channel_bw;
+        self.demod_mode = bookmark.mode;
+        self.sync_shared_center_freq();
+        self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
+        self.send_audio_control(AudioControl::SetChannelBw(self.channel_bw));
+        self.send_audio_control(AudioControl::SetDemodMode(self.demod_mode));
     }
 
     /// Push a new FFT result into the app state.
@@ -228,6 +264,59 @@ impl App {
                         let vfo = self.vfos.remove(idx);
                         self.send_audio_control(AudioControl::RemoveVfo(vfo.id));
                         self.show_vfo_delete_modal = false;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Bookmarks modal
+        if self.show_bookmarks_modal {
+            match key.code {
+                KeyCode::Esc => {
+                    self.show_bookmarks_modal = false;
+                }
+                KeyCode::Up => {
+                    if self.bookmark_selected > 0 {
+                        self.bookmark_selected -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    if !self.bookmark_list.is_empty() && self.bookmark_selected < self.bookmark_list.len() - 1 {
+                        self.bookmark_selected += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(bookmark) = self.bookmark_list.get(self.bookmark_selected).cloned() {
+                        self.tune_to_bookmark(&bookmark);
+                        self.show_bookmarks_modal = false;
+                    }
+                }
+                KeyCode::Char('m') | KeyCode::Char('M') => {
+                    if let Some(bookmark) = self.bookmark_list.get(self.bookmark_selected).cloned() {
+                        self.tune_to_bookmark(&bookmark);
+                        self.show_bookmarks_modal = false;
+                        // Also create a VFO
+                        if self.vfos.len() < 8 {
+                            let id = self.next_vfo_id;
+                            let color = VFO_COLORS[self.vfos.len() % 8];
+                            let vfo = Vfo {
+                                id,
+                                freq: self.cursor_freq,
+                                channel_bw: self.channel_bw,
+                                color,
+                                demod_mode: self.demod_mode,
+                            };
+                            self.vfos.push(vfo);
+                            self.next_vfo_id += 1;
+                            self.send_audio_control(AudioControl::AddVfo {
+                                id,
+                                freq: self.cursor_freq,
+                                channel_bw: self.channel_bw,
+                                mode: self.demod_mode,
+                            });
+                        }
                     }
                 }
                 _ => {}
@@ -575,6 +664,31 @@ impl App {
                 self.send_audio_control(AudioControl::SetDemodMode(mode));
                 self.send_audio_control(AudioControl::SetChannelBw(self.channel_bw));
             }
+            CommandAction::ShowBookmarks => {
+                self.rebuild_bookmark_list();
+                self.bookmark_selected = 0;
+                self.show_bookmarks_modal = true;
+            }
+            CommandAction::AddBookmark(name) => {
+                let bookmark = Bookmark {
+                    name,
+                    freq: self.cursor_freq,
+                    channel_bw: self.channel_bw,
+                    mode: self.demod_mode,
+                    category: "⭐ My Bookmarks".into(),
+                };
+                self.bookmark_store.add(bookmark);
+            }
+            CommandAction::RemoveBookmark(name) => {
+                // Try by name first, then by index
+                if !self.bookmark_store.remove_by_name(&name) {
+                    if let Ok(idx) = name.parse::<usize>() {
+                        if idx > 0 {
+                            self.bookmark_store.remove(idx - 1);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -754,6 +868,11 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
     if app.show_vfo_delete_modal {
         draw_vfo_delete_modal(frame, size, &app.vfos);
     }
+
+    // Bookmarks modal
+    if app.show_bookmarks_modal {
+        draw_bookmarks_modal(frame, size, &app.bookmark_list, app.bookmark_selected);
+    }
 }
 
 /// Draw the help/cheatsheet modal.
@@ -839,6 +958,10 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
         Line::from(vec![
             Span::styled("    /         ", Style::default().fg(Color::Cyan)),
             Span::styled("Open command palette (/volume, /squelch)", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("              ", Style::default().fg(Color::Cyan)),
+            Span::styled("/bookmarks, /bookmark-add <name>", Style::default().fg(Color::DarkGray)),
         ]),
         Line::from(vec![
             Span::styled("    q / Esc   ", Style::default().fg(Color::Cyan)),
@@ -1041,6 +1164,129 @@ fn draw_vfo_delete_modal(frame: &mut Frame, size: Rect, vfos: &[Vfo]) {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "  Press number to delete, Esc to cancel",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            Rect { x: inner.x, y: hint_y, width: inner.width, height: 1 },
+        );
+    }
+}
+
+/// Draw the bookmarks browser modal.
+fn draw_bookmarks_modal(frame: &mut Frame, size: Rect, bookmarks: &[Bookmark], selected: usize) {
+    use spectrum::format_frequency;
+
+    let area = centered_rect(70, 80, size);
+    let block = Block::default()
+        .title(" 📡 Bookmarks ")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Cyan).bg(Color::Black));
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    if inner.height < 3 {
+        return;
+    }
+
+    // Group by category with headers
+    let mut row_y = inner.y;
+    let mut last_category = "";
+
+    // Calculate scroll offset to keep selected visible
+    // First pass: count total rows and find selected row
+    let mut total_rows: usize = 0;
+    let mut selected_row: usize = 0;
+    let mut last_cat_pass = "";
+    for (i, bm) in bookmarks.iter().enumerate() {
+        if bm.category != last_cat_pass {
+            total_rows += 1; // category header
+            last_cat_pass = &bm.category;
+        }
+        if i == selected {
+            selected_row = total_rows;
+        }
+        total_rows += 1;
+    }
+
+    let visible_rows = (inner.height - 1) as usize; // -1 for hint line
+    let scroll_offset = if selected_row >= visible_rows {
+        selected_row - visible_rows + 1
+    } else {
+        0
+    };
+
+    let mut current_row: usize = 0;
+    for (i, bm) in bookmarks.iter().enumerate() {
+        if row_y >= inner.y + inner.height.saturating_sub(1) {
+            break;
+        }
+
+        // Category header
+        if bm.category.as_str() != last_category {
+            if current_row >= scroll_offset {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        format!("  {}", bm.category),
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    ))),
+                    Rect { x: inner.x, y: row_y, width: inner.width, height: 1 },
+                );
+                row_y += 1;
+                if row_y >= inner.y + inner.height.saturating_sub(1) {
+                    break;
+                }
+            }
+            current_row += 1;
+            last_category = &bm.category;
+        }
+
+        if current_row >= scroll_offset {
+            let freq_str = format_frequency(bm.freq);
+            let bw_str = format_frequency(bm.channel_bw);
+            let is_selected = i == selected;
+
+            let (name_style, info_style) = if is_selected {
+                (
+                    Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Black).bg(Color::Yellow),
+                )
+            } else {
+                (
+                    Style::default().fg(Color::White),
+                    Style::default().fg(Color::DarkGray),
+                )
+            };
+
+            let label = format!("    {} {}", freq_str, bm.name);
+            let info = format!("  {} BW:{}", bm.mode.label(), bw_str);
+            let line = Line::from(vec![
+                Span::styled(format!("{:<40}", label), name_style),
+                Span::styled(info, info_style),
+            ]);
+
+            let row_area = Rect { x: inner.x, y: row_y, width: inner.width, height: 1 };
+            if is_selected {
+                frame.render_widget(Clear, row_area);
+            }
+            frame.render_widget(Paragraph::new(line), row_area);
+            row_y += 1;
+        }
+        current_row += 1;
+    }
+
+    // Hint line at bottom
+    let hint_y = inner.y + inner.height.saturating_sub(1);
+    if hint_y < area.y + area.height {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  ↑↓ Navigate  Enter Tune  M Tune+VFO  Esc Close",
                 Style::default().fg(Color::DarkGray),
             ))),
             Rect { x: inner.x, y: hint_y, width: inner.width, height: 1 },

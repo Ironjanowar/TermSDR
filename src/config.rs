@@ -38,6 +38,10 @@ pub struct CliArgs {
     /// JSON config file path
     #[arg(short, long)]
     pub config: Option<String>,
+
+    /// Import bookmarks from CubicSDR XML file
+    #[arg(long)]
+    pub import_bookmarks: Option<String>,
 }
 
 /// Parse a frequency string like "100M", "118.1M", "433920000" into Hz.

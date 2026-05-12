@@ -30,15 +30,18 @@ impl CommandRegistry {
             Command { name: "center", description: "Center cursor on screen", accepts_param: false, requires_param: false, hotkey: "c" },
             Command { name: "channelbw", description: "Set channel bandwidth", accepts_param: true, requires_param: false, hotkey: "w/W" },
             Command { name: "frequency", description: "Jump to frequency", accepts_param: true, requires_param: true, hotkey: "f" },
+            Command { name: "output", description: "Select audio output device", accepts_param: false, requires_param: false, hotkey: "-" },
             Command { name: "gain+", description: "Increase gain by 1 dB", accepts_param: false, requires_param: false, hotkey: "↑" },
             Command { name: "gain-", description: "Decrease gain by 1 dB", accepts_param: false, requires_param: false, hotkey: "↓" },
             Command { name: "help", description: "Show keyboard shortcuts", accepts_param: false, requires_param: false, hotkey: "?" },
             Command { name: "quit", description: "Quit application", accepts_param: false, requires_param: false, hotkey: "q" },
+            Command { name: "squelch", description: "Set squelch threshold (dB)", accepts_param: true, requires_param: false, hotkey: "-" },
             Command { name: "toggle-cursor", description: "Toggle cursor on/off", accepts_param: false, requires_param: false, hotkey: "Space" },
             Command { name: "tune+", description: "Tune up 25 kHz", accepts_param: false, requires_param: false, hotkey: "←" },
             Command { name: "tune-", description: "Tune down 25 kHz", accepts_param: false, requires_param: false, hotkey: "→" },
             Command { name: "tune-coarse+", description: "Tune up 1 MHz", accepts_param: false, requires_param: false, hotkey: "PgUp" },
             Command { name: "tune-coarse-", description: "Tune down 1 MHz", accepts_param: false, requires_param: false, hotkey: "PgDn" },
+            Command { name: "volume", description: "Set volume (0-100)", accepts_param: true, requires_param: true, hotkey: "v/V" },
             Command { name: "zoom-in", description: "Zoom in (decrease bandwidth)", accepts_param: false, requires_param: false, hotkey: "+" },
             Command { name: "zoom-out", description: "Zoom out (increase bandwidth)", accepts_param: false, requires_param: false, hotkey: "-" },
         ];
@@ -211,6 +214,7 @@ impl CommandPalette {
                     .map(CommandAction::SetFrequency)
                     .map_err(|_| format!("Invalid frequency: '{}'", p))
             }
+            "output" => Err("Audio output selection not yet implemented".to_string()),
             "gain+" => Ok(CommandAction::GainUp),
             "gain-" => Ok(CommandAction::GainDown),
             "help" => Ok(CommandAction::ShowHelp),
@@ -220,6 +224,24 @@ impl CommandPalette {
             "tune-" => Ok(CommandAction::TuneDown),
             "tune-coarse+" => Ok(CommandAction::TuneCoarseUp),
             "tune-coarse-" => Ok(CommandAction::TuneCoarseDown),
+            "squelch" => {
+                if let Some(p) = param {
+                    match p.parse::<f32>() {
+                        Ok(db) => Ok(CommandAction::SetSquelch(Some(db))),
+                        Err(_) => Err(format!("Invalid squelch value: '{}'", p)),
+                    }
+                } else {
+                    Ok(CommandAction::SetSquelch(None))
+                }
+            }
+            "volume" => {
+                let p = param.unwrap();
+                match p.parse::<u8>() {
+                    Ok(v) if v <= 100 => Ok(CommandAction::SetVolume(v)),
+                    Ok(_) => Err("Volume must be 0-100".to_string()),
+                    Err(_) => Err(format!("Invalid volume: '{}'", p)),
+                }
+            }
             "zoom-in" => Ok(CommandAction::ZoomIn),
             "zoom-out" => Ok(CommandAction::ZoomOut),
             _ => Err("Unknown command".to_string()),
@@ -246,6 +268,8 @@ pub enum CommandAction {
     TuneCoarseDown,
     ZoomIn,
     ZoomOut,
+    SetVolume(u8),
+    SetSquelch(Option<f32>),
 }
 
 #[cfg(test)]
@@ -257,7 +281,7 @@ mod tests {
     #[test]
     fn test_registry_has_all_commands() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.all().len(), 15);
+        assert_eq!(reg.all().len(), 18);
     }
 
     #[test]
@@ -272,7 +296,7 @@ mod tests {
     #[test]
     fn test_registry_filter_empty_returns_all() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.filter("").len(), 15);
+        assert_eq!(reg.filter("").len(), 18);
     }
 
     #[test]
@@ -394,7 +418,7 @@ mod tests {
         for _ in 0..100 {
             palette.select_down();
         }
-        assert_eq!(palette.selected, 14); // 15 commands, index 14
+        assert_eq!(palette.selected, 17); // 18 commands, index 17
     }
 
     #[test]
@@ -694,5 +718,86 @@ mod tests {
         // Should filter by "channelbw", not "channelbw 50k"
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "channelbw");
+    }
+
+    // === Volume command tests ===
+
+    #[test]
+    fn test_execute_volume_with_param() {
+        let mut palette = CommandPalette::new();
+        palette.input = "volume 75".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::SetVolume(75)));
+    }
+
+    #[test]
+    fn test_execute_volume_zero() {
+        let mut palette = CommandPalette::new();
+        palette.input = "volume 0".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::SetVolume(0)));
+    }
+
+    #[test]
+    fn test_execute_volume_100() {
+        let mut palette = CommandPalette::new();
+        palette.input = "volume 100".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::SetVolume(100)));
+    }
+
+    #[test]
+    fn test_execute_volume_out_of_range() {
+        let mut palette = CommandPalette::new();
+        palette.input = "volume 150".to_string();
+        assert!(palette.execute().is_err());
+        assert!(palette.execute().unwrap_err().contains("0-100"));
+    }
+
+    #[test]
+    fn test_execute_volume_requires_param() {
+        let mut palette = CommandPalette::new();
+        palette.input = "volume".to_string();
+        assert!(palette.execute().is_err());
+        assert!(palette.execute().unwrap_err().contains("requires a value"));
+    }
+
+    #[test]
+    fn test_execute_volume_invalid_param() {
+        let mut palette = CommandPalette::new();
+        palette.input = "volume abc".to_string();
+        assert!(palette.execute().is_err());
+        assert!(palette.execute().unwrap_err().contains("Invalid volume"));
+    }
+
+    // === Squelch command tests ===
+
+    #[test]
+    fn test_execute_squelch_with_param() {
+        let mut palette = CommandPalette::new();
+        palette.input = "squelch -60".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::SetSquelch(Some(-60.0))));
+    }
+
+    #[test]
+    fn test_execute_squelch_without_param_disables() {
+        let mut palette = CommandPalette::new();
+        palette.input = "squelch".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::SetSquelch(None)));
+    }
+
+    #[test]
+    fn test_execute_squelch_invalid_param() {
+        let mut palette = CommandPalette::new();
+        palette.input = "squelch abc".to_string();
+        assert!(palette.execute().is_err());
+        assert!(palette.execute().unwrap_err().contains("Invalid squelch"));
+    }
+
+    // === Output command tests ===
+
+    #[test]
+    fn test_execute_output_not_implemented() {
+        let mut palette = CommandPalette::new();
+        palette.input = "output".to_string();
+        assert!(palette.execute().is_err());
+        assert!(palette.execute().unwrap_err().contains("not yet implemented"));
     }
 }

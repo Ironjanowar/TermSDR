@@ -36,6 +36,12 @@ pub struct StatusBarWidget {
     pub cursor_info: Option<(f64, Option<f32>)>,
     /// Channel bandwidth in Hz.
     pub channel_bw: f64,
+    /// Volume (0-100).
+    pub volume: u8,
+    /// Whether audio is active (cursor active).
+    pub audio_active: bool,
+    /// Squelch threshold.
+    pub squelch: Option<f32>,
 }
 
 impl StatusBarWidget {
@@ -54,6 +60,9 @@ impl StatusBarWidget {
             fps,
             cursor_info: None,
             channel_bw: 25_000.0,
+            volume: 80,
+            audio_active: true,
+            squelch: None,
         }
     }
 
@@ -64,6 +73,13 @@ impl StatusBarWidget {
 
     pub fn with_channel_bw(mut self, bw: f64) -> Self {
         self.channel_bw = bw;
+        self
+    }
+
+    pub fn with_audio(mut self, volume: u8, audio_active: bool, squelch: Option<f32>) -> Self {
+        self.volume = volume;
+        self.audio_active = audio_active;
+        self.squelch = squelch;
         self
     }
 
@@ -92,9 +108,18 @@ impl StatusBarWidget {
         } else {
             format!("{:.0}", self.channel_bw)
         };
+        let vol_str = if self.audio_active {
+            format!("🔊 {}%", self.volume)
+        } else {
+            "🔇 MUTED".to_string()
+        };
+        let sq_str = match self.squelch {
+            Some(db) => format!(" │ SQ:{:.0}dB", db),
+            None => String::new(),
+        };
         format!(
-            " ⏣ Freq: {} │ BW: {} │ ChBW: {} │ Gain: {} │ {} │ {:.0} FPS{} ",
-            freq, bw, bw_str, gain_str, self.source, self.fps, cursor_str
+            " ⏣ Freq: {} │ BW: {} │ ChBW: {} │ Gain: {} │ {}{} │ {} │ {:.0} FPS{} ",
+            freq, bw, bw_str, gain_str, vol_str, sq_str, self.source, self.fps, cursor_str
         )
     }
 }
@@ -155,6 +180,7 @@ mod tests {
         assert!(status.contains("40dB"));
         assert!(status.contains("TEST"));
         assert!(status.contains("30 FPS"));
+        assert!(status.contains("\u{1f50a} 80%")); // default volume
     }
 
     #[test]
@@ -168,6 +194,47 @@ mod tests {
         );
         let status = bar.format_status();
         assert!(status.contains("AGC"));
+    }
+
+    #[test]
+    fn test_status_bar_muted() {
+        let mut bar = StatusBarWidget::new(
+            100_000_000.0,
+            2_048_000.0,
+            None,
+            DisplaySource::Test,
+            30.0,
+        );
+        bar.audio_active = false;
+        let status = bar.format_status();
+        assert!(status.contains("\u{1f507} MUTED"));
+    }
+
+    #[test]
+    fn test_status_bar_squelch() {
+        let mut bar = StatusBarWidget::new(
+            100_000_000.0,
+            2_048_000.0,
+            None,
+            DisplaySource::Test,
+            30.0,
+        );
+        bar.squelch = Some(-60.0);
+        let status = bar.format_status();
+        assert!(status.contains("SQ:-60dB"));
+    }
+
+    #[test]
+    fn test_status_bar_no_squelch() {
+        let bar = StatusBarWidget::new(
+            100_000_000.0,
+            2_048_000.0,
+            None,
+            DisplaySource::Test,
+            30.0,
+        );
+        let status = bar.format_status();
+        assert!(!status.contains("SQ:"));
     }
 
     #[test]

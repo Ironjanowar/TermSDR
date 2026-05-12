@@ -22,6 +22,7 @@ use ratatui::{
     Frame, Terminal,
 };
 
+use crate::audio::AudioControl;
 use crate::types::{AppConfig, FftResult, SourceType};
 use command_palette::{CommandAction, CommandPalette};
 use spectrum::SpectrumWidget;
@@ -71,6 +72,12 @@ pub struct App {
     pub command_palette_active: bool,
     /// Command palette state.
     pub command_palette: CommandPalette,
+    /// Audio volume (0-100).
+    pub volume: u8,
+    /// Squelch threshold in dB (None = disabled).
+    pub squelch: Option<f32>,
+    /// Audio control channel sender.
+    pub audio_control_tx: Option<crossbeam_channel::Sender<AudioControl>>,
     /// Frame timing.
     frame_count: u64,
     last_fps_update: Instant,
@@ -78,7 +85,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: AppConfig) -> Self {
+    pub fn new(config: AppConfig, audio_control_tx: Option<crossbeam_channel::Sender<AudioControl>>) -> Self {
         let center = config.center_freq;
         Self {
             config,
@@ -99,9 +106,19 @@ impl App {
             channel_bw: 25_000.0,
             command_palette_active: false,
             command_palette: CommandPalette::new(),
+            volume: 80,
+            squelch: None,
+            audio_control_tx,
             frame_count: 0,
             last_fps_update: Instant::now(),
             last_frame_count: 0,
+        }
+    }
+
+    /// Send an audio control message (fire-and-forget).
+    fn send_audio_control(&self, msg: AudioControl) {
+        if let Some(ref tx) = self.audio_control_tx {
+            let _ = tx.send(msg);
         }
     }
 
@@ -245,6 +262,7 @@ impl App {
                 if self.cursor_active {
                     // Move cursor left by 2% of visible bandwidth
                     self.cursor_freq -= 0.02 * self.config.sample_rate;
+                    self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
                 } else {
                     // Fine tune: visual scroll right (lower freq)
                     self.config.center_freq += 25_000.0;
@@ -254,6 +272,7 @@ impl App {
                 if self.cursor_active {
                     // Move cursor right by 2% of visible bandwidth
                     self.cursor_freq += 0.02 * self.config.sample_rate;
+                    self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
                 } else {
                     // Fine tune: visual scroll left (higher freq)
                     self.config.center_freq -= 25_000.0;
@@ -299,15 +318,26 @@ impl App {
             KeyCode::Char(' ') => {
                 // Toggle cursor active/inactive
                 self.cursor_active = !self.cursor_active;
+                self.send_audio_control(AudioControl::Mute(!self.cursor_active));
             }
             KeyCode::Char('?') => {
                 self.show_help = true;
             }
             KeyCode::Char('w') => {
                 self.channel_bw = (self.channel_bw * 2.0).min(1_000_000.0);
+                self.send_audio_control(AudioControl::SetChannelBw(self.channel_bw));
             }
             KeyCode::Char('W') => {
                 self.channel_bw = (self.channel_bw / 2.0).max(1_000.0);
+                self.send_audio_control(AudioControl::SetChannelBw(self.channel_bw));
+            }
+            KeyCode::Char('v') => {
+                self.volume = (self.volume + 5).min(100);
+                self.send_audio_control(AudioControl::SetVolume(self.volume));
+            }
+            KeyCode::Char('V') => {
+                self.volume = self.volume.saturating_sub(5);
+                self.send_audio_control(AudioControl::SetVolume(self.volume));
             }
             KeyCode::Char('/') => {
                 self.command_palette.reset();
@@ -322,9 +352,18 @@ impl App {
         match action {
             CommandAction::SetFrequency(f) => self.config.center_freq = f,
             CommandAction::SetBandwidth(bw) => self.config.sample_rate = bw,
-            CommandAction::SetChannelBw(bw) => self.channel_bw = bw,
-            CommandAction::WidenChannelBw => self.channel_bw = (self.channel_bw * 2.0).min(1_000_000.0),
-            CommandAction::CenterCursor => self.cursor_freq = self.config.center_freq,
+            CommandAction::SetChannelBw(bw) => {
+                self.channel_bw = bw;
+                self.send_audio_control(AudioControl::SetChannelBw(self.channel_bw));
+            }
+            CommandAction::WidenChannelBw => {
+                self.channel_bw = (self.channel_bw * 2.0).min(1_000_000.0);
+                self.send_audio_control(AudioControl::SetChannelBw(self.channel_bw));
+            }
+            CommandAction::CenterCursor => {
+                self.cursor_freq = self.config.center_freq;
+                self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
+            }
             CommandAction::GainUp => {
                 let g = self.config.gain.unwrap_or(0.0);
                 self.config.gain = Some((g + 1.0).min(50.0));
@@ -342,6 +381,14 @@ impl App {
             CommandAction::TuneCoarseDown => self.config.center_freq -= 1_000_000.0,
             CommandAction::ZoomIn => self.config.sample_rate = (self.config.sample_rate * 0.8).max(256_000.0),
             CommandAction::ZoomOut => self.config.sample_rate = (self.config.sample_rate * 1.25).min(3_200_000.0),
+            CommandAction::SetVolume(v) => {
+                self.volume = v;
+                self.send_audio_control(AudioControl::SetVolume(self.volume));
+            }
+            CommandAction::SetSquelch(sq) => {
+                self.squelch = sq;
+                self.send_audio_control(AudioControl::SetSquelch(self.squelch));
+            }
         }
     }
 
@@ -454,7 +501,8 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         app.display_source(),
         app.fps,
     ).with_cursor(cursor_info)
-    .with_channel_bw(app.channel_bw);
+    .with_channel_bw(app.channel_bw)
+    .with_audio(app.volume, app.cursor_active, app.squelch);
     frame.render_widget(status, chunks[2]);
 
     // Bandwidth input overlay
@@ -564,6 +612,10 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
             Span::styled("    w / W     ", Style::default().fg(Color::Cyan)),
             Span::styled("Widen/narrow channel bandwidth", Style::default().fg(Color::White)),
         ]),
+        Line::from(vec![
+            Span::styled("    v / V     ", Style::default().fg(Color::Cyan)),
+            Span::styled("Volume up/down", Style::default().fg(Color::White)),
+        ]),
         Line::from(""),
         Line::from(vec![
             Span::styled("  General", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
@@ -574,7 +626,7 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
         ]),
         Line::from(vec![
             Span::styled("    /         ", Style::default().fg(Color::Cyan)),
-            Span::styled("Open command palette", Style::default().fg(Color::White)),
+            Span::styled("Open command palette (/volume, /squelch)", Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
             Span::styled("    q / Esc   ", Style::default().fg(Color::Cyan)),
@@ -878,7 +930,7 @@ mod tests {
     #[test]
     fn test_app_push_fft() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
 
         let fft = FftResult {
             bins: vec![-50.0; 100],
@@ -894,7 +946,7 @@ mod tests {
     #[test]
     fn test_app_waterfall_max_rows() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.max_waterfall_rows = 5;
 
         for _ in 0..10 {
@@ -912,7 +964,7 @@ mod tests {
     #[test]
     fn test_app_handle_quit() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
 
         app.handle_key(KeyEvent::from(KeyCode::Char('q')));
         assert!(app.should_quit);
@@ -921,7 +973,7 @@ mod tests {
     #[test]
     fn test_app_handle_esc() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
 
         app.handle_key(KeyEvent::from(KeyCode::Esc));
         assert!(app.should_quit);
@@ -930,7 +982,7 @@ mod tests {
     #[test]
     fn test_app_handle_tune_right() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         // Deactivate cursor so arrows tune frequency
         app.cursor_active = false;
         let orig = app.config.center_freq;
@@ -943,7 +995,7 @@ mod tests {
     #[test]
     fn test_app_handle_tune_left() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         // Deactivate cursor so arrows tune frequency
         app.cursor_active = false;
         let orig = app.config.center_freq;
@@ -956,7 +1008,7 @@ mod tests {
     #[test]
     fn test_app_cursor_move_right() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         assert!(app.cursor_active);
         let orig = app.cursor_freq;
 
@@ -967,7 +1019,7 @@ mod tests {
     #[test]
     fn test_app_cursor_move_left() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         assert!(app.cursor_active);
         let orig = app.cursor_freq;
 
@@ -978,7 +1030,7 @@ mod tests {
     #[test]
     fn test_app_cursor_toggle() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         assert!(app.cursor_active);
 
         app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
@@ -991,7 +1043,7 @@ mod tests {
     #[test]
     fn test_app_help_toggle() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         assert!(!app.show_help);
 
         app.handle_key(KeyEvent::from(KeyCode::Char('?')));
@@ -1005,7 +1057,7 @@ mod tests {
     #[test]
     fn test_app_cursor_frequency() {
         let config = AppConfig::default();
-        let app = App::new(config);
+        let app = App::new(config, None);
         // Cursor at 0.5 should be at center frequency
         let cursor_freq = app.cursor_frequency();
         assert!((cursor_freq - app.config.center_freq).abs() < 1.0);
@@ -1014,7 +1066,7 @@ mod tests {
     #[test]
     fn test_app_cursor_db() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         // No FFT data yet
         assert!(app.cursor_db().is_none());
 
@@ -1032,7 +1084,7 @@ mod tests {
     #[test]
     fn test_app_handle_page_up() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         let orig = app.config.center_freq;
 
         app.handle_key(KeyEvent::from(KeyCode::PageUp));
@@ -1042,7 +1094,7 @@ mod tests {
     #[test]
     fn test_app_handle_gain_up() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
 
         app.handle_key(KeyEvent::from(KeyCode::Up));
         assert_eq!(app.config.gain, Some(1.0));
@@ -1051,7 +1103,7 @@ mod tests {
     #[test]
     fn test_app_freq_input_mode() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
 
         app.handle_key(KeyEvent::from(KeyCode::Char('f')));
         assert!(app.freq_input_mode);
@@ -1070,7 +1122,7 @@ mod tests {
     #[test]
     fn test_app_freq_input_cancel() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         let orig = app.config.center_freq;
 
         app.handle_key(KeyEvent::from(KeyCode::Char('f')));
@@ -1084,7 +1136,7 @@ mod tests {
     #[test]
     fn test_app_bw_input_mode() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
 
         app.handle_key(KeyEvent::from(KeyCode::Char('b')));
         assert!(app.bw_input_mode);
@@ -1103,7 +1155,7 @@ mod tests {
     #[test]
     fn test_app_bw_input_cancel() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         let orig = app.config.sample_rate;
 
         app.handle_key(KeyEvent::from(KeyCode::Char('b')));
@@ -1117,7 +1169,7 @@ mod tests {
     #[test]
     fn test_app_center_cursor() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
 
         // Move cursor away from center
         app.handle_key(KeyEvent::from(KeyCode::Right));
@@ -1142,7 +1194,7 @@ mod tests {
         // Reproduce: cursor at center, deactivate, tune right, reactivate.
         // Cursor should still point at the original frequency.
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
 
         // Cursor starts at center_freq
         let original_freq = app.cursor_frequency();
@@ -1173,7 +1225,7 @@ mod tests {
     #[test]
     fn test_app_channel_bw_increase() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         assert!((app.channel_bw - 25_000.0).abs() < 1.0);
         app.handle_key(KeyEvent::from(KeyCode::Char('w')));
         assert!((app.channel_bw - 50_000.0).abs() < 1.0);
@@ -1182,7 +1234,7 @@ mod tests {
     #[test]
     fn test_app_channel_bw_decrease() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.handle_key(KeyEvent::from(KeyCode::Char('W')));
         assert!((app.channel_bw - 12_500.0).abs() < 1.0);
     }
@@ -1190,7 +1242,7 @@ mod tests {
     #[test]
     fn test_app_channel_bw_max() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.channel_bw = 512_000.0;
         app.handle_key(KeyEvent::from(KeyCode::Char('w')));
         assert!((app.channel_bw - 1_000_000.0).abs() < 1.0);
@@ -1201,7 +1253,7 @@ mod tests {
     #[test]
     fn test_app_channel_bw_min() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.channel_bw = 2_000.0;
         app.handle_key(KeyEvent::from(KeyCode::Char('W')));
         assert!((app.channel_bw - 1_000.0).abs() < 1.0);
@@ -1214,7 +1266,7 @@ mod tests {
     #[test]
     fn test_cursor_pos_outside_left() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         // Move cursor way to the left of visible range
         app.cursor_freq = app.config.center_freq - app.config.sample_rate * 2.0;
         let pos = app.cursor_pos();
@@ -1224,7 +1276,7 @@ mod tests {
     #[test]
     fn test_cursor_pos_outside_right() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.cursor_freq = app.config.center_freq + app.config.sample_rate * 2.0;
         let pos = app.cursor_pos();
         assert!(pos > 1.0); // outside visible range
@@ -1233,7 +1285,7 @@ mod tests {
     #[test]
     fn test_cursor_db_with_empty_fft_bins() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         let fft = FftResult {
             bins: vec![],
             center_freq: 100e6,
@@ -1246,7 +1298,7 @@ mod tests {
     #[test]
     fn test_cursor_db_cursor_at_extremes() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         let mut bins = vec![-50.0_f32; 100];
         bins[0] = -10.0;
         bins[99] = -20.0;
@@ -1266,7 +1318,7 @@ mod tests {
     #[test]
     fn test_freq_input_suffix_only() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         let orig = app.config.center_freq;
 
         app.handle_key(KeyEvent::from(KeyCode::Char('f')));
@@ -1280,7 +1332,7 @@ mod tests {
     #[test]
     fn test_bw_input_invalid_value() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         let orig = app.config.sample_rate;
 
         app.handle_key(KeyEvent::from(KeyCode::Char('b')));
@@ -1294,7 +1346,7 @@ mod tests {
     #[test]
     fn test_push_many_fft_frames() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         for i in 0..500 {
             let fft = FftResult {
                 bins: vec![-50.0 + (i as f32 * 0.1); 100],
@@ -1309,7 +1361,7 @@ mod tests {
     #[test]
     fn test_auto_range_db_extreme_values() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         let fft = FftResult {
             bins: vec![-200.0, 100.0],
             center_freq: 100e6,
@@ -1324,7 +1376,7 @@ mod tests {
     fn test_tune_negative_frequency() {
         let mut config = AppConfig::default();
         config.center_freq = 500_000.0; // low frequency
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         // Tune down past zero
         for _ in 0..100 {
             app.handle_key(KeyEvent::from(KeyCode::PageDown));
@@ -1336,7 +1388,7 @@ mod tests {
     #[test]
     fn test_tune_very_high_frequency() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         for _ in 0..1000 {
             app.handle_key(KeyEvent::from(KeyCode::PageUp));
         }
@@ -1346,7 +1398,7 @@ mod tests {
     #[test]
     fn test_zoom_bandwidth_extremes_repeatedly() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         // Zoom in repeatedly
         for _ in 0..50 {
             app.handle_key(KeyEvent::from(KeyCode::Char('+')));
@@ -1363,7 +1415,7 @@ mod tests {
     #[test]
     fn test_help_closes_on_any_key() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.show_help = true;
         // 'q' should close help, NOT quit
         app.handle_key(KeyEvent::from(KeyCode::Char('q')));
@@ -1374,7 +1426,7 @@ mod tests {
     #[test]
     fn test_freq_input_backspace() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.handle_key(KeyEvent::from(KeyCode::Char('f')));
         app.handle_key(KeyEvent::from(KeyCode::Char('1')));
         app.handle_key(KeyEvent::from(KeyCode::Char('2')));
@@ -1385,7 +1437,7 @@ mod tests {
     #[test]
     fn test_gain_clamped_to_max() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.config.gain = Some(49.5);
         app.handle_key(KeyEvent::from(KeyCode::Up));
         assert_eq!(app.config.gain, Some(50.0));
@@ -1396,7 +1448,7 @@ mod tests {
     #[test]
     fn test_gain_clamped_to_min() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.config.gain = Some(0.5);
         app.handle_key(KeyEvent::from(KeyCode::Down));
         assert_eq!(app.config.gain, Some(0.0));
@@ -1409,7 +1461,7 @@ mod tests {
     #[test]
     fn test_slash_opens_command_palette() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.handle_key(KeyEvent::from(KeyCode::Char('/')));
         assert!(app.command_palette_active);
     }
@@ -1417,7 +1469,7 @@ mod tests {
     #[test]
     fn test_slash_not_in_freq_input_mode() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.freq_input_mode = true;
         app.handle_key(KeyEvent::from(KeyCode::Char('/')));
         assert!(!app.command_palette_active);
@@ -1427,7 +1479,7 @@ mod tests {
     #[test]
     fn test_slash_not_in_bw_input_mode() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.bw_input_mode = true;
         app.handle_key(KeyEvent::from(KeyCode::Char('/')));
         assert!(!app.command_palette_active);
@@ -1437,7 +1489,7 @@ mod tests {
     #[test]
     fn test_esc_closes_command_palette() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.handle_key(KeyEvent::from(KeyCode::Char('/')));
         assert!(app.command_palette_active);
         app.handle_key(KeyEvent::from(KeyCode::Esc));
@@ -1448,7 +1500,7 @@ mod tests {
     #[test]
     fn test_command_palette_quit() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.handle_key(KeyEvent::from(KeyCode::Char('/')));
         // Type "quit" and press enter
         for c in "quit".chars() {
@@ -1462,7 +1514,7 @@ mod tests {
     #[test]
     fn test_command_palette_channelbw_with_param() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.handle_key(KeyEvent::from(KeyCode::Char('/')));
         for c in "channelbw 50k".chars() {
             app.handle_key(KeyEvent::from(KeyCode::Char(c)));
@@ -1475,7 +1527,7 @@ mod tests {
     #[test]
     fn test_command_palette_frequency_with_param() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.handle_key(KeyEvent::from(KeyCode::Char('/')));
         for c in "frequency 118.1M".chars() {
             app.handle_key(KeyEvent::from(KeyCode::Char(c)));
@@ -1489,7 +1541,7 @@ mod tests {
     fn test_command_palette_center() {
         let mut config = AppConfig::default();
         config.center_freq = 100_000_000.0;
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.cursor_freq = 99_000_000.0; // offset cursor
         app.handle_key(KeyEvent::from(KeyCode::Char('/')));
         for c in "center".chars() {
@@ -1502,7 +1554,7 @@ mod tests {
     #[test]
     fn test_command_palette_typing_does_not_leak() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         let orig_freq = app.config.center_freq;
         app.handle_key(KeyEvent::from(KeyCode::Char('/')));
         // Type 'q' — should NOT quit, should go into palette input
@@ -1519,7 +1571,7 @@ mod tests {
     #[test]
     fn test_command_palette_tab_autocomplete() {
         let config = AppConfig::default();
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         app.handle_key(KeyEvent::from(KeyCode::Char('/')));
         for c in "ch".chars() {
             app.handle_key(KeyEvent::from(KeyCode::Char(c)));

@@ -8,6 +8,8 @@ use clap::Parser;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use crossterm::event::{self, Event};
 
+use termsdr::audio::cpal_sink::CpalSink;
+use termsdr::audio::{audio_thread, AudioControl, AudioSink, NullSink};
 use termsdr::capture::test_signal::TestSource;
 use termsdr::capture::Source;
 use termsdr::config::CliArgs;
@@ -69,9 +71,16 @@ fn main() -> Result<()> {
 fn run_pipeline(config: AppConfig) -> Result<()> {
     // Create channels
     // Capture -> DSP: IQ blocks
-    let (iq_tx, iq_rx): (Sender<Vec<IqSample>>, Receiver<Vec<IqSample>>) = bounded(4);
+    let (iq_tx_dsp, iq_rx_dsp): (Sender<Vec<IqSample>>, Receiver<Vec<IqSample>>) = bounded(4);
+    // Capture -> Audio: IQ blocks
+    let (iq_tx_audio, iq_rx_audio): (Sender<Vec<IqSample>>, Receiver<Vec<IqSample>>) = bounded(4);
     // DSP -> TUI: FFT results
     let (fft_tx, fft_rx): (Sender<FftResult>, Receiver<FftResult>) = bounded(2);
+    // TUI -> Audio: control messages
+    let (audio_ctrl_tx, audio_ctrl_rx) = crossbeam_channel::unbounded::<AudioControl>();
+
+    // Set initial audio state
+    let _ = audio_ctrl_tx.send(AudioControl::SetVolume(80));
 
     // Shutdown signal
     let running = Arc::new(AtomicBool::new(true));
@@ -86,7 +95,7 @@ fn run_pipeline(config: AppConfig) -> Result<()> {
     let capture_handle = thread::Builder::new()
         .name("capture".into())
         .spawn(move || {
-            capture_thread(source_type, sample_rate, center_freq, fft_size, iq_tx, running_capture)
+            capture_thread(source_type, sample_rate, center_freq, fft_size, iq_tx_dsp, iq_tx_audio, running_capture)
         })?;
 
     // Thread 2: DSP
@@ -94,18 +103,36 @@ fn run_pipeline(config: AppConfig) -> Result<()> {
     let dsp_handle = thread::Builder::new()
         .name("dsp".into())
         .spawn(move || {
-            dsp_thread(fft_size, sample_rate, center_freq, iq_rx, fft_tx, running_dsp)
+            dsp_thread(fft_size, sample_rate, center_freq, iq_rx_dsp, fft_tx, running_dsp)
+        })?;
+
+    // Thread 4: Audio
+    let cursor_freq = config.center_freq; // cursor starts at center
+    let channel_bw = 25_000.0;
+    let audio_handle = thread::Builder::new()
+        .name("audio".into())
+        .spawn(move || {
+            let sink: Box<dyn AudioSink> = match CpalSink::new(None) {
+                Ok(s) => Box::new(s),
+                Err(e) => {
+                    eprintln!("Audio: no output device ({}), audio disabled", e);
+                    Box::new(NullSink::new(48000))
+                }
+            };
+            audio_thread(iq_rx_audio, audio_ctrl_rx, sink, center_freq, cursor_freq, channel_bw, sample_rate);
         })?;
 
     // Thread 3: TUI (main thread)
-    let result = tui_thread(config, fft_rx, running.clone());
+    let result = tui_thread(config, fft_rx, running.clone(), audio_ctrl_tx.clone());
 
     // Signal shutdown
     running.store(false, Ordering::SeqCst);
+    let _ = audio_ctrl_tx.send(AudioControl::Shutdown);
 
     // Wait for threads to join
     let _ = capture_handle.join();
     let _ = dsp_handle.join();
+    let _ = audio_handle.join();
 
     result
 }
@@ -115,7 +142,8 @@ fn capture_thread(
     sample_rate: f64,
     center_freq: f64,
     fft_size: usize,
-    tx: Sender<Vec<IqSample>>,
+    tx_dsp: Sender<Vec<IqSample>>,
+    tx_audio: Sender<Vec<IqSample>>,
     running: Arc<AtomicBool>,
 ) {
     let mut source: Box<dyn Source> = match source_type {
@@ -141,8 +169,10 @@ fn capture_thread(
 
         match source.read_samples(&mut buffer) {
             Ok(_) => {
-                // Try to send; if full, drop the block (non-blocking)
-                let _ = tx.try_send(buffer.clone());
+                // Send to DSP (non-blocking)
+                let _ = tx_dsp.try_send(buffer.clone());
+                // Send to Audio (non-blocking, tolerate drops)
+                let _ = tx_audio.try_send(buffer.clone());
             }
             Err(e) => {
                 eprintln!("Capture error: {}", e);
@@ -185,9 +215,10 @@ fn tui_thread(
     config: AppConfig,
     fft_rx: Receiver<FftResult>,
     running: Arc<AtomicBool>,
+    audio_ctrl_tx: crossbeam_channel::Sender<AudioControl>,
 ) -> Result<()> {
     let mut terminal = init_terminal()?;
-    let mut app = App::new(config);
+    let mut app = App::new(config, Some(audio_ctrl_tx));
 
     let target_frame_time = Duration::from_millis(33); // ~30 FPS
 

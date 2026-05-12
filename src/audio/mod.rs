@@ -48,6 +48,7 @@ impl AudioSink for NullSink {
 /// Messages sent to the audio thread to change parameters at runtime.
 pub enum AudioControl {
     SetCursorFreq(f64),
+    SetCenterFreq(f64),
     SetChannelBw(f64),
     SetVolume(u8),            // 0-100
     SetSquelch(Option<f32>),  // None = disabled, Some(dB) = threshold
@@ -71,7 +72,7 @@ pub fn audio_thread(
     iq_rx: crossbeam_channel::Receiver<Vec<IqSample>>,
     control_rx: crossbeam_channel::Receiver<AudioControl>,
     mut sink: Box<dyn AudioSink>,
-    center_freq: f64,
+    mut center_freq: f64,
     cursor_freq: f64,
     channel_bw: f64,
     input_sample_rate: f64,
@@ -101,19 +102,26 @@ pub fn audio_thread(
         volume: &mut f32,
         squelch: &mut Option<f32>,
         muted: &mut bool,
-        center_freq: f64,
+        center_freq: &mut f64,
         input_sample_rate: f64,
         output_sample_rate: f64,
     ) -> bool {
         match ctrl {
             AudioControl::SetCursorFreq(f) => cursor_demod.set_cursor_freq(f),
+            AudioControl::SetCenterFreq(f) => {
+                *center_freq = f;
+                cursor_demod.set_center_freq(f);
+                for demod in vfo_demods.values_mut() {
+                    demod.set_center_freq(f);
+                }
+            }
             AudioControl::SetChannelBw(bw) => cursor_demod.set_channel_bw(bw),
             AudioControl::SetVolume(v) => *volume = v.min(100) as f32 / 100.0,
             AudioControl::SetSquelch(s) => *squelch = s,
             AudioControl::Mute(m) => *muted = m,
             AudioControl::AddVfo { id, freq, channel_bw, mode } => {
                 let demod = Demodulator::new(
-                    center_freq,
+                    *center_freq,
                     freq,
                     channel_bw,
                     input_sample_rate,
@@ -143,7 +151,7 @@ pub fn audio_thread(
         loop {
             match control_rx.try_recv() {
                 Ok(ctrl) => {
-                    if apply_control(ctrl, &mut cursor_demod, &mut vfo_demods, &mut volume, &mut squelch, &mut muted, center_freq, input_sample_rate, output_sample_rate) {
+                    if apply_control(ctrl, &mut cursor_demod, &mut vfo_demods, &mut volume, &mut squelch, &mut muted, &mut center_freq, input_sample_rate, output_sample_rate) {
                         return;
                     }
                 }
@@ -164,7 +172,7 @@ pub fn audio_thread(
             recv(control_rx) -> msg => {
                 match msg {
                     Ok(ctrl) => {
-                        if apply_control(ctrl, &mut cursor_demod, &mut vfo_demods, &mut volume, &mut squelch, &mut muted, center_freq, input_sample_rate, output_sample_rate) {
+                        if apply_control(ctrl, &mut cursor_demod, &mut vfo_demods, &mut volume, &mut squelch, &mut muted, &mut center_freq, input_sample_rate, output_sample_rate) {
                             return;
                         }
                         continue;

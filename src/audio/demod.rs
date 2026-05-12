@@ -438,6 +438,11 @@ impl Demodulator {
         // Phase continues naturally — no need to reset
     }
 
+    /// Update the center frequency (when SDR retunes).
+    pub fn set_center_freq(&mut self, freq: f64) {
+        self.center_freq = freq;
+    }
+
     /// Update the channel bandwidth. Recalculates the FIR filter.
     pub fn set_channel_bw(&mut self, bw: f64) {
         self.fir_filter = FirFilter::low_pass(bw / 2.0, self.input_sample_rate, 101);

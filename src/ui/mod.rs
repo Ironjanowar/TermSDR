@@ -193,11 +193,12 @@ impl App {
         }
     }
 
-    /// Sync shared center frequency for TestSource reactivity.
+    /// Sync shared center frequency for capture/DSP threads and audio thread.
     fn sync_shared_center_freq(&self) {
         if let Some(ref freq) = self.shared_center_freq {
             freq.store(self.config.center_freq.to_bits(), Ordering::Relaxed);
         }
+        self.send_audio_control(AudioControl::SetCenterFreq(self.config.center_freq));
     }
 
     /// Sync shared averaging count for DSP thread.

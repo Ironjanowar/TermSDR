@@ -397,7 +397,7 @@ impl App {
         match &self.config.source {
             SourceType::Test { .. } => DisplaySource::Test,
             SourceType::File { path } => DisplaySource::File(path.clone()),
-            SourceType::RtlSdr => DisplaySource::RtlSdr,
+            SourceType::RtlSdr { .. } => DisplaySource::RtlSdr,
         }
     }
 
@@ -786,7 +786,16 @@ fn draw_command_palette(frame: &mut Frame, size: Rect, palette: &CommandPalette)
 pub fn show_source_selection(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
 ) -> Result<Option<SourceSelection>> {
+    // Enumerate RTL-SDR devices
+    use crate::capture::rtlsdr;
+    let device_count = rtlsdr::get_device_count();
+    let mut devices: Vec<(i32, String)> = Vec::new();
+    for i in 0..device_count {
+        devices.push((i, rtlsdr::get_device_name(i)));
+    }
+
     loop {
+        let devices_ref = &devices;
         terminal.draw(|frame| {
             let size = frame.area();
             let block = Block::default()
@@ -794,14 +803,30 @@ pub fn show_source_selection(
                 .borders(Borders::ALL)
                 .style(Style::default().fg(Color::Cyan));
 
-            let lines = vec![
+            let mut lines = vec![
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("  Detected RTL-SDR devices:", Style::default().fg(Color::White)),
                 ]),
-                Line::from(vec![
+            ];
+
+            if devices_ref.is_empty() {
+                lines.push(Line::from(vec![
                     Span::styled("    (No RTL-SDR devices detected)", Style::default().fg(Color::DarkGray)),
-                ]),
+                ]));
+            } else {
+                for (idx, name) in devices_ref.iter() {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("    [{}] ", idx + 1),
+                            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(name.clone(), Style::default().fg(Color::White)),
+                    ]));
+                }
+            }
+
+            lines.extend([
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("  Other sources:", Style::default().fg(Color::White)),
@@ -820,7 +845,7 @@ pub fn show_source_selection(
                     Span::styled("q", Style::default().fg(Color::Yellow)),
                     Span::styled(" to quit", Style::default().fg(Color::DarkGray)),
                 ]),
-            ];
+            ]);
 
             let paragraph = Paragraph::new(lines).block(block);
             let area = centered_rect(60, 50, size);
@@ -835,12 +860,16 @@ pub fn show_source_selection(
                         return Ok(Some(SourceSelection::Test));
                     }
                     KeyCode::Char('f') | KeyCode::Char('F') => {
-                        // For now, use a hardcoded prompt
                         let path = show_file_input(terminal)?;
                         if let Some(p) = path {
                             return Ok(Some(SourceSelection::File(p)));
                         }
-                        // If they cancelled, loop back to selection
+                    }
+                    KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+                        let num = c.to_digit(10).unwrap() as i32;
+                        if num <= device_count {
+                            return Ok(Some(SourceSelection::RtlSdr((num - 1) as usize)));
+                        }
                     }
                     KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
                         return Ok(None);

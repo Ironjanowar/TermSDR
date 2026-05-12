@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Terminal-based SDR application with spectrum and waterfall displays"
 
+[features]
+default = []
+rtlsdr = ["dep:rtlsdr_rs"]
+
 [dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
@@ -15,6 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 cpal = "0.15"
+rtlsdr_rs = { package = "rtlsdr", version = "0.1", optional = true }
 
 [dev-dependencies]
 approx = "0.5"

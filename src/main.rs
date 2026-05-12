@@ -10,6 +10,7 @@ use crossterm::event::{self, Event};
 
 use termsdr::audio::cpal_sink::CpalSink;
 use termsdr::audio::{audio_thread, AudioControl, AudioSink, NullSink};
+use termsdr::capture::rtlsdr::RtlSdrSource;
 use termsdr::capture::test_signal::TestSource;
 use termsdr::capture::Source;
 use termsdr::config::CliArgs;
@@ -59,8 +60,8 @@ fn main() -> Result<()> {
         SourceSelection::File(path) => {
             config.source = SourceType::File { path: path.clone() };
         }
-        SourceSelection::RtlSdr(_idx) => {
-            config.source = SourceType::RtlSdr;
+        SourceSelection::RtlSdr(idx) => {
+            config.source = SourceType::RtlSdr { device_index: *idx };
         }
     }
 
@@ -88,6 +89,8 @@ fn run_pipeline(config: AppConfig) -> Result<()> {
     let sample_rate = config.sample_rate;
     let center_freq = config.center_freq;
     let fft_size = config.fft_size;
+    let gain = config.gain;
+    let ppm = config.ppm;
 
     // Thread 1: Capture
     let running_capture = running.clone();
@@ -95,7 +98,7 @@ fn run_pipeline(config: AppConfig) -> Result<()> {
     let capture_handle = thread::Builder::new()
         .name("capture".into())
         .spawn(move || {
-            capture_thread(source_type, sample_rate, center_freq, fft_size, iq_tx_dsp, iq_tx_audio, running_capture)
+            capture_thread(source_type, sample_rate, center_freq, fft_size, gain, ppm, iq_tx_dsp, iq_tx_audio, running_capture)
         })?;
 
     // Thread 2: DSP
@@ -142,6 +145,8 @@ fn capture_thread(
     sample_rate: f64,
     center_freq: f64,
     fft_size: usize,
+    gain: Option<f32>,
+    ppm: i32,
     tx_dsp: Sender<Vec<IqSample>>,
     tx_audio: Sender<Vec<IqSample>>,
     running: Arc<AtomicBool>,
@@ -154,9 +159,14 @@ fn capture_thread(
             eprintln!("File replay not yet implemented");
             return;
         }
-        SourceType::RtlSdr => {
-            eprintln!("RTL-SDR not yet implemented");
-            return;
+        SourceType::RtlSdr { device_index } => {
+            match RtlSdrSource::new(device_index, center_freq, sample_rate, gain, ppm) {
+                Ok(src) => Box::new(src),
+                Err(e) => {
+                    eprintln!("RTL-SDR error: {}", e);
+                    return;
+                }
+            }
         }
     };
 

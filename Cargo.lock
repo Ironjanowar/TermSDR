@@ -990,6 +990,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
+name = "rtlsdr"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "136ba5e46b0edd188e277916fed8f5a7f6810622ec49e03831244f79c7cdfb3e"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1204,6 +1213,7 @@ dependencies = [
  "crossterm",
  "num-complex",
  "ratatui",
+ "rtlsdr",
  "rustfft",
  "serde",
  "serde_json",

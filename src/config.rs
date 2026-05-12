@@ -72,7 +72,7 @@ impl CliArgs {
         } else if let Some(path) = &self.file {
             crate::types::SourceType::File { path: path.clone() }
         } else {
-            crate::types::SourceType::RtlSdr
+            crate::types::SourceType::RtlSdr { device_index: 0 }
         };
 
         Ok(AppConfig {

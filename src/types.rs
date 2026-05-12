@@ -65,7 +65,7 @@ pub struct AppConfig {
 #[serde(rename_all = "snake_case")]
 pub enum SourceType {
     /// RTL-SDR hardware.
-    RtlSdr,
+    RtlSdr { device_index: usize },
     /// IQ file replay.
     File { path: String },
     /// Synthetic test signal.

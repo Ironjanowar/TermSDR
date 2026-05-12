@@ -36,6 +36,16 @@ impl FftProcessor {
         }
     }
 
+    /// Update the averaging count at runtime.
+    pub fn set_avg_count(&mut self, count: usize) {
+        let count = count.max(1);
+        if count != self.avg_count {
+            self.avg_count = count;
+            self.frames_accumulated = 0;
+            self.avg_accum = vec![0.0; self.fft_size];
+        }
+    }
+
     /// Process a buffer of IQ samples through windowing + FFT + magnitude.
     ///
     /// Returns `Some(FftResult)` when enough frames have been accumulated
@@ -321,5 +331,49 @@ mod tests {
         // Third call should return the averaged result
         let result = processor.process(&samples, 100e6, 2_048_000.0);
         assert!(result.is_some(), "Third frame should produce averaged result");
+    }
+
+    #[test]
+    fn test_set_avg_count() {
+        let fft_size = 512;
+        let samples = vec![IqSample::new(0.5, 0.0); fft_size];
+        let mut processor = FftProcessor::new(fft_size, 1);
+
+        // With avg_count=1, every call produces a result
+        assert!(processor.process(&samples, 100e6, 2_048_000.0).is_some());
+
+        // Change to avg_count=3
+        processor.set_avg_count(3);
+        assert!(processor.process(&samples, 100e6, 2_048_000.0).is_none());
+        assert!(processor.process(&samples, 100e6, 2_048_000.0).is_none());
+        assert!(processor.process(&samples, 100e6, 2_048_000.0).is_some());
+    }
+
+    #[test]
+    fn test_set_avg_count_zero_clamps_to_one() {
+        let fft_size = 512;
+        let samples = vec![IqSample::new(0.5, 0.0); fft_size];
+        let mut processor = FftProcessor::new(fft_size, 1);
+
+        processor.set_avg_count(0);
+        // Should behave as avg_count=1
+        assert!(processor.process(&samples, 100e6, 2_048_000.0).is_some());
+    }
+
+    #[test]
+    fn test_set_avg_count_same_value_no_reset() {
+        let fft_size = 512;
+        let samples = vec![IqSample::new(0.5, 0.0); fft_size];
+        let mut processor = FftProcessor::new(fft_size, 3);
+
+        // Accumulate one frame
+        assert!(processor.process(&samples, 100e6, 2_048_000.0).is_none());
+
+        // Set same value — should NOT reset accumulator
+        processor.set_avg_count(3);
+
+        // Two more frames should complete the average
+        assert!(processor.process(&samples, 100e6, 2_048_000.0).is_none());
+        assert!(processor.process(&samples, 100e6, 2_048_000.0).is_some());
     }
 }

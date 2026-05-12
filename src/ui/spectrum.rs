@@ -29,6 +29,8 @@ pub struct SpectrumWidget<'a> {
     sample_rate: f64,
     /// VFO markers: (freq, channel_bw, color, id).
     vfos: Vec<(f64, f64, Color, usize)>,
+    /// Squelch threshold in dB (None = disabled).
+    squelch: Option<f32>,
 }
 
 impl<'a> SpectrumWidget<'a> {
@@ -45,6 +47,7 @@ impl<'a> SpectrumWidget<'a> {
             center_freq: 0.0,
             sample_rate: 0.0,
             vfos: Vec::new(),
+            squelch: None,
         }
     }
 
@@ -65,6 +68,11 @@ impl<'a> SpectrumWidget<'a> {
 
     pub fn with_vfos(mut self, vfos: &[(f64, f64, Color, usize)]) -> Self {
         self.vfos = vfos.to_vec();
+        self
+    }
+
+    pub fn with_squelch(mut self, squelch: Option<f32>) -> Self {
+        self.squelch = squelch;
         self
     }
 }
@@ -243,6 +251,31 @@ impl<'a> Widget for SpectrumWidget<'a> {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // Draw squelch line
+        if let Some(sq_db) = self.squelch {
+            let normalized = ((sq_db - self.min_db) / (self.max_db - self.min_db)).clamp(0.0, 1.0);
+            let sq_y = chart_y_start + chart_height - 1 - (normalized * (chart_height - 1) as f32) as u16;
+            if sq_y >= chart_y_start && sq_y < chart_y_start + chart_height {
+                let sq_style = Style::default().fg(Color::LightRed);
+                for col in 0..chart_width {
+                    let x = chart_x + col;
+                    if x < area.x + area.width {
+                        // Dashed pattern: "╌" and " " alternating
+                        if col % 2 == 0 {
+                            buf.set_string(x, sq_y, "╌", sq_style);
+                        }
+                    }
+                }
+                // Label at right end
+                let label = format!("SQ:{:.0}dB", sq_db);
+                let label_len = label.len() as u16;
+                let label_x = (chart_x + chart_width).saturating_sub(label_len);
+                if label_x >= chart_x {
+                    buf.set_string(label_x, sq_y, &label, Style::default().fg(Color::LightRed));
                 }
             }
         }
@@ -495,5 +528,19 @@ mod tests {
     #[test]
     fn test_format_frequency_small_hz() {
         assert_eq!(format_frequency(42.0), "42");
+    }
+
+    #[test]
+    fn test_spectrum_widget_accepts_squelch() {
+        let widget = SpectrumWidget::new(None, -80.0, 0.0)
+            .with_squelch(Some(-60.0));
+        assert!(widget.squelch == Some(-60.0));
+    }
+
+    #[test]
+    fn test_spectrum_widget_squelch_none() {
+        let widget = SpectrumWidget::new(None, -80.0, 0.0)
+            .with_squelch(None);
+        assert!(widget.squelch.is_none());
     }
 }

@@ -27,6 +27,7 @@ impl CommandRegistry {
     /// Create a new registry with all built-in commands.
     pub fn new() -> Self {
         let mut commands = vec![
+            Command { name: "averaging", description: "Set spectrum averaging (1-20)", accepts_param: true, requires_param: true, hotkey: "-" },
             Command { name: "bandwidth", description: "Set sample rate/bandwidth", accepts_param: true, requires_param: true, hotkey: "b" },
             Command { name: "bookmark-add", description: "Save current freq as bookmark", accepts_param: true, requires_param: true, hotkey: "-" },
             Command { name: "bookmark-remove", description: "Remove user bookmark by name", accepts_param: true, requires_param: true, hotkey: "-" },
@@ -199,6 +200,14 @@ impl CommandPalette {
         }
 
         match cmd_name {
+            "averaging" => {
+                let p = param.unwrap();
+                match p.parse::<usize>() {
+                    Ok(v) if v >= 1 && v <= 20 => Ok(CommandAction::SetAveraging(v)),
+                    Ok(_) => Err("Averaging must be 1-20".to_string()),
+                    Err(_) => Err(format!("Invalid averaging value: '{}'", p)),
+                }
+            }
             "bandwidth" => {
                 // requires_param check already ensures param is Some
                 let p = param.unwrap();
@@ -333,6 +342,7 @@ pub enum CommandAction {
     ShowBookmarks,
     AddBookmark(String),
     RemoveBookmark(String),
+    SetAveraging(usize),
 }
 
 #[cfg(test)]
@@ -344,7 +354,7 @@ mod tests {
     #[test]
     fn test_registry_has_all_commands() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.all().len(), 27);
+        assert_eq!(reg.all().len(), 28);
     }
 
     #[test]
@@ -359,7 +369,7 @@ mod tests {
     #[test]
     fn test_registry_filter_empty_returns_all() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.filter("").len(), 27);
+        assert_eq!(reg.filter("").len(), 28);
     }
 
     #[test]
@@ -481,7 +491,7 @@ mod tests {
         for _ in 0..100 {
             palette.select_down();
         }
-        assert_eq!(palette.selected, 26); // 27 commands, index 26
+        assert_eq!(palette.selected, 27); // 28 commands, index 27
     }
 
     #[test]
@@ -1019,5 +1029,60 @@ mod tests {
         let result = palette.execute();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Invalid mode"));
+    }
+
+    // === Averaging command tests ===
+
+    #[test]
+    fn test_execute_averaging_valid() {
+        let mut palette = CommandPalette::new();
+        palette.input = "averaging 5".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::SetAveraging(5)));
+    }
+
+    #[test]
+    fn test_execute_averaging_min() {
+        let mut palette = CommandPalette::new();
+        palette.input = "averaging 1".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::SetAveraging(1)));
+    }
+
+    #[test]
+    fn test_execute_averaging_max() {
+        let mut palette = CommandPalette::new();
+        palette.input = "averaging 20".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::SetAveraging(20)));
+    }
+
+    #[test]
+    fn test_execute_averaging_zero_error() {
+        let mut palette = CommandPalette::new();
+        palette.input = "averaging 0".to_string();
+        assert!(palette.execute().is_err());
+        assert!(palette.execute().unwrap_err().contains("1-20"));
+    }
+
+    #[test]
+    fn test_execute_averaging_over_max_error() {
+        let mut palette = CommandPalette::new();
+        palette.input = "averaging 25".to_string();
+        assert!(palette.execute().is_err());
+        assert!(palette.execute().unwrap_err().contains("1-20"));
+    }
+
+    #[test]
+    fn test_execute_averaging_requires_param() {
+        let mut palette = CommandPalette::new();
+        palette.input = "averaging".to_string();
+        assert!(palette.execute().is_err());
+        assert!(palette.execute().unwrap_err().contains("requires a value"));
+    }
+
+    #[test]
+    fn test_execute_averaging_invalid_param() {
+        let mut palette = CommandPalette::new();
+        palette.input = "averaging abc".to_string();
+        assert!(palette.execute().is_err());
+        assert!(palette.execute().unwrap_err().contains("Invalid averaging"));
     }
 }

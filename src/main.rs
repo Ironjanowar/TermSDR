@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -115,6 +115,9 @@ fn run_pipeline(config: AppConfig) -> Result<()> {
         _ => None,
     };
 
+    // Shared averaging count
+    let shared_averaging = Arc::new(AtomicUsize::new(4));
+
     // Thread 1: Capture
     let running_capture = running.clone();
     let source_type = config.source.clone();
@@ -127,10 +130,11 @@ fn run_pipeline(config: AppConfig) -> Result<()> {
 
     // Thread 2: DSP
     let running_dsp = running.clone();
+    let shared_avg_dsp = shared_averaging.clone();
     let dsp_handle = thread::Builder::new()
         .name("dsp".into())
         .spawn(move || {
-            dsp_thread(fft_size, sample_rate, center_freq, iq_rx_dsp, fft_tx, running_dsp)
+            dsp_thread(fft_size, sample_rate, center_freq, iq_rx_dsp, fft_tx, running_dsp, shared_avg_dsp)
         })?;
 
     // Thread 4: Audio
@@ -150,7 +154,7 @@ fn run_pipeline(config: AppConfig) -> Result<()> {
         })?;
 
     // Thread 3: TUI (main thread)
-    let result = tui_thread(config, fft_rx, running.clone(), audio_ctrl_tx.clone(), shared_center_freq);
+    let result = tui_thread(config, fft_rx, running.clone(), audio_ctrl_tx.clone(), shared_center_freq, shared_averaging);
 
     // Signal shutdown
     running.store(false, Ordering::SeqCst);
@@ -247,12 +251,20 @@ fn dsp_thread(
     rx: Receiver<Vec<IqSample>>,
     tx: Sender<FftResult>,
     running: Arc<AtomicBool>,
+    shared_averaging: Arc<AtomicUsize>,
 ) {
-    let mut processor = FftProcessor::new(fft_size, 1);
+    let mut processor = FftProcessor::new(fft_size, 4);
+    let mut current_avg = 4usize;
 
     while running.load(Ordering::Relaxed) {
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(samples) => {
+                // Check for averaging change
+                let new_avg = shared_averaging.load(Ordering::Relaxed);
+                if new_avg != current_avg {
+                    processor.set_avg_count(new_avg);
+                    current_avg = new_avg;
+                }
                 if let Some(result) = processor.process(&samples, center_freq, sample_rate) {
                     let _ = tx.try_send(result);
                 }
@@ -269,10 +281,12 @@ fn tui_thread(
     running: Arc<AtomicBool>,
     audio_ctrl_tx: crossbeam_channel::Sender<AudioControl>,
     shared_center_freq: Option<Arc<AtomicU64>>,
+    shared_averaging: Arc<AtomicUsize>,
 ) -> Result<()> {
     let mut terminal = init_terminal()?;
     let mut app = App::new(config, Some(audio_ctrl_tx));
     app.shared_center_freq = shared_center_freq;
+    app.shared_averaging = Some(shared_averaging);
 
     let target_frame_time = Duration::from_millis(33); // ~30 FPS
 

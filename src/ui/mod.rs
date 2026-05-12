@@ -5,7 +5,7 @@ pub mod status_bar;
 pub mod waterfall;
 
 use std::io::{self, Stdout};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -122,6 +122,10 @@ pub struct App {
     pub audio_control_tx: Option<crossbeam_channel::Sender<AudioControl>>,
     /// Shared center frequency for TestSource reactivity.
     pub shared_center_freq: Option<Arc<AtomicU64>>,
+    /// Spectrum averaging count.
+    pub averaging: usize,
+    /// Shared averaging count for DSP thread.
+    pub shared_averaging: Option<Arc<AtomicUsize>>,
     /// Demodulation mode for cursor.
     pub demod_mode: DemodMode,
     /// Frame timing.
@@ -164,6 +168,8 @@ impl App {
             bookmark_list: Vec::new(),
             audio_control_tx,
             shared_center_freq: None,
+            averaging: 4,
+            shared_averaging: None,
             demod_mode: DemodMode::AM,
             frame_count: 0,
             last_fps_update: Instant::now(),
@@ -182,6 +188,13 @@ impl App {
     fn sync_shared_center_freq(&self) {
         if let Some(ref freq) = self.shared_center_freq {
             freq.store(self.config.center_freq.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// Sync shared averaging count for DSP thread.
+    fn sync_averaging(&self) {
+        if let Some(ref avg) = self.shared_averaging {
+            avg.store(self.averaging, Ordering::Relaxed);
         }
     }
 
@@ -689,6 +702,10 @@ impl App {
                     }
                 }
             }
+            CommandAction::SetAveraging(count) => {
+                self.averaging = count;
+                self.sync_averaging();
+            }
         }
     }
 
@@ -774,7 +791,8 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         Some(app.channel_bw),
         app.config.center_freq,
         app.config.sample_rate,
-    ).with_vfos(&vfo_data);
+    ).with_vfos(&vfo_data)
+    .with_squelch(app.squelch);
     frame.render_widget(spectrum, chunks[0]);
 
     // Waterfall
@@ -807,7 +825,8 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
     .with_channel_bw(app.channel_bw)
     .with_audio(app.volume, app.cursor_active, app.squelch)
     .with_waterfall_time_span(app.waterfall_time_span)
-    .with_demod_mode(app.demod_mode.label());
+    .with_demod_mode(app.demod_mode.label())
+    .with_averaging(app.averaging);
     frame.render_widget(status, chunks[2]);
 
     // Bandwidth input overlay

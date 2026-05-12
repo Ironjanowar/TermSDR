@@ -46,6 +46,8 @@ pub struct StatusBarWidget {
     pub waterfall_time_span: f64,
     /// Demodulation mode label.
     pub demod_mode: String,
+    /// Spectrum averaging count.
+    pub averaging: usize,
 }
 
 impl StatusBarWidget {
@@ -69,6 +71,7 @@ impl StatusBarWidget {
             squelch: None,
             waterfall_time_span: 20.0,
             demod_mode: "AM".to_string(),
+            averaging: 1,
         }
     }
 
@@ -96,6 +99,11 @@ impl StatusBarWidget {
 
     pub fn with_demod_mode(mut self, mode: &str) -> Self {
         self.demod_mode = mode.to_string();
+        self
+    }
+
+    pub fn with_averaging(mut self, count: usize) -> Self {
+        self.averaging = count;
         self
     }
 
@@ -134,8 +142,8 @@ impl StatusBarWidget {
             None => String::new(),
         };
         format!(
-            " ⏣ Freq: {} │ BW: {} │ ChBW: {} │ Gain: {} │ {}{} │ WF:{:.0}s │ {} │ {:.0} FPS{} ",
-            freq, bw, bw_str, gain_str, vol_str, sq_str, self.waterfall_time_span, self.source, self.fps, cursor_str
+            " ⏣ Freq: {} │ BW: {} │ ChBW: {} │ Gain: {} │ {}{} │ AVG:{} │ WF:{:.0}s │ {} │ {:.0} FPS{} ",
+            freq, bw, bw_str, gain_str, vol_str, sq_str, self.averaging, self.waterfall_time_span, self.source, self.fps, cursor_str
         )
     }
 }
@@ -197,6 +205,7 @@ mod tests {
         assert!(status.contains("TEST"));
         assert!(status.contains("30 FPS"));
         assert!(status.contains("AM \u{1f50a} 80%")); // default demod + volume
+        assert!(status.contains("AVG:1"));
         assert!(status.contains("WF:20s"));
     }
 

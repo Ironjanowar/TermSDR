@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TermSDR — Diseño de Mejora de Audio</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #1c2333;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --orange: #d29922;
+    --purple: #bc8cff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    padding: 2rem;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 2rem;
+    margin-bottom: 0.5rem;
+    background: linear-gradient(135deg, var(--accent), var(--purple));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .subtitle {
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    margin-bottom: 2rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 1rem;
+  }
+  h2 {
+    font-size: 1.4rem;
+    margin-top: 2.5rem;
+    margin-bottom: 1rem;
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  h3 {
+    font-size: 1.1rem;
+    margin-top: 1.5rem;
+    margin-bottom: 0.75rem;
+    color: var(--purple);
+  }
+  p { margin-bottom: 1rem; }
+  .problem-box {
+    background: linear-gradient(135deg, #1a0a0a, #0d1117);
+    border: 1px solid #f8514933;
+    border-left: 4px solid var(--red);
+    padding: 1.25rem;
+    border-radius: 8px;
+    margin: 1rem 0;
+  }
+  .problem-box h3 { color: var(--red); margin-top: 0; }
+  .problem-box ul { padding-left: 1.5rem; }
+  .problem-box li { margin-bottom: 0.5rem; color: var(--text-muted); }
+  .problem-box li strong { color: var(--text); }
+
+  .decision {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin: 1.5rem 0;
+  }
+  .decision-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+  }
+  .decision-number {
+    background: var(--accent);
+    color: var(--bg);
+    font-weight: 700;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.9rem;
+    flex-shrink: 0;
+  }
+  .decision-title { font-size: 1.15rem; font-weight: 600; }
+  .decision-question {
+    color: var(--text-muted);
+    font-style: italic;
+    margin-bottom: 1rem;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.9rem;
+  }
+  th, td {
+    padding: 0.6rem 0.75rem;
+    text-align: left;
+    border: 1px solid var(--border);
+  }
+  th {
+    background: var(--surface2);
+    color: var(--accent);
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  td { background: var(--surface); }
+  tr.chosen td {
+    background: #3fb95010;
+    border-color: #3fb95033;
+  }
+  tr.chosen td:first-child::before {
+    content: "✅ ";
+  }
+
+  .chosen-badge {
+    display: inline-block;
+    background: var(--green);
+    color: var(--bg);
+    font-size: 0.7rem;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    margin-left: 0.5rem;
+    vertical-align: middle;
+  }
+
+  .rationale {
+    background: #58a6ff10;
+    border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem;
+    margin: 1rem 0;
+    border-radius: 0 6px 6px 0;
+    font-size: 0.9rem;
+  }
+  .rationale strong { color: var(--accent); }
+
+  .pipeline {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin: 1rem 0;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.85rem;
+    overflow-x: auto;
+  }
+  .pipeline .stage {
+    display: inline-block;
+    padding: 4px 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    margin: 2px;
+  }
+  .pipeline .stage.new {
+    background: #3fb95020;
+    border-color: var(--green);
+    color: var(--green);
+    font-weight: 600;
+  }
+  .pipeline .arrow { color: var(--text-muted); margin: 0 4px; }
+
+  .modal-preview {
+    background: #000;
+    border: 2px solid var(--accent);
+    border-radius: 8px;
+    padding: 1rem;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    white-space: pre;
+    overflow-x: auto;
+    margin: 1rem 0;
+    color: #c9d1d9;
+  }
+  .modal-preview .highlight { color: var(--green); font-weight: bold; }
+  .modal-preview .label { color: var(--accent); }
+  .modal-preview .dim { color: var(--text-muted); }
+  .modal-preview .section { color: var(--orange); }
+
+  .order-list {
+    list-style: none;
+    padding: 0;
+    counter-reset: order;
+  }
+  .order-list li {
+    counter-increment: order;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1rem 1rem 3.5rem;
+    margin-bottom: 0.75rem;
+    position: relative;
+  }
+  .order-list li::before {
+    content: counter(order);
+    position: absolute;
+    left: 1rem;
+    top: 1rem;
+    background: var(--accent);
+    color: var(--bg);
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.8rem;
+  }
+  .order-list li strong { color: var(--green); }
+  .order-list li .impact {
+    display: inline-block;
+    font-size: 0.75rem;
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin-left: 0.5rem;
+  }
+  .impact-high { background: #3fb95030; color: var(--green); border: 1px solid #3fb95050; }
+  .impact-med { background: #d2992230; color: var(--orange); border: 1px solid #d2992250; }
+  .impact-low { background: #58a6ff20; color: var(--accent); border: 1px solid #58a6ff40; }
+
+  .refs {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+  }
+  .refs a { color: var(--accent); text-decoration: none; }
+  .refs a:hover { text-decoration: underline; }
+
+  .key {
+    display: inline-block;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-bottom: 2px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-family: monospace;
+    font-size: 0.8rem;
+    color: var(--text);
+  }
+</style>
+</head>
+<body>
+
+<h1>📡 TermSDR — Audio Quality Improvement</h1>
+<div class="subtitle">
+  Documento de diseño · Grill Session 🔥 · 12 mayo 2026<br>
+  <strong>Objetivo:</strong> Arreglar el sonido robótico en transmisiones AM de aviación
+</div>
+
+<!-- ============ PROBLEMA ============ -->
+<h2>🔍 El Problema</h2>
+<p>Al escuchar transmisiones AM de aviación (118–137 MHz), la voz suena robótica y es difícil de entender. Después de analizar el pipeline DSP actual y comparar con software profesional (SDR++, GQRX, RTLSDR-Airband), identificamos cuatro causas raíz:</p>
+
+<div class="problem-box">
+  <h3>Causas Raíz</h3>
+  <ul>
+    <li><strong>Sin AGC:</strong> Las señales de aviación varían enormemente en amplitud (aviones cercanos vs lejanos). Sin AGC, las señales débiles son inaudibles y las fuertes se distorsionan.</li>
+    <li><strong>Sin filtro bandpass de audio:</strong> Después del AM demod, el audio contiene desde DC hasta ~12.5 kHz. La voz de aviación solo ocupa 300–3400 Hz. Todo lo demás es ruido → sonido metálico/robótico.</li>
+    <li><strong>Channel bandwidth demasiado ancho:</strong> El default de 25 kHz es el espaciado RF. El ancho real de audio AM para aviación es ~6–8 kHz. Más ancho = más ruido.</li>
+    <li><strong>Sin normalización de audio:</strong> La magnitud cruda del <code>am_demod</code> no está normalizada, los niveles varían mucho.</li>
+  </ul>
+</div>
+
+<!-- ============ DECISIÓN 1 ============ -->
+<div class="decision">
+  <div class="decision-header">
+    <div class="decision-number">1</div>
+    <div class="decision-title">Ubicación del AGC</div>
+  </div>
+  <div class="decision-question">¿Dónde en el pipeline ponemos el AGC?</div>
+
+  <table>
+    <tr><th>Opción</th><th>Descripción</th><th>Pros</th><th>Contras</th></tr>
+    <tr>
+      <td>A. AGC en RF (pre-demod)</td>
+      <td>Normalizar amplitud IQ antes del envelope detection</td>
+      <td>Mejor para SSB; lo que hace GQRX</td>
+      <td>Más complejo; afecta al spectrum/waterfall</td>
+    </tr>
+    <tr class="chosen">
+      <td>B. AGC en audio (post-demod)<span class="chosen-badge">elegida</span></td>
+      <td>Normalizar la salida de audio después del AM envelope</td>
+      <td>Simple; no afecta visualización; suficiente para AM; lo que hace RTLSDR-Airband</td>
+      <td>Menos útil para futuro modo SSB</td>
+    </tr>
+  </table>
+
+  <div class="rationale">
+    <strong>Razón:</strong> Implementación más simple, no interfiere con el spectrum/waterfall, y es perfectamente adecuado para AM de aviación. Si añadimos SSB en el futuro, revisamos AGC en RF.
+  </div>
+</div>
+
+<!-- ============ DECISIÓN 2 ============ -->
+<div class="decision">
+  <div class="decision-header">
+    <div class="decision-number">2</div>
+    <div class="decision-title">Algoritmo de AGC</div>
+  </div>
+  <div class="decision-question">¿Qué tipo de AGC usamos?</div>
+
+  <table>
+    <tr><th>Opción</th><th>Descripción</th><th>Pros</th><th>Contras</th></tr>
+    <tr>
+      <td>A. Peak AGC</td>
+      <td>Trackea picos de señal y normaliza</td>
+      <td>Respuesta rápida</td>
+      <td>Amplifica ruido entre palabras/transmisiones</td>
+    </tr>
+    <tr class="chosen">
+      <td>B. RMS AGC con constantes duales<span class="chosen-badge">elegida</span></td>
+      <td>Trackea nivel RMS con attack rápido / decay lento separados</td>
+      <td>Suave para voz; estándar de la industria</td>
+      <td>Ligeramente más complejo</td>
+    </tr>
+  </table>
+
+  <div class="rationale">
+    <strong>Razón:</strong> El AGC RMS con decay lento es crítico: si la ganancia sube demasiado rápido durante pausas entre palabras, amplifica el ruido de fondo y crea un efecto de "bombeo". SDR++ y GQRX usan exactamente este enfoque.
+  </div>
+
+  <h3>Parámetros del AGC</h3>
+  <table>
+    <tr><th>Parámetro</th><th>Default</th><th>Rango</th><th>Qué hace</th></tr>
+    <tr><td>Enabled</td><td>ON</td><td>ON/OFF</td><td>Activa/desactiva el AGC</td></tr>
+    <tr><td>Attack</td><td>10 ms</td><td>1–100 ms</td><td>Velocidad con la que baja la ganancia al llegar señal fuerte (evita clipping)</td></tr>
+    <tr><td>Decay</td><td>300 ms</td><td>50–2000 ms</td><td>Velocidad con la que sube la ganancia cuando la señal baja (lento = evita amplificar ruido entre palabras)</td></tr>
+    <tr><td>Target Level</td><td>0.3</td><td>0.05–1.0</td><td>Nivel RMS de salida deseado</td></tr>
+    <tr><td>Max Gain</td><td>50 dB</td><td>1–100 dB</td><td>Amplificación máxima (evita ganancia infinita en silencio)</td></tr>
+  </table>
+
+  <h3>¿Cómo funciona?</h3>
+  <p>1. Calcula la potencia RMS sobre una ventana corta de muestras de audio.<br>
+     2. Compara con el target level.<br>
+     3. Si nivel actual > target → <strong>baja</strong> ganancia con la constante de <em>attack</em> (rápido).<br>
+     4. Si nivel actual < target → <strong>sube</strong> ganancia con la constante de <em>decay</em> (lento).<br>
+     5. Limita ganancia a [0 dB, max_gain dB].<br>
+     6. Multiplica las muestras de audio por la ganancia calculada.</p>
+</div>
+
+<!-- ============ DECISIÓN 3 ============ -->
+<div class="decision">
+  <div class="decision-header">
+    <div class="decision-number">3</div>
+    <div class="decision-title">Filtro Bandpass de Audio</div>
+  </div>
+  <div class="decision-question">¿Cómo implementamos el filtro de voz?</div>
+
+  <table>
+    <tr><th>Opción</th><th>Descripción</th><th>Pros</th><th>Contras</th></tr>
+    <tr>
+      <td>A. Dos filtros en serie</td>
+      <td>LPF existente + nuevo HPF encadenados</td>
+      <td>Reutiliza código existente</td>
+      <td>Dos pasadas de convolución; menos eficiente</td>
+    </tr>
+    <tr class="chosen">
+      <td>B. Un solo FIR bandpass<span class="chosen-badge">elegida</span></td>
+      <td>Diseñar un kernel FIR bandpass (highsinc − lowsinc)</td>
+      <td>Una sola convolución; 2x más rápido; más limpio</td>
+      <td>Función nueva, pero trivial</td>
+    </tr>
+  </table>
+
+  <div class="rationale">
+    <strong>Razón:</strong> Un solo filtro FIR bandpass es igual de fácil de implementar (restar dos sinc), ejecuta en la mitad de tiempo, y queda más limpio. Se implementa como <code>FirFilter::band_pass(low_hz, high_hz, sample_rate, num_taps)</code>.
+  </div>
+
+  <h3>Parámetros del Bandpass</h3>
+  <table>
+    <tr><th>Parámetro</th><th>Default</th><th>Rango</th><th>Qué hace</th></tr>
+    <tr><td>Enabled</td><td>ON</td><td>ON/OFF</td><td>Activa/desactiva el filtro bandpass</td></tr>
+    <tr><td>Low Cut</td><td>300 Hz</td><td>50–1000 Hz</td><td>Corte alto (elimina rumble, hum eléctrico)</td></tr>
+    <tr><td>High Cut</td><td>3400 Hz</td><td>1000–8000 Hz</td><td>Corte bajo (elimina hiss, ruido de alta frecuencia)</td></tr>
+  </table>
+
+  <p>Los defaults siguen el estándar <strong>ITU-T G.711</strong> de ancho de banda telefónico (300–3400 Hz), que coincide exactamente con los canales de voz AM de aviación.</p>
+</div>
+
+<!-- ============ PIPELINE ============ -->
+<h2>🔧 Pipeline DSP Actualizado</h2>
+
+<h3>Antes (actual)</h3>
+<div class="pipeline">
+  <span class="stage">Freq Shift</span><span class="arrow">→</span>
+  <span class="stage">LPF</span><span class="arrow">→</span>
+  <span class="stage">Decimate</span><span class="arrow">→</span>
+  <span class="stage">AM Envelope</span><span class="arrow">→</span>
+  <span class="stage">DC Removal</span><span class="arrow">→</span>
+  <span class="stage">Volume</span><span class="arrow">→</span>
+  <span class="stage">Output</span>
+</div>
+
+<h3>Después (nuevo)</h3>
+<div class="pipeline">
+  <span class="stage">Freq Shift</span><span class="arrow">→</span>
+  <span class="stage">LPF</span><span class="arrow">→</span>
+  <span class="stage">Decimate</span><span class="arrow">→</span>
+  <span class="stage">AM Envelope</span><span class="arrow">→</span>
+  <span class="stage new">🆕 Audio Bandpass</span><span class="arrow">→</span>
+  <span class="stage new">🆕 AGC</span><span class="arrow">→</span>
+  <span class="stage">DC Removal</span><span class="arrow">→</span>
+  <span class="stage">Volume</span><span class="arrow">→</span>
+  <span class="stage">Output</span>
+</div>
+
+<!-- ============ DECISIÓN 4 ============ -->
+<div class="decision">
+  <div class="decision-header">
+    <div class="decision-number">4</div>
+    <div class="decision-title">Channel Bandwidth Default</div>
+  </div>
+  <div class="decision-question">¿Qué ancho de canal por defecto para AM?</div>
+
+  <div class="rationale">
+    <strong>Cambio:</strong> De 25 kHz (espaciado RF) a <strong>8 kHz</strong> (recomendación de SDR++). Menos ruido sin cortar contenido de voz. FM y NFM mantienen sus defaults (200 kHz y 25 kHz).
+  </div>
+</div>
+
+<!-- ============ DECISIÓN 5 ============ -->
+<div class="decision">
+  <div class="decision-header">
+    <div class="decision-number">5</div>
+    <div class="decision-title">Modal de Audio Settings</div>
+  </div>
+  <div class="decision-question">¿Cómo gestionamos tantos parámetros de audio?</div>
+
+  <table>
+    <tr><th>Opción</th><th>Descripción</th><th>Pros</th><th>Contras</th></tr>
+    <tr>
+      <td>A. Modales separados</td>
+      <td>Un modal por categoría (AGC, Filtro, etc.)</td>
+      <td>Modales cortos</td>
+      <td>Más hotkeys; difícil de descubrir</td>
+    </tr>
+    <tr class="chosen">
+      <td>B. Un solo modal de Audio Settings<span class="chosen-badge">elegida</span></td>
+      <td>Todos los params en un modal scrollable</td>
+      <td>Todo en un sitio; un solo hotkey</td>
+      <td>Lista más larga</td>
+    </tr>
+  </table>
+
+  <div class="rationale">
+    <strong>Hotkey:</strong> <span class="key">s</span> para abrir el modal. Los atajos existentes (<span class="key">v</span>/<span class="key">V</span> para volumen, <span class="key">w</span>/<span class="key">W</span> para channel BW) siguen funcionando fuera del modal.
+  </div>
+
+  <h3>Preview del Modal</h3>
+  <div class="modal-preview"><span class="dim">┌─</span> <span class="label">Audio Settings</span> <span class="dim">──────────────────────────┐</span>
+<span class="dim">│</span>                                            <span class="dim">│</span>
+<span class="dim">│</span>  <span class="highlight">►</span> <span class="label">Volume:</span>         ████████░░  80%         <span class="dim">│</span>
+<span class="dim">│</span>    <span class="label">Squelch:</span>        -60 dB  [ON]            <span class="dim">│</span>
+<span class="dim">│</span>    <span class="label">Channel BW:</span>     8.0 kHz                 <span class="dim">│</span>
+<span class="dim">│</span>    <span class="label">Demod Mode:</span>     AM                      <span class="dim">│</span>
+<span class="dim">│</span>                                            <span class="dim">│</span>
+<span class="dim">│</span>  <span class="section">── AGC ──────────────────────────────</span>   <span class="dim">│</span>
+<span class="dim">│</span>    <span class="label">AGC Enabled:</span>    [ON]                    <span class="dim">│</span>
+<span class="dim">│</span>    <span class="label">Attack:</span>         10 ms                   <span class="dim">│</span>
+<span class="dim">│</span>    <span class="label">Decay:</span>          300 ms                  <span class="dim">│</span>
+<span class="dim">│</span>    <span class="label">Target Level:</span>   0.3                     <span class="dim">│</span>
+<span class="dim">│</span>    <span class="label">Max Gain:</span>       50 dB                   <span class="dim">│</span>
+<span class="dim">│</span>                                            <span class="dim">│</span>
+<span class="dim">│</span>  <span class="section">── Audio Filter ─────────────────────</span> <span class="dim">│</span>
+<span class="dim">│</span>    <span class="label">Bandpass:</span>       [ON]                    <span class="dim">│</span>
+<span class="dim">│</span>    <span class="label">Low Cut:</span>        300 Hz                  <span class="dim">│</span>
+<span class="dim">│</span>    <span class="label">High Cut:</span>       3400 Hz                 <span class="dim">│</span>
+<span class="dim">│</span>                                            <span class="dim">│</span>
+<span class="dim">│</span>  <span class="dim">[←] -1%  [→] +1%  [⇧←] -10%  [⇧→] +10%</span> <span class="dim">│</span>
+<span class="dim">│</span>  <span class="dim">[Enter] Editar valor  [Esc] Cerrar</span>       <span class="dim">│</span>
+<span class="dim">└────────────────────────────────────────────┘</span></div>
+
+  <h3>Controles del Modal</h3>
+  <table>
+    <tr><th>Tecla</th><th>Acción</th></tr>
+    <tr><td><span class="key">↑</span> / <span class="key">↓</span></td><td>Navegar entre parámetros</td></tr>
+    <tr><td><span class="key">←</span> / <span class="key">→</span></td><td>Ajuste fino (±1 unidad mínima)</td></tr>
+    <tr><td><span class="key">⇧←</span> / <span class="key">⇧→</span></td><td>Ajuste grueso (±10x o salto grande)</td></tr>
+    <tr><td><span class="key">Enter</span></td><td>Modo edición directa (escribir valor exacto)</td></tr>
+    <tr><td><span class="key">Space</span> / <span class="key">Enter</span> en toggles</td><td>Cambiar ON/OFF</td></tr>
+    <tr><td><span class="key">Esc</span></td><td>Cerrar modal</td></tr>
+  </table>
+
+  <h3>Incrementos por Parámetro</h3>
+  <table>
+    <tr><th>Parámetro</th><th>Rango</th><th>Fino (←→)</th><th>Grueso (⇧←⇧→)</th><th>Unidad</th></tr>
+    <tr><td>Volume</td><td>0–100</td><td>±1</td><td>±10</td><td>%</td></tr>
+    <tr><td>Squelch</td><td>−120 – 0</td><td>±1</td><td>±10</td><td>dB</td></tr>
+    <tr><td>Channel BW</td><td>1k–25k</td><td>±500</td><td>±5000</td><td>Hz</td></tr>
+    <tr><td>Demod Mode</td><td>AM/FM/NFM</td><td>ciclar</td><td>ciclar</td><td>—</td></tr>
+    <tr><td>AGC Enabled</td><td>ON/OFF</td><td>toggle</td><td>toggle</td><td>—</td></tr>
+    <tr><td>AGC Attack</td><td>1–100</td><td>±1</td><td>±10</td><td>ms</td></tr>
+    <tr><td>AGC Decay</td><td>50–2000</td><td>±10</td><td>±100</td><td>ms</td></tr>
+    <tr><td>AGC Target</td><td>0.05–1.0</td><td>±0.05</td><td>±0.1</td><td>—</td></tr>
+    <tr><td>AGC Max Gain</td><td>1–100</td><td>±1</td><td>±10</td><td>dB</td></tr>
+    <tr><td>Bandpass Enabled</td><td>ON/OFF</td><td>toggle</td><td>toggle</td><td>—</td></tr>
+    <tr><td>Bandpass Low</td><td>50–1000</td><td>±50</td><td>±100</td><td>Hz</td></tr>
+    <tr><td>Bandpass High</td><td>1000–8000</td><td>±100</td><td>±500</td><td>Hz</td></tr>
+  </table>
+
+  <h3>Leyenda Dinámica</h3>
+  <p>La barra inferior del modal se actualiza según el parámetro seleccionado, mostrando siempre exactamente qué hará cada tecla:</p>
+  <ul>
+    <li>En "Volume": <code>[←] -1%  [→] +1%  [⇧←] -10%  [⇧→] +10%</code></li>
+    <li>En "Squelch": <code>[←] -1 dB  [→] +1 dB  [⇧←] -10 dB  [⇧→] +10 dB</code></li>
+    <li>En "AGC Enabled": <code>[←→] Toggle  [Enter] Toggle</code></li>
+  </ul>
+</div>
+
+<!-- ============ ORDEN ============ -->
+<h2>📋 Orden de Implementación</h2>
+<ul class="order-list">
+  <li><strong>AGC (Automatic Gain Control)</strong> <span class="impact impact-high">IMPACTO ALTO</span><br>Mayor impacto en calidad de audio. RMS AGC post-demod con attack rápido (10ms) y decay lento (300ms).</li>
+  <li><strong>Audio Bandpass Filter</strong> <span class="impact impact-high">IMPACTO ALTO</span><br>FIR bandpass 300–3400 Hz. Elimina ruido fuera de la banda de voz → adiós sonido metálico/robótico.</li>
+  <li><strong>Settings Modal UI</strong> <span class="impact impact-med">IMPACTO MEDIO</span><br>Modal unificado con hotkey <span class="key">s</span>. Navegación ↑↓, ajuste ←→/⇧←⇧→, edición directa con Enter.</li>
+  <li><strong>Channel BW default para AM</strong> <span class="impact impact-low">IMPACTO BAJO</span><br>Cambiar de 25 kHz a 8 kHz. Reducción de ruido sencilla.</li>
+</ul>
+
+<!-- ============ REFERENCIAS ============ -->
+<h2>📚 Referencias</h2>
+<div class="refs">
+  <ul>
+    <li><strong>SDR++</strong> — Recomienda 6–8 kHz de ancho de banda, modo AM, carrier AGC para aviación</li>
+    <li><strong>GQRX</strong> — Basado en GNU Radio, usa AGC en RF + filtros de audio</li>
+    <li><strong>RTLSDR-Airband</strong> — Demodulador AM dedicado para aviación, usa AGC post-demod</li>
+    <li><strong><a href="https://atco2.org/news/how-to-setup-your-sdr-for-clean-atc-audio">ATCO2 Project</a></strong> — Guía profesional de grabación ATC (ajuste de ganancia, FFT size)</li>
+    <li><strong>ITU-T G.711</strong> — Estándar de ancho de banda telefónico (300–3400 Hz)</li>
+  </ul>
+</div>
+
+</body>
+</html>

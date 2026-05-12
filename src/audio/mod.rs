@@ -57,6 +57,14 @@ pub enum AudioControl {
     RemoveVfo(usize),
     SetDemodMode(DemodMode),               // for cursor (id=0)
     SetVfoDemodMode { id: usize, mode: DemodMode },  // for specific VFO
+    SetAgcEnabled(bool),
+    SetAgcAttack(f64),   // ms
+    SetAgcDecay(f64),    // ms
+    SetAgcTarget(f32),
+    SetAgcMaxGain(f32),  // dB
+    SetBandpassEnabled(bool),
+    SetBandpassLowCut(f64),   // Hz
+    SetBandpassHighCut(f64),  // Hz
     Shutdown,
 }
 
@@ -139,6 +147,54 @@ pub fn audio_thread(
             AudioControl::SetVfoDemodMode { id, mode } => {
                 if let Some(demod) = vfo_demods.get_mut(&id) {
                     demod.set_mode(mode);
+                }
+            }
+            AudioControl::SetAgcEnabled(enabled) => {
+                cursor_demod.set_agc_enabled(enabled);
+                for demod in vfo_demods.values_mut() {
+                    demod.set_agc_enabled(enabled);
+                }
+            }
+            AudioControl::SetAgcAttack(ms) => {
+                cursor_demod.set_agc_attack(ms);
+                for demod in vfo_demods.values_mut() {
+                    demod.set_agc_attack(ms);
+                }
+            }
+            AudioControl::SetAgcDecay(ms) => {
+                cursor_demod.set_agc_decay(ms);
+                for demod in vfo_demods.values_mut() {
+                    demod.set_agc_decay(ms);
+                }
+            }
+            AudioControl::SetAgcTarget(level) => {
+                cursor_demod.set_agc_target(level);
+                for demod in vfo_demods.values_mut() {
+                    demod.set_agc_target(level);
+                }
+            }
+            AudioControl::SetAgcMaxGain(db) => {
+                cursor_demod.set_agc_max_gain(db);
+                for demod in vfo_demods.values_mut() {
+                    demod.set_agc_max_gain(db);
+                }
+            }
+            AudioControl::SetBandpassEnabled(enabled) => {
+                cursor_demod.set_bandpass_enabled(enabled);
+                for demod in vfo_demods.values_mut() {
+                    demod.set_bandpass_enabled(enabled);
+                }
+            }
+            AudioControl::SetBandpassLowCut(hz) => {
+                cursor_demod.set_bandpass_low_cut(hz);
+                for demod in vfo_demods.values_mut() {
+                    demod.set_bandpass_low_cut(hz);
+                }
+            }
+            AudioControl::SetBandpassHighCut(hz) => {
+                cursor_demod.set_bandpass_high_cut(hz);
+                for demod in vfo_demods.values_mut() {
+                    demod.set_bandpass_high_cut(hz);
                 }
             }
             AudioControl::Shutdown => return true,

@@ -1,5 +1,6 @@
 pub mod colors;
 pub mod command_palette;
+pub mod settings_modal;
 pub mod spectrum;
 pub mod status_bar;
 pub mod waterfall;
@@ -29,6 +30,7 @@ use crate::audio::demod::DemodMode;
 use crate::bookmarks::{Bookmark, BookmarkStore, default_catalog};
 use crate::types::{AppConfig, FftResult, SourceType};
 use command_palette::{CommandAction, CommandPalette};
+use settings_modal::SettingsModal;
 use spectrum::SpectrumWidget;
 use status_bar::{DisplaySource, StatusBarWidget};
 use waterfall::WaterfallWidget;
@@ -134,6 +136,8 @@ pub struct App {
     pub scan_interval_ms: u64,
     /// Last time scan was performed.
     pub last_scan_time: Instant,
+    /// Settings modal.
+    pub settings_modal: SettingsModal,
     /// Frame timing.
     frame_count: u64,
     last_fps_update: Instant,
@@ -160,7 +164,7 @@ impl App {
             cursor_freq: center,
             cursor_active: true,
             show_help: false,
-            channel_bw: 25_000.0,
+            channel_bw: DemodMode::AM.default_channel_bw(),
             command_palette_active: false,
             command_palette: CommandPalette::new(),
             volume: 80,
@@ -180,6 +184,7 @@ impl App {
             scan_active: false,
             scan_interval_ms: 500,
             last_scan_time: Instant::now(),
+            settings_modal: SettingsModal::new(),
             frame_count: 0,
             last_fps_update: Instant::now(),
             last_frame_count: 0,
@@ -296,6 +301,68 @@ impl App {
         // Help modal takes priority — any key closes it
         if self.show_help {
             self.show_help = false;
+            return;
+        }
+
+        // Settings modal
+        if self.settings_modal.visible {
+            if self.settings_modal.editing {
+                match key.code {
+                    KeyCode::Enter => {
+                        if let Some(ctrl) = self.settings_modal.confirm_edit() {
+                            self.apply_settings_control(ctrl);
+                        }
+                    }
+                    KeyCode::Esc => {
+                        self.settings_modal.cancel_edit();
+                    }
+                    KeyCode::Backspace => {
+                        self.settings_modal.edit_backspace();
+                    }
+                    KeyCode::Char(c) => {
+                        self.settings_modal.edit_type(c);
+                    }
+                    _ => {}
+                }
+            } else {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.settings_modal.close();
+                    }
+                    KeyCode::Up => {
+                        self.settings_modal.select_up();
+                    }
+                    KeyCode::Down => {
+                        self.settings_modal.select_down();
+                    }
+                    KeyCode::Left => {
+                        if let Some(ctrl) = self.settings_modal.adjust_fine(-1) {
+                            self.apply_settings_control(ctrl);
+                        }
+                    }
+                    KeyCode::Right => {
+                        if let Some(ctrl) = self.settings_modal.adjust_fine(1) {
+                            self.apply_settings_control(ctrl);
+                        }
+                    }
+                    KeyCode::Char('H') | KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        if let Some(ctrl) = self.settings_modal.adjust_coarse(-1) {
+                            self.apply_settings_control(ctrl);
+                        }
+                    }
+                    KeyCode::Char('L') | KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        if let Some(ctrl) = self.settings_modal.adjust_coarse(1) {
+                            self.apply_settings_control(ctrl);
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(ctrl) = self.settings_modal.activate() {
+                            self.apply_settings_control(ctrl);
+                        }
+                    }
+                    _ => {}
+                }
+            }
             return;
         }
 
@@ -465,6 +532,9 @@ impl App {
                 self.should_quit = true;
             }
             KeyCode::Char('s') => {
+                self.settings_modal.open(self.volume, self.squelch, self.channel_bw, self.demod_mode);
+            }
+            KeyCode::Char('S') => {
                 self.scan_active = !self.scan_active;
                 if self.scan_active {
                     self.last_scan_time = Instant::now();
@@ -615,6 +685,30 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Apply an audio control from the settings modal, syncing local state.
+    fn apply_settings_control(&mut self, ctrl: AudioControl) {
+        match &ctrl {
+            AudioControl::SetVolume(v) => self.volume = *v,
+            AudioControl::SetSquelch(s) => self.squelch = *s,
+            AudioControl::SetChannelBw(bw) => self.channel_bw = *bw,
+            AudioControl::SetDemodMode(mode) => {
+                self.demod_mode = *mode;
+                self.channel_bw = mode.default_channel_bw();
+                // Sync channel BW back to modal so slider reflects new default
+                for item in &mut self.settings_modal.items {
+                    if item.id == settings_modal::SettingsItemId::ChannelBw {
+                        if let settings_modal::SettingsItemKind::Slider { ref mut value, .. } = item.kind {
+                            *value = self.channel_bw;
+                        }
+                        break;
+                    }
+                }
+            }
+            _ => {} // AGC/bandpass don't have App-level state
+        }
+        self.send_audio_control(ctrl);
     }
 
     /// Apply a command action from the command palette.
@@ -952,6 +1046,11 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
     // Bookmarks modal
     if app.show_bookmarks_modal {
         draw_bookmarks_modal(frame, size, &app.bookmark_list, app.bookmark_selected);
+    }
+
+    // Settings modal
+    if app.settings_modal.visible {
+        draw_settings_modal(frame, size, &app.settings_modal);
     }
 }
 
@@ -1527,6 +1626,155 @@ fn show_file_input(
     }
 }
 
+/// Draw the settings modal.
+fn draw_settings_modal(frame: &mut Frame, size: Rect, modal: &SettingsModal) {
+    use settings_modal::{SettingsItemKind, format_display_value};
+
+    // Calculate total rows: items + section headers + title + footer
+    let section_headers = modal.section_headers();
+    let total_item_rows = modal.items.len() + section_headers.len();
+    let height = (total_item_rows as u16 + 5).min(size.height); // +5 for border, title, footer
+    let width = 54.min(size.width);
+
+    let area = Rect {
+        x: (size.width - width) / 2,
+        y: (size.height - height) / 2,
+        width,
+        height,
+    };
+
+    let block = Block::default()
+        .title(" 🔊 Audio Settings ")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Cyan).bg(Color::Black));
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    let mut row_y = inner.y;
+    let section_starts: Vec<usize> = section_headers.iter().map(|(i, _)| *i).collect();
+
+    for (i, item) in modal.items.iter().enumerate() {
+        if row_y >= inner.y + inner.height.saturating_sub(1) {
+            break;
+        }
+
+        // Section header
+        if section_starts.contains(&i) {
+            if let Some(section) = item.section {
+                let header = format!("── {} ──", section);
+                let pad = inner.width as usize;
+                let centered = format!("{:^width$}", header, width = pad);
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        centered,
+                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                    ))),
+                    Rect { x: inner.x, y: row_y, width: inner.width, height: 1 },
+                );
+                row_y += 1;
+                if row_y >= inner.y + inner.height.saturating_sub(1) {
+                    break;
+                }
+            }
+        }
+
+        let is_selected = i == modal.selected_index;
+        let marker = if is_selected { "► " } else { "  " };
+        let value_str = if modal.editing && is_selected {
+            format!("{}█", modal.edit_buffer)
+        } else {
+            format_display_value(&item.kind)
+        };
+
+        let label_width = 16;
+        let label = format!("{}{:<width$}", marker, item.label, width = label_width);
+
+        let (label_style, value_style) = if is_selected {
+            (
+                Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Black).bg(Color::Yellow),
+            )
+        } else {
+            (
+                Style::default().fg(Color::White),
+                Style::default().fg(Color::Cyan),
+            )
+        };
+
+        // For sliders, add a small bar
+        let bar_str = match &item.kind {
+            SettingsItemKind::Slider { value, min, max, .. } if !modal.editing || !is_selected => {
+                let pct = ((value - min) / (max - min)).clamp(0.0, 1.0);
+                let bar_width = 10;
+                let filled = (pct * bar_width as f64) as usize;
+                let empty = bar_width - filled;
+                format!(" [{}{}]", "█".repeat(filled), "░".repeat(empty))
+            }
+            _ => String::new(),
+        };
+
+        let row_area = Rect { x: inner.x, y: row_y, width: inner.width, height: 1 };
+        if is_selected {
+            frame.render_widget(Clear, row_area);
+        }
+
+        let value_and_bar = format!("{}{}", value_str, bar_str);
+        let line = Line::from(vec![
+            Span::styled(label, label_style),
+            Span::styled(value_and_bar, value_style),
+        ]);
+        frame.render_widget(Paragraph::new(line), row_area);
+        row_y += 1;
+    }
+
+    // Footer with dynamic legend
+    let hint_y = inner.y + inner.height.saturating_sub(1);
+    if hint_y < area.y + area.height {
+        let hint = if modal.editing {
+            "  Type value, Enter confirm, Esc cancel".to_string()
+        } else if let Some(item) = modal.selected_item() {
+            match &item.kind {
+                SettingsItemKind::Slider { fine_step, coarse_step, unit, .. } => {
+                    format!("  ←→ ±{}{} | H/L ±{}{} | Enter edit | Esc close",
+                        format_step(*fine_step), unit, format_step(*coarse_step), unit)
+                }
+                SettingsItemKind::Toggle { .. } => {
+                    "  ←→/Enter toggle | Esc close".to_string()
+                }
+                SettingsItemKind::Cycle { .. } => {
+                    "  ←→/Enter cycle | Esc close".to_string()
+                }
+            }
+        } else {
+            "  Esc close".to_string()
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                hint,
+                Style::default().fg(Color::DarkGray),
+            ))),
+            Rect { x: inner.x, y: hint_y, width: inner.width, height: 1 },
+        );
+    }
+}
+
+/// Format a step value nicely.
+fn format_step(v: f64) -> String {
+    if v.fract().abs() < 1e-9 {
+        format!("{}", v as i64)
+    } else {
+        format!("{}", v)
+    }
+}
+
 /// Helper to create a centered rectangle.
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
@@ -1851,9 +2099,9 @@ mod tests {
     fn test_app_channel_bw_increase() {
         let config = AppConfig::default();
         let mut app = App::new(config, None);
-        assert!((app.channel_bw - 25_000.0).abs() < 1.0);
+        assert!((app.channel_bw - 8_000.0).abs() < 1.0);
         app.handle_key(KeyEvent::from(KeyCode::Char('w')));
-        assert!((app.channel_bw - 50_000.0).abs() < 1.0);
+        assert!((app.channel_bw - 16_000.0).abs() < 1.0);
     }
 
     #[test]
@@ -1861,7 +2109,7 @@ mod tests {
         let config = AppConfig::default();
         let mut app = App::new(config, None);
         app.handle_key(KeyEvent::from(KeyCode::Char('W')));
-        assert!((app.channel_bw - 12_500.0).abs() < 1.0);
+        assert!((app.channel_bw - 4_000.0).abs() < 1.0);
     }
 
     #[test]
@@ -2431,7 +2679,7 @@ mod tests {
 
         app.handle_key(KeyEvent::from(KeyCode::Char('d')));
         assert_eq!(app.demod_mode, DemodMode::AM);
-        assert!((app.channel_bw - 25_000.0).abs() < 1.0);
+        assert!((app.channel_bw - 8_000.0).abs() < 1.0);
     }
 
     #[test]
@@ -2482,10 +2730,10 @@ mod tests {
         let mut app = App::new(config, None);
         assert!(!app.scan_active);
 
-        app.handle_key(KeyEvent::from(KeyCode::Char('s')));
+        app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
         assert!(app.scan_active);
 
-        app.handle_key(KeyEvent::from(KeyCode::Char('s')));
+        app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
         assert!(!app.scan_active);
     }
 
@@ -2495,7 +2743,7 @@ mod tests {
         let mut app = App::new(config, None);
         app.cursor_active = false;
 
-        app.handle_key(KeyEvent::from(KeyCode::Char('s')));
+        app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
         assert!(app.scan_active);
         assert!(app.cursor_active);
     }

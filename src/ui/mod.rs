@@ -389,6 +389,11 @@ impl App {
             KeyCode::Char('c') => {
                 self.cursor_freq = self.config.center_freq;
             }
+            KeyCode::Char('C') => {
+                // Center bandwidth on cursor (retune to cursor frequency)
+                self.config.center_freq = self.cursor_freq;
+                self.sync_shared_center_freq();
+            }
             KeyCode::Char(' ') => {
                 // Toggle cursor active/inactive
                 self.cursor_active = !self.cursor_active;
@@ -483,6 +488,10 @@ impl App {
             CommandAction::CenterCursor => {
                 self.cursor_freq = self.config.center_freq;
                 self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
+            }
+            CommandAction::CenterOnCursor => {
+                self.config.center_freq = self.cursor_freq;
+                self.sync_shared_center_freq();
             }
             CommandAction::GainUp => {
                 let g = self.config.gain.unwrap_or(0.0);

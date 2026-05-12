@@ -29,6 +29,7 @@ impl CommandRegistry {
         let mut commands = vec![
             Command { name: "bandwidth", description: "Set sample rate/bandwidth", accepts_param: true, requires_param: true, hotkey: "b" },
             Command { name: "center", description: "Center cursor on screen", accepts_param: false, requires_param: false, hotkey: "c" },
+            Command { name: "center-on-cursor", description: "Center bandwidth on cursor (retune)", accepts_param: false, requires_param: false, hotkey: "C" },
             Command { name: "channelbw", description: "Set channel bandwidth", accepts_param: true, requires_param: false, hotkey: "w/W" },
             Command { name: "demod", description: "Set demodulation mode (am/fm/nfm)", accepts_param: true, requires_param: false, hotkey: "d" },
             Command { name: "frequency", description: "Jump to frequency", accepts_param: true, requires_param: true, hotkey: "f" },
@@ -203,6 +204,7 @@ impl CommandPalette {
                     .map_err(|_| format!("Invalid bandwidth: '{}'", p))
             }
             "center" => Ok(CommandAction::CenterCursor),
+            "center-on-cursor" => Ok(CommandAction::CenterOnCursor),
             "channelbw" => {
                 if let Some(p) = param {
                     parse_frequency(p)
@@ -297,6 +299,7 @@ pub enum CommandAction {
     SetChannelBw(f64),
     WidenChannelBw,
     CenterCursor,
+    CenterOnCursor,
     GainUp,
     GainDown,
     ShowHelp,
@@ -326,7 +329,7 @@ mod tests {
     #[test]
     fn test_registry_has_all_commands() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.all().len(), 23);
+        assert_eq!(reg.all().len(), 24);
     }
 
     #[test]
@@ -341,7 +344,7 @@ mod tests {
     #[test]
     fn test_registry_filter_empty_returns_all() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.filter("").len(), 23);
+        assert_eq!(reg.filter("").len(), 24);
     }
 
     #[test]
@@ -463,7 +466,7 @@ mod tests {
         for _ in 0..100 {
             palette.select_down();
         }
-        assert_eq!(palette.selected, 22); // 22 commands, index 21
+        assert_eq!(palette.selected, 23); // 24 commands, index 23
     }
 
     #[test]

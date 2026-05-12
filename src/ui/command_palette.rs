@@ -41,6 +41,9 @@ impl CommandRegistry {
             Command { name: "tune-", description: "Tune down 25 kHz", accepts_param: false, requires_param: false, hotkey: "→" },
             Command { name: "tune-coarse+", description: "Tune up 1 MHz", accepts_param: false, requires_param: false, hotkey: "PgUp" },
             Command { name: "tune-coarse-", description: "Tune down 1 MHz", accepts_param: false, requires_param: false, hotkey: "PgDn" },
+            Command { name: "vfo-add", description: "Add VFO at frequency", accepts_param: true, requires_param: true, hotkey: "m" },
+            Command { name: "vfo-clear", description: "Remove all VFOs", accepts_param: false, requires_param: false, hotkey: "-" },
+            Command { name: "vfo-remove", description: "Remove VFO by ID", accepts_param: true, requires_param: true, hotkey: "x" },
             Command { name: "volume", description: "Set volume (0-100)", accepts_param: true, requires_param: true, hotkey: "v/V" },
             Command { name: "waterfall", description: "Set waterfall time span (seconds)", accepts_param: true, requires_param: true, hotkey: "t/T" },
             Command { name: "zoom-in", description: "Zoom in (decrease bandwidth)", accepts_param: false, requires_param: false, hotkey: "+" },
@@ -253,6 +256,20 @@ impl CommandPalette {
                 }
             }
             "zoom-out" => Ok(CommandAction::ZoomOut),
+            "vfo-add" => {
+                let p = param.unwrap();
+                parse_frequency(p)
+                    .map(CommandAction::AddVfo)
+                    .map_err(|_| format!("Invalid frequency: '{}'", p))
+            }
+            "vfo-remove" => {
+                let p = param.unwrap();
+                match p.parse::<usize>() {
+                    Ok(id) if id > 0 => Ok(CommandAction::RemoveVfo(id)),
+                    _ => Err(format!("Invalid VFO ID: '{}'", p)),
+                }
+            }
+            "vfo-clear" => Ok(CommandAction::ClearVfos),
             _ => Err("Unknown command".to_string()),
         }
     }
@@ -280,6 +297,9 @@ pub enum CommandAction {
     SetVolume(u8),
     SetSquelch(Option<f32>),
     SetWaterfallTimeSpan(f64),
+    AddVfo(f64),
+    RemoveVfo(usize),
+    ClearVfos,
 }
 
 #[cfg(test)]
@@ -291,7 +311,7 @@ mod tests {
     #[test]
     fn test_registry_has_all_commands() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.all().len(), 19);
+        assert_eq!(reg.all().len(), 22);
     }
 
     #[test]
@@ -306,7 +326,7 @@ mod tests {
     #[test]
     fn test_registry_filter_empty_returns_all() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.filter("").len(), 19);
+        assert_eq!(reg.filter("").len(), 22);
     }
 
     #[test]
@@ -428,7 +448,7 @@ mod tests {
         for _ in 0..100 {
             palette.select_down();
         }
-        assert_eq!(palette.selected, 18); // 19 commands, index 18
+        assert_eq!(palette.selected, 21); // 22 commands, index 21
     }
 
     #[test]
@@ -863,5 +883,56 @@ mod tests {
         palette.input = "waterfall abc".to_string();
         assert!(palette.execute().is_err());
         assert!(palette.execute().unwrap_err().contains("Invalid time span"));
+    }
+
+    // === VFO command tests ===
+
+    #[test]
+    fn test_execute_vfo_add() {
+        let mut palette = CommandPalette::new();
+        palette.input = "vfo-add 118.1M".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::AddVfo(118_100_000.0)));
+    }
+
+    #[test]
+    fn test_execute_vfo_add_requires_param() {
+        let mut palette = CommandPalette::new();
+        palette.input = "vfo-add".to_string();
+        assert!(palette.execute().is_err());
+    }
+
+    #[test]
+    fn test_execute_vfo_remove() {
+        let mut palette = CommandPalette::new();
+        palette.input = "vfo-remove 3".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::RemoveVfo(3)));
+    }
+
+    #[test]
+    fn test_execute_vfo_remove_requires_param() {
+        let mut palette = CommandPalette::new();
+        palette.input = "vfo-remove".to_string();
+        assert!(palette.execute().is_err());
+    }
+
+    #[test]
+    fn test_execute_vfo_remove_invalid_id() {
+        let mut palette = CommandPalette::new();
+        palette.input = "vfo-remove abc".to_string();
+        assert!(palette.execute().is_err());
+    }
+
+    #[test]
+    fn test_execute_vfo_remove_zero_invalid() {
+        let mut palette = CommandPalette::new();
+        palette.input = "vfo-remove 0".to_string();
+        assert!(palette.execute().is_err());
+    }
+
+    #[test]
+    fn test_execute_vfo_clear() {
+        let mut palette = CommandPalette::new();
+        palette.input = "vfo-clear".to_string();
+        assert_eq!(palette.execute(), Ok(CommandAction::ClearVfos));
     }
 }

@@ -52,6 +52,8 @@ pub enum AudioControl {
     SetVolume(u8),            // 0-100
     SetSquelch(Option<f32>),  // None = disabled, Some(dB) = threshold
     Mute(bool),
+    AddVfo { id: usize, freq: f64, channel_bw: f64 },
+    RemoveVfo(usize),
     Shutdown,
 }
 
@@ -72,8 +74,11 @@ pub fn audio_thread(
     channel_bw: f64,
     input_sample_rate: f64,
 ) {
+    use std::collections::HashMap;
+
     let output_sample_rate = sink.sample_rate() as f64;
-    let mut demod = AmDemodulator::new(
+    // Cursor demodulator (id=0)
+    let mut cursor_demod = AmDemodulator::new(
         center_freq,
         cursor_freq,
         channel_bw,
@@ -81,20 +86,56 @@ pub fn audio_thread(
         output_sample_rate,
     );
 
+    let mut vfo_demods: HashMap<usize, AmDemodulator> = HashMap::new();
+
     let mut volume: f32 = 1.0; // 100%
     let mut muted = false;
     let mut squelch: Option<f32> = None; // dB threshold
+
+    fn apply_control(
+        ctrl: AudioControl,
+        cursor_demod: &mut AmDemodulator,
+        vfo_demods: &mut HashMap<usize, AmDemodulator>,
+        volume: &mut f32,
+        squelch: &mut Option<f32>,
+        muted: &mut bool,
+        center_freq: f64,
+        input_sample_rate: f64,
+        output_sample_rate: f64,
+    ) -> bool {
+        match ctrl {
+            AudioControl::SetCursorFreq(f) => cursor_demod.set_cursor_freq(f),
+            AudioControl::SetChannelBw(bw) => cursor_demod.set_channel_bw(bw),
+            AudioControl::SetVolume(v) => *volume = v.min(100) as f32 / 100.0,
+            AudioControl::SetSquelch(s) => *squelch = s,
+            AudioControl::Mute(m) => *muted = m,
+            AudioControl::AddVfo { id, freq, channel_bw } => {
+                let demod = AmDemodulator::new(
+                    center_freq,
+                    freq,
+                    channel_bw,
+                    input_sample_rate,
+                    output_sample_rate,
+                );
+                vfo_demods.insert(id, demod);
+            }
+            AudioControl::RemoveVfo(id) => {
+                vfo_demods.remove(&id);
+            }
+            AudioControl::Shutdown => return true,
+        }
+        false
+    }
 
     loop {
         // Process all pending control messages (non-blocking)
         loop {
             match control_rx.try_recv() {
-                Ok(AudioControl::SetCursorFreq(f)) => demod.set_cursor_freq(f),
-                Ok(AudioControl::SetChannelBw(bw)) => demod.set_channel_bw(bw),
-                Ok(AudioControl::SetVolume(v)) => volume = v.min(100) as f32 / 100.0,
-                Ok(AudioControl::SetSquelch(s)) => squelch = s,
-                Ok(AudioControl::Mute(m)) => muted = m,
-                Ok(AudioControl::Shutdown) => return,
+                Ok(ctrl) => {
+                    if apply_control(ctrl, &mut cursor_demod, &mut vfo_demods, &mut volume, &mut squelch, &mut muted, center_freq, input_sample_rate, output_sample_rate) {
+                        return;
+                    }
+                }
                 Err(crossbeam_channel::TryRecvError::Empty) => break,
                 Err(crossbeam_channel::TryRecvError::Disconnected) => return,
             }
@@ -111,16 +152,9 @@ pub fn audio_thread(
             }
             recv(control_rx) -> msg => {
                 match msg {
-                    Ok(AudioControl::Shutdown) => return,
                     Ok(ctrl) => {
-                        // Apply the control and loop back
-                        match ctrl {
-                            AudioControl::SetCursorFreq(f) => demod.set_cursor_freq(f),
-                            AudioControl::SetChannelBw(bw) => demod.set_channel_bw(bw),
-                            AudioControl::SetVolume(v) => volume = v.min(100) as f32 / 100.0,
-                            AudioControl::SetSquelch(s) => squelch = s,
-                            AudioControl::Mute(m) => muted = m,
-                            AudioControl::Shutdown => unreachable!(),
+                        if apply_control(ctrl, &mut cursor_demod, &mut vfo_demods, &mut volume, &mut squelch, &mut muted, center_freq, input_sample_rate, output_sample_rate) {
+                            return;
                         }
                         continue;
                     }
@@ -129,10 +163,46 @@ pub fn audio_thread(
             }
         }
 
-        // Demodulate
-        let mut audio = demod.process(&iq_block);
+        // Demodulate: collect outputs from all active demodulators
+        let mut outputs: Vec<Vec<f32>> = Vec::new();
+
+        // Cursor demodulator (id=0) — only if not muted
+        if !muted {
+            outputs.push(cursor_demod.process(&iq_block));
+        }
+
+        // VFO demodulators
+        for demod in vfo_demods.values_mut() {
+            outputs.push(demod.process(&iq_block));
+        }
+
+        let num_active = outputs.len();
+
+        // Mix outputs
+        let audio = if num_active == 0 {
+            // No active demodulators → silence
+            // Estimate output length from cursor demod
+            let silent = cursor_demod.process(&iq_block);
+            vec![0.0f32; silent.len()]
+        } else if num_active == 1 {
+            outputs.into_iter().next().unwrap()
+        } else {
+            let max_len = outputs.iter().map(|o| o.len()).max().unwrap_or(0);
+            let mut mixed = vec![0.0f32; max_len];
+            for output in &outputs {
+                for (i, &s) in output.iter().enumerate() {
+                    mixed[i] += s;
+                }
+            }
+            let divisor = num_active as f32;
+            for s in &mut mixed {
+                *s /= divisor;
+            }
+            mixed
+        };
 
         // Apply volume
+        let mut audio = audio;
         for s in &mut audio {
             *s *= volume;
         }
@@ -155,7 +225,7 @@ pub fn audio_thread(
             false
         };
 
-        if muted || silenced {
+        if silenced {
             let silence = vec![0.0f32; audio.len()];
             let _ = sink.write(&silence);
         } else {
@@ -445,6 +515,107 @@ mod tests {
         });
 
         drop(iq_tx); // Disconnect
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_audio_thread_two_vfos_mix() {
+        use std::sync::{Arc, Mutex};
+
+        let sample_rate = 2.048e6;
+        let center = 100.0e6;
+        let cursor = 100.1e6;
+
+        let (iq_tx, iq_rx) = bounded(4);
+        let (ctrl_tx, ctrl_rx) = unbounded();
+        let recorded = Arc::new(Mutex::new(Vec::<f32>::new()));
+        let recorded2 = recorded.clone();
+
+        struct SharedSink { recorded: Arc<Mutex<Vec<f32>>>, sr: u32 }
+        impl AudioSink for SharedSink {
+            fn write(&mut self, samples: &[f32]) -> anyhow::Result<()> {
+                self.recorded.lock().unwrap().extend_from_slice(samples);
+                Ok(())
+            }
+            fn sample_rate(&self) -> u32 { self.sr }
+        }
+
+        // Add a VFO
+        ctrl_tx.send(AudioControl::AddVfo { id: 1, freq: 100.2e6, channel_bw: 25_000.0 }).unwrap();
+
+        let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
+        let handle = std::thread::spawn(move || {
+            audio_thread(iq_rx, ctrl_rx, sink, center, cursor, 25_000.0, sample_rate);
+        });
+
+        let iq = make_test_iq(cursor, center, sample_rate, 8192);
+        iq_tx.send(iq).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        ctrl_tx.send(AudioControl::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let samples = recorded.lock().unwrap();
+        assert!(!samples.is_empty(), "Should produce mixed audio from cursor + VFO");
+    }
+
+    #[test]
+    fn test_audio_thread_muted_cursor_vfo_plays() {
+        use std::sync::{Arc, Mutex};
+
+        let sample_rate = 2.048e6;
+        let center = 100.0e6;
+        let cursor = 100.1e6;
+
+        let (iq_tx, iq_rx) = bounded(4);
+        let (ctrl_tx, ctrl_rx) = unbounded();
+        let recorded = Arc::new(Mutex::new(Vec::<f32>::new()));
+        let recorded2 = recorded.clone();
+
+        struct SharedSink { recorded: Arc<Mutex<Vec<f32>>>, sr: u32 }
+        impl AudioSink for SharedSink {
+            fn write(&mut self, samples: &[f32]) -> anyhow::Result<()> {
+                self.recorded.lock().unwrap().extend_from_slice(samples);
+                Ok(())
+            }
+            fn sample_rate(&self) -> u32 { self.sr }
+        }
+
+        // Mute cursor, add VFO at signal frequency
+        ctrl_tx.send(AudioControl::Mute(true)).unwrap();
+        ctrl_tx.send(AudioControl::AddVfo { id: 1, freq: cursor, channel_bw: 25_000.0 }).unwrap();
+
+        let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
+        let handle = std::thread::spawn(move || {
+            audio_thread(iq_rx, ctrl_rx, sink, center, cursor, 25_000.0, sample_rate);
+        });
+
+        let iq = make_test_iq(cursor, center, sample_rate, 8192);
+        iq_tx.send(iq).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        ctrl_tx.send(AudioControl::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let samples = recorded.lock().unwrap();
+        assert!(!samples.is_empty());
+        // VFO should produce non-silent audio even though cursor is muted
+        let has_audio = samples.iter().any(|&s| s.abs() > 0.001);
+        assert!(has_audio, "VFO should produce audio when cursor is muted");
+    }
+
+    #[test]
+    fn test_audio_thread_remove_vfo() {
+        let (iq_tx, iq_rx) = bounded(4);
+        let (ctrl_tx, ctrl_rx) = unbounded();
+
+        ctrl_tx.send(AudioControl::AddVfo { id: 1, freq: 100.1e6, channel_bw: 25_000.0 }).unwrap();
+        ctrl_tx.send(AudioControl::RemoveVfo(1)).unwrap();
+
+        let sink = Box::new(NullSink::new(48000));
+        let handle = std::thread::spawn(move || {
+            audio_thread(iq_rx, ctrl_rx, sink, 100.0e6, 100.1e6, 25_000.0, 2.048e6);
+        });
+
+        ctrl_tx.send(AudioControl::Shutdown).unwrap();
         handle.join().unwrap();
     }
 }

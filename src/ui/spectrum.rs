@@ -27,6 +27,8 @@ pub struct SpectrumWidget<'a> {
     center_freq: f64,
     /// Sample rate for bandwidth calculation.
     sample_rate: f64,
+    /// VFO markers: (freq, channel_bw, color, id).
+    vfos: Vec<(f64, f64, Color, usize)>,
 }
 
 impl<'a> SpectrumWidget<'a> {
@@ -42,6 +44,7 @@ impl<'a> SpectrumWidget<'a> {
             channel_bw: None,
             center_freq: 0.0,
             sample_rate: 0.0,
+            vfos: Vec::new(),
         }
     }
 
@@ -57,6 +60,11 @@ impl<'a> SpectrumWidget<'a> {
         self.channel_bw = bw;
         self.center_freq = center_freq;
         self.sample_rate = sample_rate;
+        self
+    }
+
+    pub fn with_vfos(mut self, vfos: &[(f64, f64, Color, usize)]) -> Self {
+        self.vfos = vfos.to_vec();
         self
     }
 }
@@ -234,6 +242,42 @@ impl<'a> Widget for SpectrumWidget<'a> {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // Draw VFO markers
+        if self.sample_rate > 0.0 {
+            let start_freq = self.center_freq - self.sample_rate / 2.0;
+            for &(freq, bw, color, id) in &self.vfos {
+                let left_freq = freq - bw / 2.0;
+                let right_freq = freq + bw / 2.0;
+
+                for &edge_freq in &[left_freq, right_freq] {
+                    let pos = ((edge_freq - start_freq) / self.sample_rate) as f32;
+                    if pos >= 0.0 && pos <= 1.0 {
+                        let edge_x = chart_x + (pos * (chart_width - 1) as f32) as u16;
+                        if edge_x >= chart_x && edge_x < chart_x + chart_width {
+                            for row in 0..chart_height {
+                                if row % 2 == 0 {
+                                    let y = chart_y_start + row;
+                                    if y < area.y + area.height - 1 {
+                                        buf.set_string(edge_x, y, "┊", Style::default().fg(color));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // VFO label at top
+                let center_pos = ((freq - start_freq) / self.sample_rate) as f32;
+                if center_pos >= 0.0 && center_pos <= 1.0 {
+                    let label_x = chart_x + (center_pos * (chart_width - 1) as f32) as u16;
+                    if label_x >= chart_x && label_x < chart_x + chart_width {
+                        let label = format!("{}", id);
+                        buf.set_string(label_x, chart_y_start, &label, Style::default().fg(color));
                     }
                 }
             }

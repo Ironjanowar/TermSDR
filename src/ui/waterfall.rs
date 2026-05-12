@@ -26,6 +26,8 @@ pub struct WaterfallWidget<'a> {
     center_freq: f64,
     /// Sample rate in Hz.
     sample_rate: f64,
+    /// VFO markers: (freq, channel_bw, color, id).
+    vfos: Vec<(f64, f64, ratatui::style::Color, usize)>,
 }
 
 impl<'a> WaterfallWidget<'a> {
@@ -40,6 +42,7 @@ impl<'a> WaterfallWidget<'a> {
             cursor_freq: 0.0,
             center_freq: 0.0,
             sample_rate: 0.0,
+            vfos: Vec::new(),
         }
     }
 
@@ -54,6 +57,11 @@ impl<'a> WaterfallWidget<'a> {
         self.cursor_freq = cursor_freq;
         self.center_freq = center_freq;
         self.sample_rate = sample_rate;
+        self
+    }
+
+    pub fn with_vfos(mut self, vfos: &[(f64, f64, ratatui::style::Color, usize)]) -> Self {
+        self.vfos = vfos.to_vec();
         self
     }
 }
@@ -146,6 +154,32 @@ impl<'a> Widget for WaterfallWidget<'a> {
                                     let y = area.y + row as u16;
                                     if y < area.y + area.height {
                                         buf.set_string(edge_x, y, "┊", Style::default().fg(bw_color));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Draw VFO markers
+        if self.sample_rate > 0.0 {
+            let start_freq = self.center_freq - self.sample_rate / 2.0;
+            for &(freq, bw, color, _id) in &self.vfos {
+                let left_freq = freq - bw / 2.0;
+                let right_freq = freq + bw / 2.0;
+
+                for &edge_freq in &[left_freq, right_freq] {
+                    let pos = ((edge_freq - start_freq) / self.sample_rate) as f32;
+                    if pos >= 0.0 && pos <= 1.0 {
+                        let edge_x = area.x + (pos * (width - 1) as f32) as u16;
+                        if edge_x >= area.x && edge_x < area.x + area.width {
+                            for row in 0..height {
+                                if row % 2 == 0 {
+                                    let y = area.y + row as u16;
+                                    if y < area.y + area.height {
+                                        buf.set_string(edge_x, y, "┊", Style::default().fg(color));
                                     }
                                 }
                             }

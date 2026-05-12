@@ -31,6 +31,27 @@ use spectrum::SpectrumWidget;
 use status_bar::{DisplaySource, StatusBarWidget};
 use waterfall::WaterfallWidget;
 
+/// VFO color palette (8 colors, assigned in order, reused if needed).
+const VFO_COLORS: [Color; 8] = [
+    Color::Red,
+    Color::Green,
+    Color::Blue,
+    Color::Magenta,
+    Color::Cyan,
+    Color::LightRed,
+    Color::White,
+    Color::LightMagenta,
+];
+
+/// A pinned VFO (Variable Frequency Oscillator) with its own frequency and demodulator.
+#[derive(Debug, Clone)]
+pub struct Vfo {
+    pub id: usize,
+    pub freq: f64,
+    pub channel_bw: f64,
+    pub color: Color,
+}
+
 /// Source selection at startup.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SourceSelection {
@@ -80,6 +101,12 @@ pub struct App {
     pub volume: u8,
     /// Squelch threshold in dB (None = disabled).
     pub squelch: Option<f32>,
+    /// Pinned VFOs.
+    pub vfos: Vec<Vfo>,
+    /// Next VFO ID (1-based).
+    pub next_vfo_id: usize,
+    /// Whether VFO delete modal is shown.
+    pub show_vfo_delete_modal: bool,
     /// Audio control channel sender.
     pub audio_control_tx: Option<crossbeam_channel::Sender<AudioControl>>,
     /// Shared center frequency for TestSource reactivity.
@@ -115,6 +142,9 @@ impl App {
             command_palette: CommandPalette::new(),
             volume: 80,
             squelch: None,
+            vfos: Vec::new(),
+            next_vfo_id: 1,
+            show_vfo_delete_modal: false,
             audio_control_tx,
             shared_center_freq: None,
             frame_count: 0,
@@ -178,6 +208,25 @@ impl App {
         // Help modal takes priority — any key closes it
         if self.show_help {
             self.show_help = false;
+            return;
+        }
+
+        // VFO delete modal
+        if self.show_vfo_delete_modal {
+            match key.code {
+                KeyCode::Esc => {
+                    self.show_vfo_delete_modal = false;
+                }
+                KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+                    let num = c.to_digit(10).unwrap() as usize;
+                    if let Some(idx) = self.vfos.iter().position(|v| v.id == num) {
+                        let vfo = self.vfos.remove(idx);
+                        self.send_audio_control(AudioControl::RemoveVfo(vfo.id));
+                        self.show_vfo_delete_modal = false;
+                    }
+                }
+                _ => {}
+            }
             return;
         }
 
@@ -372,6 +421,30 @@ impl App {
                 self.command_palette.reset();
                 self.command_palette_active = true;
             }
+            KeyCode::Char('m') => {
+                if self.vfos.len() < 8 {
+                    let id = self.next_vfo_id;
+                    let color = VFO_COLORS[self.vfos.len() % 8];
+                    let vfo = Vfo {
+                        id,
+                        freq: self.cursor_freq,
+                        channel_bw: self.channel_bw,
+                        color,
+                    };
+                    self.vfos.push(vfo);
+                    self.next_vfo_id += 1;
+                    self.send_audio_control(AudioControl::AddVfo {
+                        id,
+                        freq: self.cursor_freq,
+                        channel_bw: self.channel_bw,
+                    });
+                }
+            }
+            KeyCode::Char('x') => {
+                if !self.vfos.is_empty() {
+                    self.show_vfo_delete_modal = true;
+                }
+            }
             _ => {}
         }
     }
@@ -437,6 +510,38 @@ impl App {
                 self.waterfall_time_span = secs.clamp(5.0, 120.0);
                 self.max_waterfall_rows = (self.waterfall_time_span * 30.0) as usize;
                 self.waterfall_history.truncate(self.max_waterfall_rows);
+            }
+            CommandAction::AddVfo(freq) => {
+                if self.vfos.len() < 8 {
+                    let id = self.next_vfo_id;
+                    let color = VFO_COLORS[self.vfos.len() % 8];
+                    let vfo = Vfo {
+                        id,
+                        freq,
+                        channel_bw: self.channel_bw,
+                        color,
+                    };
+                    self.vfos.push(vfo);
+                    self.next_vfo_id += 1;
+                    self.send_audio_control(AudioControl::AddVfo {
+                        id,
+                        freq,
+                        channel_bw: self.channel_bw,
+                    });
+                }
+            }
+            CommandAction::RemoveVfo(id) => {
+                if let Some(idx) = self.vfos.iter().position(|v| v.id == id) {
+                    self.vfos.remove(idx);
+                    self.send_audio_control(AudioControl::RemoveVfo(id));
+                }
+            }
+            CommandAction::ClearVfos => {
+                let ids: Vec<usize> = self.vfos.iter().map(|v| v.id).collect();
+                self.vfos.clear();
+                for id in ids {
+                    self.send_audio_control(AudioControl::RemoveVfo(id));
+                }
             }
         }
     }
@@ -507,6 +612,9 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         .split(size);
 
     // Spectrum
+    let vfo_data: Vec<(f64, f64, Color, usize)> = app.vfos.iter()
+        .map(|v| (v.freq, v.channel_bw, v.color, v.id))
+        .collect();
     let spectrum = SpectrumWidget::new(
         app.latest_fft.as_ref(),
         app.min_db,
@@ -520,7 +628,7 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         Some(app.channel_bw),
         app.config.center_freq,
         app.config.sample_rate,
-    );
+    ).with_vfos(&vfo_data);
     frame.render_widget(spectrum, chunks[0]);
 
     // Waterfall
@@ -534,7 +642,7 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         app.cursor_freq,
         app.config.center_freq,
         app.config.sample_rate,
-    );
+    ).with_vfos(&vfo_data);
     frame.render_widget(waterfall, chunks[1]);
 
     // Status bar
@@ -608,6 +716,11 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
     if app.command_palette_active {
         draw_command_palette(frame, size, &app.command_palette);
     }
+
+    // VFO delete modal
+    if app.show_vfo_delete_modal {
+        draw_vfo_delete_modal(frame, size, &app.vfos);
+    }
 }
 
 /// Draw the help/cheatsheet modal.
@@ -665,6 +778,14 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
         Line::from(vec![
             Span::styled("    v / V     ", Style::default().fg(Color::Cyan)),
             Span::styled("Volume up/down", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("    m         ", Style::default().fg(Color::Cyan)),
+            Span::styled("Pin VFO at cursor position", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("    x         ", Style::default().fg(Color::Cyan)),
+            Span::styled("Delete a pinned VFO", Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
             Span::styled("    t / T     ", Style::default().fg(Color::Cyan)),
@@ -833,6 +954,60 @@ fn draw_command_palette(frame: &mut Frame, size: Rect, palette: &CommandPalette)
             frame.render_widget(Clear, row_area);
         }
         frame.render_widget(row, row_area);
+    }
+}
+
+/// Draw the VFO delete modal.
+fn draw_vfo_delete_modal(frame: &mut Frame, size: Rect, vfos: &[Vfo]) {
+    use spectrum::format_frequency;
+
+    let height = (vfos.len() as u16 + 5).min(size.height);
+    let width = 50.min(size.width);
+    let area = Rect {
+        x: (size.width - width) / 2,
+        y: (size.height - height) / 2,
+        width,
+        height,
+    };
+
+    let block = Block::default()
+        .title(" Delete VFO ")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Red).bg(Color::Black));
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    for (i, vfo) in vfos.iter().enumerate() {
+        let y = inner.y + i as u16;
+        if y >= inner.y + inner.height.saturating_sub(1) {
+            break;
+        }
+        let freq_str = format_frequency(vfo.freq);
+        let bw_str = format_frequency(vfo.channel_bw);
+        let label = format!("  [{}] {}  BW: {}", vfo.id, freq_str, bw_str);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(label, Style::default().fg(vfo.color)))),
+            Rect { x: inner.x, y, width: inner.width, height: 1 },
+        );
+    }
+
+    let hint_y = inner.y + inner.height.saturating_sub(1);
+    if hint_y < area.y + area.height {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  Press number to delete, Esc to cancel",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            Rect { x: inner.x, y: hint_y, width: inner.width, height: 1 },
+        );
     }
 }
 
@@ -1728,5 +1903,146 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char('T')));
         assert_eq!(app.max_waterfall_rows, 450);
         assert!(app.waterfall_history.len() <= 450);
+    }
+
+    // === VFO tests ===
+
+    #[test]
+    fn test_vfo_create_with_m_key() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        app.cursor_freq = 118_100_000.0;
+        app.channel_bw = 25_000.0;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        assert_eq!(app.vfos.len(), 1);
+        assert_eq!(app.vfos[0].id, 1);
+        assert!((app.vfos[0].freq - 118_100_000.0).abs() < 1.0);
+        assert!((app.vfos[0].channel_bw - 25_000.0).abs() < 1.0);
+        assert_eq!(app.vfos[0].color, Color::Red);
+        assert_eq!(app.next_vfo_id, 2);
+    }
+
+    #[test]
+    fn test_vfo_max_8() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+
+        for _ in 0..10 {
+            app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        }
+        assert_eq!(app.vfos.len(), 8);
+    }
+
+    #[test]
+    fn test_vfo_color_assignment() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        assert_eq!(app.vfos[0].color, Color::Red);
+        assert_eq!(app.vfos[1].color, Color::Green);
+    }
+
+    #[test]
+    fn test_vfo_delete_modal_opens() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+
+        // x with no VFOs does nothing
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+        assert!(!app.show_vfo_delete_modal);
+
+        // Create a VFO, then x opens modal
+        app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+        assert!(app.show_vfo_delete_modal);
+    }
+
+    #[test]
+    fn test_vfo_delete_by_id() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('m'))); // id=1
+        app.handle_key(KeyEvent::from(KeyCode::Char('m'))); // id=2
+        assert_eq!(app.vfos.len(), 2);
+
+        app.show_vfo_delete_modal = true;
+        app.handle_key(KeyEvent::from(KeyCode::Char('1')));
+        assert_eq!(app.vfos.len(), 1);
+        assert_eq!(app.vfos[0].id, 2);
+        assert!(!app.show_vfo_delete_modal);
+    }
+
+    #[test]
+    fn test_vfo_delete_modal_esc() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        app.show_vfo_delete_modal = true;
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(!app.show_vfo_delete_modal);
+        assert_eq!(app.vfos.len(), 1);
+    }
+
+    #[test]
+    fn test_vfo_delete_modal_blocks_other_keys() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        app.show_vfo_delete_modal = true;
+        app.handle_key(KeyEvent::from(KeyCode::Char('q')));
+        assert!(!app.should_quit);
+        assert!(app.show_vfo_delete_modal);
+    }
+
+    #[test]
+    fn test_vfo_clear_command_action() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        assert_eq!(app.vfos.len(), 3);
+
+        app.apply_command_action(CommandAction::ClearVfos);
+        assert_eq!(app.vfos.len(), 0);
+    }
+
+    #[test]
+    fn test_vfo_add_command_action() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+
+        app.apply_command_action(CommandAction::AddVfo(118_100_000.0));
+        assert_eq!(app.vfos.len(), 1);
+        assert!((app.vfos[0].freq - 118_100_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_vfo_remove_command_action() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+
+        app.apply_command_action(CommandAction::AddVfo(118_100_000.0));
+        let id = app.vfos[0].id;
+        app.apply_command_action(CommandAction::RemoveVfo(id));
+        assert_eq!(app.vfos.len(), 0);
+    }
+
+    #[test]
+    fn test_space_mute_does_not_affect_vfos() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(!app.cursor_active);
+        assert_eq!(app.vfos.len(), 1);
     }
 }

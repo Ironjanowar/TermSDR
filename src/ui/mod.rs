@@ -128,6 +128,12 @@ pub struct App {
     pub shared_averaging: Option<Arc<AtomicUsize>>,
     /// Demodulation mode for cursor.
     pub demod_mode: DemodMode,
+    /// Scan mode: auto-tune cursor to strongest signal.
+    pub scan_active: bool,
+    /// Scan interval in milliseconds.
+    pub scan_interval_ms: u64,
+    /// Last time scan was performed.
+    pub last_scan_time: Instant,
     /// Frame timing.
     frame_count: u64,
     last_fps_update: Instant,
@@ -171,6 +177,9 @@ impl App {
             averaging: 4,
             shared_averaging: None,
             demod_mode: DemodMode::AM,
+            scan_active: false,
+            scan_interval_ms: 500,
+            last_scan_time: Instant::now(),
             frame_count: 0,
             last_fps_update: Instant::now(),
             last_frame_count: 0,
@@ -243,6 +252,30 @@ impl App {
         }
 
         self.latest_fft = Some(fft);
+    }
+
+    /// Auto-scan: move cursor to the strongest signal if scan is active.
+    pub fn maybe_scan(&mut self) {
+        if !self.scan_active { return; }
+        if (self.last_scan_time.elapsed().as_millis() as u64) < self.scan_interval_ms { return; }
+        self.last_scan_time = Instant::now();
+
+        if let Some(ref fft) = self.latest_fft {
+            if fft.bins.is_empty() { return; }
+            let (peak_bin, peak_db) = fft.peak();
+
+            // Respect squelch: don't move if peak is below threshold
+            if let Some(sq) = self.squelch {
+                if peak_db < sq {
+                    return;
+                }
+            }
+
+            // Move cursor to peak frequency (within visible bandwidth only)
+            let peak_freq = fft.bin_frequency(peak_bin);
+            self.cursor_freq = peak_freq;
+            self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
+        }
     }
 
     /// Update FPS counter.
@@ -430,10 +463,21 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
             }
+            KeyCode::Char('s') => {
+                self.scan_active = !self.scan_active;
+                if self.scan_active {
+                    self.last_scan_time = Instant::now();
+                    if !self.cursor_active {
+                        self.cursor_active = true;
+                        self.send_audio_control(AudioControl::Mute(false));
+                    }
+                }
+            }
             KeyCode::Left => {
                 if self.cursor_active {
                     // Move cursor left by 2% of visible bandwidth
                     self.cursor_freq -= 0.02 * self.config.sample_rate;
+                    self.scan_active = false;
                     self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
                 } else {
                     // Fine tune: visual scroll right (lower freq)
@@ -445,6 +489,7 @@ impl App {
                 if self.cursor_active {
                     // Move cursor right by 2% of visible bandwidth
                     self.cursor_freq += 0.02 * self.config.sample_rate;
+                    self.scan_active = false;
                     self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
                 } else {
                     // Fine tune: visual scroll left (higher freq)
@@ -706,6 +751,19 @@ impl App {
                 self.averaging = count;
                 self.sync_averaging();
             }
+            CommandAction::ToggleScan => {
+                self.scan_active = !self.scan_active;
+                if self.scan_active {
+                    self.last_scan_time = Instant::now();
+                    if !self.cursor_active {
+                        self.cursor_active = true;
+                        self.send_audio_control(AudioControl::Mute(false));
+                    }
+                }
+            }
+            CommandAction::SetScanInterval(ms) => {
+                self.scan_interval_ms = ms;
+            }
         }
     }
 
@@ -792,7 +850,8 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         app.config.center_freq,
         app.config.sample_rate,
     ).with_vfos(&vfo_data)
-    .with_squelch(app.squelch);
+    .with_squelch(app.squelch)
+    .with_scan(app.scan_active);
     frame.render_widget(spectrum, chunks[0]);
 
     // Waterfall
@@ -826,7 +885,8 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
     .with_audio(app.volume, app.cursor_active, app.squelch)
     .with_waterfall_time_span(app.waterfall_time_span)
     .with_demod_mode(app.demod_mode.label())
-    .with_averaging(app.averaging);
+    .with_averaging(app.averaging)
+    .with_scan(app.scan_active);
     frame.render_widget(status, chunks[2]);
 
     // Bandwidth input overlay
@@ -961,6 +1021,10 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
         Line::from(vec![
             Span::styled("    d         ", Style::default().fg(Color::Cyan)),
             Span::styled("Cycle demod mode (AM \u{2192} FM \u{2192} NFM)", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("    s         ", Style::default().fg(Color::Cyan)),
+            Span::styled("Toggle scan mode (auto-tune to strongest signal)", Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
             Span::styled("    t / T     ", Style::default().fg(Color::Cyan)),
@@ -2407,5 +2471,159 @@ mod tests {
         // Help should close, but demod mode should NOT change
         assert!(!app.show_help);
         assert_eq!(app.demod_mode, DemodMode::AM);
+    }
+
+    // === Scan mode tests ===
+
+    #[test]
+    fn test_scan_toggle_with_s_key() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        assert!(!app.scan_active);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('s')));
+        assert!(app.scan_active);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('s')));
+        assert!(!app.scan_active);
+    }
+
+    #[test]
+    fn test_scan_activates_cursor_if_inactive() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        app.cursor_active = false;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('s')));
+        assert!(app.scan_active);
+        assert!(app.cursor_active);
+    }
+
+    #[test]
+    fn test_maybe_scan_moves_cursor_to_peak() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        app.scan_active = true;
+        app.last_scan_time = Instant::now() - Duration::from_secs(1); // expired
+
+        let mut bins = vec![-100.0_f32; 1024];
+        bins[800] = -10.0; // peak at bin 800
+        let fft = FftResult {
+            bins,
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        };
+        app.push_fft(fft.clone());
+        app.maybe_scan();
+
+        let expected_freq = fft.bin_frequency(800);
+        assert!((app.cursor_freq - expected_freq).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_maybe_scan_does_not_move_when_inactive() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        app.scan_active = false;
+        let orig = app.cursor_freq;
+
+        let mut bins = vec![-100.0_f32; 1024];
+        bins[800] = -10.0;
+        let fft = FftResult {
+            bins,
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        };
+        app.push_fft(fft);
+        app.maybe_scan();
+
+        assert!((app.cursor_freq - orig).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_maybe_scan_respects_squelch() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        app.scan_active = true;
+        app.squelch = Some(-5.0); // squelch at -5 dB
+        app.last_scan_time = Instant::now() - Duration::from_secs(1);
+        let orig = app.cursor_freq;
+
+        let mut bins = vec![-100.0_f32; 1024];
+        bins[800] = -10.0; // peak at -10 dB, below squelch of -5
+        let fft = FftResult {
+            bins,
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        };
+        app.push_fft(fft);
+        app.maybe_scan();
+
+        assert!((app.cursor_freq - orig).abs() < 1.0); // didn't move
+    }
+
+    #[test]
+    fn test_maybe_scan_respects_interval() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        app.scan_active = true;
+        app.scan_interval_ms = 500;
+        app.last_scan_time = Instant::now(); // just scanned
+        let orig = app.cursor_freq;
+
+        let mut bins = vec![-100.0_f32; 1024];
+        bins[800] = -10.0;
+        let fft = FftResult {
+            bins,
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        };
+        app.push_fft(fft);
+        app.maybe_scan();
+
+        assert!((app.cursor_freq - orig).abs() < 1.0); // didn't move, too soon
+    }
+
+    #[test]
+    fn test_manual_cursor_movement_disables_scan() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        app.scan_active = true;
+
+        app.handle_key(KeyEvent::from(KeyCode::Right));
+        assert!(!app.scan_active);
+    }
+
+    #[test]
+    fn test_manual_cursor_left_disables_scan() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        app.scan_active = true;
+
+        app.handle_key(KeyEvent::from(KeyCode::Left));
+        assert!(!app.scan_active);
+    }
+
+    #[test]
+    fn test_command_palette_scan_toggle() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        assert!(!app.scan_active);
+
+        app.apply_command_action(CommandAction::ToggleScan);
+        assert!(app.scan_active);
+
+        app.apply_command_action(CommandAction::ToggleScan);
+        assert!(!app.scan_active);
+    }
+
+    #[test]
+    fn test_command_palette_scan_interval() {
+        let config = AppConfig::default();
+        let mut app = App::new(config, None);
+        assert_eq!(app.scan_interval_ms, 500);
+
+        app.apply_command_action(CommandAction::SetScanInterval(200));
+        assert_eq!(app.scan_interval_ms, 200);
     }
 }

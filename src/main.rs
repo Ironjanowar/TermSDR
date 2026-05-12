@@ -297,6 +297,7 @@ fn tui_thread(
         while let Ok(fft) = fft_rx.try_recv() {
             app.push_fft(fft);
         }
+        app.maybe_scan();
 
         // Draw
         terminal.draw(|frame| {

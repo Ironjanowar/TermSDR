@@ -48,6 +48,8 @@ pub struct StatusBarWidget {
     pub demod_mode: String,
     /// Spectrum averaging count.
     pub averaging: usize,
+    /// Whether scan mode is active.
+    pub scan_active: bool,
 }
 
 impl StatusBarWidget {
@@ -72,6 +74,7 @@ impl StatusBarWidget {
             waterfall_time_span: 20.0,
             demod_mode: "AM".to_string(),
             averaging: 1,
+            scan_active: false,
         }
     }
 
@@ -104,6 +107,11 @@ impl StatusBarWidget {
 
     pub fn with_averaging(mut self, count: usize) -> Self {
         self.averaging = count;
+        self
+    }
+
+    pub fn with_scan(mut self, active: bool) -> Self {
+        self.scan_active = active;
         self
     }
 
@@ -141,9 +149,10 @@ impl StatusBarWidget {
             Some(db) => format!(" │ SQ:{:.0}dB", db),
             None => String::new(),
         };
+        let scan_str = if self.scan_active { " │ 📡SCAN" } else { "" };
         format!(
-            " ⏣ Freq: {} │ BW: {} │ ChBW: {} │ Gain: {} │ {}{} │ AVG:{} │ WF:{:.0}s │ {} │ {:.0} FPS{} ",
-            freq, bw, bw_str, gain_str, vol_str, sq_str, self.averaging, self.waterfall_time_span, self.source, self.fps, cursor_str
+            " ⏣ Freq: {} │ BW: {} │ ChBW: {} │ Gain: {} │ {}{}{} │ AVG:{} │ WF:{:.0}s │ {} │ {:.0} FPS{} ",
+            freq, bw, bw_str, gain_str, vol_str, sq_str, scan_str, self.averaging, self.waterfall_time_span, self.source, self.fps, cursor_str
         )
     }
 }

@@ -31,6 +31,8 @@ pub struct SpectrumWidget<'a> {
     vfos: Vec<(f64, f64, Color, usize)>,
     /// Squelch threshold in dB (None = disabled).
     squelch: Option<f32>,
+    /// Whether scan mode is active.
+    scan_active: bool,
 }
 
 impl<'a> SpectrumWidget<'a> {
@@ -48,6 +50,7 @@ impl<'a> SpectrumWidget<'a> {
             sample_rate: 0.0,
             vfos: Vec::new(),
             squelch: None,
+            scan_active: false,
         }
     }
 
@@ -73,6 +76,11 @@ impl<'a> SpectrumWidget<'a> {
 
     pub fn with_squelch(mut self, squelch: Option<f32>) -> Self {
         self.squelch = squelch;
+        self
+    }
+
+    pub fn with_scan(mut self, active: bool) -> Self {
+        self.scan_active = active;
         self
     }
 }
@@ -313,6 +321,16 @@ impl<'a> Widget for SpectrumWidget<'a> {
                         buf.set_string(label_x, chart_y_start, &label, Style::default().fg(color));
                     }
                 }
+            }
+        }
+
+        // Draw SCAN indicator
+        if self.scan_active {
+            let label = " 📡 SCAN ";
+            let label_x = chart_x + 1;
+            let label_y = chart_y_start;
+            if label_x + label.len() as u16 <= chart_x + chart_width && label_y < area.y + area.height - 1 {
+                buf.set_string(label_x, label_y, label, Style::default().fg(Color::LightGreen).bg(Color::Black));
             }
         }
     }

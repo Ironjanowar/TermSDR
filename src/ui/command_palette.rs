@@ -42,6 +42,8 @@ impl CommandRegistry {
             Command { name: "gain-", description: "Decrease gain by 1 dB", accepts_param: false, requires_param: false, hotkey: "↓" },
             Command { name: "help", description: "Show keyboard shortcuts", accepts_param: false, requires_param: false, hotkey: "?" },
             Command { name: "quit", description: "Quit application", accepts_param: false, requires_param: false, hotkey: "q" },
+            Command { name: "scan", description: "Toggle auto-scan (peak hunting)", accepts_param: false, requires_param: false, hotkey: "s" },
+            Command { name: "scan-interval", description: "Set scan interval (ms)", accepts_param: true, requires_param: true, hotkey: "-" },
             Command { name: "squelch", description: "Set squelch threshold (dB)", accepts_param: true, requires_param: false, hotkey: "-" },
             Command { name: "toggle-cursor", description: "Toggle cursor on/off", accepts_param: false, requires_param: false, hotkey: "Space" },
             Command { name: "tune+", description: "Tune up 25 kHz", accepts_param: false, requires_param: false, hotkey: "←" },
@@ -260,6 +262,15 @@ impl CommandPalette {
             "gain-" => Ok(CommandAction::GainDown),
             "help" => Ok(CommandAction::ShowHelp),
             "quit" => Ok(CommandAction::Quit),
+            "scan" => Ok(CommandAction::ToggleScan),
+            "scan-interval" => {
+                let p = param.unwrap();
+                match p.parse::<u64>() {
+                    Ok(ms) if ms >= 50 && ms <= 5000 => Ok(CommandAction::SetScanInterval(ms)),
+                    Ok(_) => Err("Scan interval must be 50-5000 ms".to_string()),
+                    Err(_) => Err(format!("Invalid interval: '{}'", p)),
+                }
+            }
             "toggle-cursor" => Ok(CommandAction::ToggleCursor),
             "tune+" => Ok(CommandAction::TuneUp),
             "tune-" => Ok(CommandAction::TuneDown),
@@ -343,6 +354,8 @@ pub enum CommandAction {
     AddBookmark(String),
     RemoveBookmark(String),
     SetAveraging(usize),
+    ToggleScan,
+    SetScanInterval(u64),
 }
 
 #[cfg(test)]
@@ -354,7 +367,7 @@ mod tests {
     #[test]
     fn test_registry_has_all_commands() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.all().len(), 28);
+        assert_eq!(reg.all().len(), 30);
     }
 
     #[test]
@@ -369,7 +382,7 @@ mod tests {
     #[test]
     fn test_registry_filter_empty_returns_all() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.filter("").len(), 28);
+        assert_eq!(reg.filter("").len(), 30);
     }
 
     #[test]
@@ -491,7 +504,7 @@ mod tests {
         for _ in 0..100 {
             palette.select_down();
         }
-        assert_eq!(palette.selected, 27); // 28 commands, index 27
+        assert_eq!(palette.selected, 29); // 30 commands, index 29
     }
 
     #[test]

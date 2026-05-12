@@ -5,7 +5,7 @@ edition = "2021"
 description = "Terminal-based SDR application with spectrum and waterfall displays"
 
 [features]
-default = []
+default = ["rtlsdr"]
 rtlsdr = ["dep:rtlsdr_rs"]
 
 [dependencies]

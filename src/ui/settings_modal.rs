@@ -45,6 +45,16 @@ pub struct SettingsItem {
     pub section: Option<&'static str>,
     pub kind: SettingsItemKind,
     pub id: SettingsItemId,
+    pub help_text: &'static str,
+    pub default_kind: DefaultKind,
+}
+
+/// Stores the default value for resetting.
+#[derive(Debug, Clone)]
+pub enum DefaultKind {
+    Slider(f64),
+    Toggle(bool),
+    Cycle(usize),
 }
 
 /// The settings modal state.
@@ -55,6 +65,7 @@ pub struct SettingsModal {
     pub editing: bool,
     pub edit_buffer: String,
     pub items: Vec<SettingsItem>,
+    pub showing_help: bool,
 }
 
 impl Default for SettingsModal {
@@ -72,6 +83,7 @@ impl SettingsModal {
             editing: false,
             edit_buffer: String::new(),
             items: Self::default_items(),
+            showing_help: false,
         }
     }
 
@@ -85,6 +97,8 @@ impl SettingsModal {
                     fine_step: 1.0, coarse_step: 10.0, unit: "%",
                 },
                 id: SettingsItemId::Volume,
+                help_text: "Master audio output volume. Affects all demodulated audio.",
+                default_kind: DefaultKind::Slider(80.0),
             },
             SettingsItem {
                 label: "Squelch",
@@ -94,6 +108,8 @@ impl SettingsModal {
                     fine_step: 1.0, coarse_step: 10.0, unit: "dB",
                 },
                 id: SettingsItemId::Squelch,
+                help_text: "Mutes audio when signal power is below this threshold. Set to a level just above the noise floor to silence static between transmissions.",
+                default_kind: DefaultKind::Slider(-120.0),
             },
             SettingsItem {
                 label: "Channel BW",
@@ -103,6 +119,8 @@ impl SettingsModal {
                     fine_step: 500.0, coarse_step: 5000.0, unit: "Hz",
                 },
                 id: SettingsItemId::ChannelBw,
+                help_text: "RF channel bandwidth. Narrower = less noise but may cut signal. For AM aviation: 6-8 kHz. For FM broadcast: 200 kHz.",
+                default_kind: DefaultKind::Slider(8000.0),
             },
             SettingsItem {
                 label: "Demod Mode",
@@ -112,6 +130,8 @@ impl SettingsModal {
                     options: vec!["AM", "FM", "NFM"],
                 },
                 id: SettingsItemId::DemodMode,
+                help_text: "AM: amplitude modulation (aviation, HF). FM: wideband FM (broadcast radio). NFM: narrowband FM (walkie-talkies, PMR446).",
+                default_kind: DefaultKind::Cycle(0),
             },
             // AGC section
             SettingsItem {
@@ -119,6 +139,8 @@ impl SettingsModal {
                 section: Some("AGC"),
                 kind: SettingsItemKind::Toggle { value: true },
                 id: SettingsItemId::AgcEnabled,
+                help_text: "Automatic Gain Control normalizes volume so weak and strong signals sound similar. Essential for aviation monitoring.",
+                default_kind: DefaultKind::Toggle(true),
             },
             SettingsItem {
                 label: "Attack",
@@ -128,6 +150,8 @@ impl SettingsModal {
                     fine_step: 1.0, coarse_step: 10.0, unit: "ms",
                 },
                 id: SettingsItemId::AgcAttack,
+                help_text: "How fast AGC reduces gain when a loud signal arrives. Lower = faster response, prevents clipping.",
+                default_kind: DefaultKind::Slider(10.0),
             },
             SettingsItem {
                 label: "Decay",
@@ -137,6 +161,8 @@ impl SettingsModal {
                     fine_step: 10.0, coarse_step: 100.0, unit: "ms",
                 },
                 id: SettingsItemId::AgcDecay,
+                help_text: "How fast AGC increases gain when signal gets weaker. Higher = slower, avoids amplifying noise between words.",
+                default_kind: DefaultKind::Slider(300.0),
             },
             SettingsItem {
                 label: "Target Level",
@@ -146,6 +172,8 @@ impl SettingsModal {
                     fine_step: 0.05, coarse_step: 0.1, unit: "",
                 },
                 id: SettingsItemId::AgcTarget,
+                help_text: "Desired RMS output level. Higher = louder normalized output.",
+                default_kind: DefaultKind::Slider(0.3),
             },
             SettingsItem {
                 label: "Max Gain",
@@ -155,6 +183,8 @@ impl SettingsModal {
                     fine_step: 1.0, coarse_step: 10.0, unit: "dB",
                 },
                 id: SettingsItemId::AgcMaxGain,
+                help_text: "Maximum amplification AGC can apply. Limits how much background noise gets amplified during silence.",
+                default_kind: DefaultKind::Slider(50.0),
             },
             // Audio Filter section
             SettingsItem {
@@ -162,6 +192,8 @@ impl SettingsModal {
                 section: Some("Audio Filter"),
                 kind: SettingsItemKind::Toggle { value: false },
                 id: SettingsItemId::BandpassEnabled,
+                help_text: "Voice bandpass filter removes frequencies outside the speech range, reducing noise and improving clarity.",
+                default_kind: DefaultKind::Toggle(false),
             },
             SettingsItem {
                 label: "Low Cut",
@@ -171,6 +203,8 @@ impl SettingsModal {
                     fine_step: 50.0, coarse_step: 100.0, unit: "Hz",
                 },
                 id: SettingsItemId::BandpassLowCut,
+                help_text: "High-pass cutoff frequency. Removes low-frequency rumble and hum below this frequency. Standard voice: 300 Hz.",
+                default_kind: DefaultKind::Slider(300.0),
             },
             SettingsItem {
                 label: "High Cut",
@@ -180,6 +214,8 @@ impl SettingsModal {
                     fine_step: 100.0, coarse_step: 500.0, unit: "Hz",
                 },
                 id: SettingsItemId::BandpassHighCut,
+                help_text: "Low-pass cutoff frequency. Removes high-frequency hiss and noise above this frequency. Standard voice: 3400 Hz.",
+                default_kind: DefaultKind::Slider(3000.0),
             },
         ]
     }
@@ -226,7 +262,32 @@ impl SettingsModal {
     pub fn close(&mut self) {
         self.visible = false;
         self.editing = false;
+        self.showing_help = false;
         self.edit_buffer.clear();
+    }
+
+    /// Toggle help tooltip for the selected item.
+    pub fn toggle_help(&mut self) {
+        self.showing_help = !self.showing_help;
+    }
+
+    /// Reset the selected item to its default value. Returns the AudioControl if changed.
+    pub fn reset_to_default(&mut self) -> Option<AudioControl> {
+        if self.items.is_empty() { return None; }
+        let item = &mut self.items[self.selected_index];
+        match (&mut item.kind, &item.default_kind) {
+            (SettingsItemKind::Slider { value, .. }, DefaultKind::Slider(def)) => {
+                *value = *def;
+            }
+            (SettingsItemKind::Toggle { value }, DefaultKind::Toggle(def)) => {
+                *value = *def;
+            }
+            (SettingsItemKind::Cycle { value, .. }, DefaultKind::Cycle(def)) => {
+                *value = *def;
+            }
+            _ => {}
+        }
+        self.audio_control_for(self.selected_index)
     }
 
     /// Move selection up (wraps).
@@ -846,6 +907,93 @@ mod tests {
         match ctrl {
             Some(AudioControl::SetBandpassHighCut(v)) => assert!((v - 2900.0).abs() < 0.01),
             _ => panic!("Expected SetBandpassHighCut"),
+        }
+    }
+
+    #[test]
+    fn test_help_toggle_on_off() {
+        let mut modal = SettingsModal::new();
+        modal.visible = true;
+        assert!(!modal.showing_help);
+        modal.toggle_help();
+        assert!(modal.showing_help);
+        modal.toggle_help();
+        assert!(!modal.showing_help);
+    }
+
+    #[test]
+    fn test_help_dismissed_on_close() {
+        let mut modal = SettingsModal::new();
+        modal.visible = true;
+        modal.showing_help = true;
+        modal.close();
+        assert!(!modal.showing_help);
+    }
+
+    #[test]
+    fn test_reset_slider_to_default() {
+        let mut modal = SettingsModal::new();
+        // Change volume from 80 to 42
+        if let SettingsItemKind::Slider { ref mut value, .. } = modal.items[0].kind {
+            *value = 42.0;
+        }
+        let ctrl = modal.reset_to_default();
+        if let SettingsItemKind::Slider { value, .. } = &modal.items[0].kind {
+            assert!((*value - 80.0).abs() < 0.01);
+        } else {
+            panic!("Expected slider");
+        }
+        assert!(matches!(ctrl, Some(AudioControl::SetVolume(80))));
+    }
+
+    #[test]
+    fn test_reset_toggle_to_default() {
+        let mut modal = SettingsModal::new();
+        modal.selected_index = 4; // AGC Enabled, default true
+        if let SettingsItemKind::Toggle { ref mut value } = modal.items[4].kind {
+            *value = false;
+        }
+        let ctrl = modal.reset_to_default();
+        assert!(matches!(modal.items[4].kind, SettingsItemKind::Toggle { value: true }));
+        assert!(matches!(ctrl, Some(AudioControl::SetAgcEnabled(true))));
+    }
+
+    #[test]
+    fn test_reset_cycle_to_default() {
+        let mut modal = SettingsModal::new();
+        modal.selected_index = 3; // DemodMode, default 0 (AM)
+        if let SettingsItemKind::Cycle { ref mut value, .. } = modal.items[3].kind {
+            *value = 2; // NFM
+        }
+        let ctrl = modal.reset_to_default();
+        assert!(matches!(modal.items[3].kind, SettingsItemKind::Cycle { value: 0, .. }));
+        assert!(matches!(ctrl, Some(AudioControl::SetDemodMode(DemodMode::AM))));
+    }
+
+    #[test]
+    fn test_all_items_have_help_text() {
+        let modal = SettingsModal::new();
+        for item in &modal.items {
+            assert!(!item.help_text.is_empty(), "Item {:?} should have help text", item.id);
+        }
+    }
+
+    #[test]
+    fn test_default_values_match_initial() {
+        let modal = SettingsModal::new();
+        for item in &modal.items {
+            match (&item.kind, &item.default_kind) {
+                (SettingsItemKind::Slider { value, .. }, DefaultKind::Slider(def)) => {
+                    assert!((*value - *def).abs() < 0.01, "Item {:?} default mismatch", item.id);
+                }
+                (SettingsItemKind::Toggle { value }, DefaultKind::Toggle(def)) => {
+                    assert_eq!(*value, *def, "Item {:?} default mismatch", item.id);
+                }
+                (SettingsItemKind::Cycle { value, .. }, DefaultKind::Cycle(def)) => {
+                    assert_eq!(*value, *def, "Item {:?} default mismatch", item.id);
+                }
+                _ => panic!("Item {:?} kind/default mismatch", item.id),
+            }
         }
     }
 }

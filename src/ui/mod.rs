@@ -306,6 +306,16 @@ impl App {
 
         // Settings modal
         if self.settings_modal.visible {
+            // While showing help, only ? and Esc dismiss it
+            if self.settings_modal.showing_help {
+                match key.code {
+                    KeyCode::Char('?') | KeyCode::Esc => {
+                        self.settings_modal.showing_help = false;
+                    }
+                    _ => {} // ignore all other keys
+                }
+                return;
+            }
             if self.settings_modal.editing {
                 match key.code {
                     KeyCode::Enter => {
@@ -357,6 +367,14 @@ impl App {
                     }
                     KeyCode::Enter => {
                         if let Some(ctrl) = self.settings_modal.activate() {
+                            self.apply_settings_control(ctrl);
+                        }
+                    }
+                    KeyCode::Char('?') => {
+                        self.settings_modal.toggle_help();
+                    }
+                    KeyCode::Char('d') => {
+                        if let Some(ctrl) = self.settings_modal.reset_to_default() {
                             self.apply_settings_control(ctrl);
                         }
                     }
@@ -1740,17 +1758,19 @@ fn draw_settings_modal(frame: &mut Frame, size: Rect, modal: &SettingsModal) {
     if hint_y < area.y + area.height {
         let hint = if modal.editing {
             "  Type value, Enter confirm, Esc cancel".to_string()
+        } else if modal.showing_help {
+            "  [?] Close help | [Esc] Close help".to_string()
         } else if let Some(item) = modal.selected_item() {
             match &item.kind {
                 SettingsItemKind::Slider { fine_step, coarse_step, unit, .. } => {
-                    format!("  ←→ ±{}{} | H/L ±{}{} | Enter edit | Esc close",
+                    format!("  ←→ ±{}{} | H/L ±{}{} | ? Help | d Default",
                         format_step(*fine_step), unit, format_step(*coarse_step), unit)
                 }
                 SettingsItemKind::Toggle { .. } => {
-                    "  ←→/Enter toggle | Esc close".to_string()
+                    "  ←→/Enter toggle | ? Help | d Default".to_string()
                 }
                 SettingsItemKind::Cycle { .. } => {
-                    "  ←→/Enter cycle | Esc close".to_string()
+                    "  ←→/Enter cycle | ? Help | d Default".to_string()
                 }
             }
         } else {
@@ -1763,6 +1783,54 @@ fn draw_settings_modal(frame: &mut Frame, size: Rect, modal: &SettingsModal) {
             ))),
             Rect { x: inner.x, y: hint_y, width: inner.width, height: 1 },
         );
+    }
+
+    // Help tooltip overlay
+    if modal.showing_help {
+        if let Some(item) = modal.selected_item() {
+            let help = item.help_text;
+            // Word-wrap help text to fit tooltip width
+            let tooltip_width = (width.saturating_sub(4)) as usize;
+            let mut lines: Vec<String> = Vec::new();
+            let mut current_line = String::new();
+            for word in help.split_whitespace() {
+                if current_line.is_empty() {
+                    current_line = word.to_string();
+                } else if current_line.len() + 1 + word.len() <= tooltip_width.saturating_sub(2) {
+                    current_line.push(' ');
+                    current_line.push_str(word);
+                } else {
+                    lines.push(current_line);
+                    current_line = word.to_string();
+                }
+            }
+            if !current_line.is_empty() {
+                lines.push(current_line);
+            }
+            let tooltip_h = (lines.len() as u16 + 2).min(size.height); // +2 for border
+            let tooltip_y = area.y + area.height;
+            let tooltip_y = if tooltip_y + tooltip_h > size.height {
+                area.y.saturating_sub(tooltip_h)
+            } else {
+                tooltip_y
+            };
+            let tooltip_area = Rect {
+                x: area.x,
+                y: tooltip_y,
+                width: width,
+                height: tooltip_h,
+            };
+            let tooltip_block = Block::default()
+                .title(format!(" {} ", item.label))
+                .borders(Borders::ALL)
+                .style(Style::default().fg(Color::Yellow).bg(Color::Black));
+            frame.render_widget(Clear, tooltip_area);
+            let help_lines: Vec<Line> = lines.iter().map(|l| {
+                Line::from(Span::styled(l.as_str(), Style::default().fg(Color::White)))
+            }).collect();
+            let help_para = Paragraph::new(help_lines).block(tooltip_block);
+            frame.render_widget(help_para, tooltip_area);
+        }
     }
 }
 

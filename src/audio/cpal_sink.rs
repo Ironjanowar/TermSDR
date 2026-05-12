@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 /// Wrapper to allow `cpal::Stream` to be sent across threads.
 /// Safety: `CpalSink` is only ever used from a single thread (the audio thread).
+#[allow(dead_code)]
 struct SendStream(cpal::Stream);
 unsafe impl Send for SendStream {}
 

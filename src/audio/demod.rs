@@ -213,7 +213,6 @@ pub struct AmDemodulator {
     cursor_freq: f64,
     center_freq: f64,
     input_sample_rate: f64,
-    output_sample_rate: f64,
 }
 
 impl AmDemodulator {
@@ -248,7 +247,6 @@ impl AmDemodulator {
             cursor_freq,
             center_freq,
             input_sample_rate,
-            output_sample_rate,
         }
     }
 

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -92,13 +92,22 @@ fn run_pipeline(config: AppConfig) -> Result<()> {
     let gain = config.gain;
     let ppm = config.ppm;
 
+    // Shared center frequency for TestSource reactivity
+    let shared_center_freq = match &config.source {
+        SourceType::Test { .. } => {
+            Some(Arc::new(AtomicU64::new(center_freq.to_bits())))
+        }
+        _ => None,
+    };
+
     // Thread 1: Capture
     let running_capture = running.clone();
     let source_type = config.source.clone();
+    let shared_freq_capture = shared_center_freq.clone();
     let capture_handle = thread::Builder::new()
         .name("capture".into())
         .spawn(move || {
-            capture_thread(source_type, sample_rate, center_freq, fft_size, gain, ppm, iq_tx_dsp, iq_tx_audio, running_capture)
+            capture_thread(source_type, sample_rate, center_freq, fft_size, gain, ppm, iq_tx_dsp, iq_tx_audio, running_capture, shared_freq_capture)
         })?;
 
     // Thread 2: DSP
@@ -126,7 +135,7 @@ fn run_pipeline(config: AppConfig) -> Result<()> {
         })?;
 
     // Thread 3: TUI (main thread)
-    let result = tui_thread(config, fft_rx, running.clone(), audio_ctrl_tx.clone());
+    let result = tui_thread(config, fft_rx, running.clone(), audio_ctrl_tx.clone(), shared_center_freq);
 
     // Signal shutdown
     running.store(false, Ordering::SeqCst);
@@ -150,10 +159,15 @@ fn capture_thread(
     tx_dsp: Sender<Vec<IqSample>>,
     tx_audio: Sender<Vec<IqSample>>,
     running: Arc<AtomicBool>,
+    shared_center_freq: Option<Arc<AtomicU64>>,
 ) {
     let mut source: Box<dyn Source> = match source_type {
         SourceType::Test { signals } => {
-            Box::new(TestSource::new(sample_rate, center_freq, signals, 0.02))
+            let mut src = TestSource::new(sample_rate, center_freq, signals, 0.02);
+            if let Some(freq) = shared_center_freq {
+                src = src.with_shared_freq(freq);
+            }
+            Box::new(src)
         }
         SourceType::File { path: _ } => {
             eprintln!("File replay not yet implemented");
@@ -226,9 +240,11 @@ fn tui_thread(
     fft_rx: Receiver<FftResult>,
     running: Arc<AtomicBool>,
     audio_ctrl_tx: crossbeam_channel::Sender<AudioControl>,
+    shared_center_freq: Option<Arc<AtomicU64>>,
 ) -> Result<()> {
     let mut terminal = init_terminal()?;
     let mut app = App::new(config, Some(audio_ctrl_tx));
+    app.shared_center_freq = shared_center_freq;
 
     let target_frame_time = Duration::from_millis(33); // ~30 FPS
 

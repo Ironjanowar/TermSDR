@@ -5,6 +5,8 @@ pub mod status_bar;
 pub mod waterfall;
 
 use std::io::{self, Stdout};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -78,6 +80,8 @@ pub struct App {
     pub squelch: Option<f32>,
     /// Audio control channel sender.
     pub audio_control_tx: Option<crossbeam_channel::Sender<AudioControl>>,
+    /// Shared center frequency for TestSource reactivity.
+    pub shared_center_freq: Option<Arc<AtomicU64>>,
     /// Frame timing.
     frame_count: u64,
     last_fps_update: Instant,
@@ -109,6 +113,7 @@ impl App {
             volume: 80,
             squelch: None,
             audio_control_tx,
+            shared_center_freq: None,
             frame_count: 0,
             last_fps_update: Instant::now(),
             last_frame_count: 0,
@@ -119,6 +124,13 @@ impl App {
     fn send_audio_control(&self, msg: AudioControl) {
         if let Some(ref tx) = self.audio_control_tx {
             let _ = tx.send(msg);
+        }
+    }
+
+    /// Sync shared center frequency for TestSource reactivity.
+    fn sync_shared_center_freq(&self) {
+        if let Some(ref freq) = self.shared_center_freq {
+            freq.store(self.config.center_freq.to_bits(), Ordering::Relaxed);
         }
     }
 
@@ -208,6 +220,7 @@ impl App {
                 KeyCode::Enter => {
                     if let Ok(freq) = crate::config::parse_frequency(&self.freq_input_buf) {
                         self.config.center_freq = freq;
+                        self.sync_shared_center_freq();
                     }
                     self.freq_input_mode = false;
                     self.freq_input_buf.clear();
@@ -266,6 +279,7 @@ impl App {
                 } else {
                     // Fine tune: visual scroll right (lower freq)
                     self.config.center_freq += 25_000.0;
+                    self.sync_shared_center_freq();
                 }
             }
             KeyCode::Right => {
@@ -276,15 +290,18 @@ impl App {
                 } else {
                     // Fine tune: visual scroll left (higher freq)
                     self.config.center_freq -= 25_000.0;
+                    self.sync_shared_center_freq();
                 }
             }
             KeyCode::PageUp => {
                 // Coarse tune: +1 MHz
                 self.config.center_freq += 1_000_000.0;
+                self.sync_shared_center_freq();
             }
             KeyCode::PageDown => {
                 // Coarse tune: -1 MHz
                 self.config.center_freq -= 1_000_000.0;
+                self.sync_shared_center_freq();
             }
             KeyCode::Up => {
                 // Increase gain
@@ -350,7 +367,10 @@ impl App {
     /// Apply a command action from the command palette.
     fn apply_command_action(&mut self, action: CommandAction) {
         match action {
-            CommandAction::SetFrequency(f) => self.config.center_freq = f,
+            CommandAction::SetFrequency(f) => {
+                self.config.center_freq = f;
+                self.sync_shared_center_freq();
+            }
             CommandAction::SetBandwidth(bw) => self.config.sample_rate = bw,
             CommandAction::SetChannelBw(bw) => {
                 self.channel_bw = bw;
@@ -375,10 +395,22 @@ impl App {
             CommandAction::ShowHelp => self.show_help = true,
             CommandAction::Quit => self.should_quit = true,
             CommandAction::ToggleCursor => self.cursor_active = !self.cursor_active,
-            CommandAction::TuneUp => self.config.center_freq += 25_000.0,
-            CommandAction::TuneDown => self.config.center_freq -= 25_000.0,
-            CommandAction::TuneCoarseUp => self.config.center_freq += 1_000_000.0,
-            CommandAction::TuneCoarseDown => self.config.center_freq -= 1_000_000.0,
+            CommandAction::TuneUp => {
+                self.config.center_freq += 25_000.0;
+                self.sync_shared_center_freq();
+            }
+            CommandAction::TuneDown => {
+                self.config.center_freq -= 25_000.0;
+                self.sync_shared_center_freq();
+            }
+            CommandAction::TuneCoarseUp => {
+                self.config.center_freq += 1_000_000.0;
+                self.sync_shared_center_freq();
+            }
+            CommandAction::TuneCoarseDown => {
+                self.config.center_freq -= 1_000_000.0;
+                self.sync_shared_center_freq();
+            }
             CommandAction::ZoomIn => self.config.sample_rate = (self.config.sample_rate * 0.8).max(256_000.0),
             CommandAction::ZoomOut => self.config.sample_rate = (self.config.sample_rate * 1.25).min(3_200_000.0),
             CommandAction::SetVolume(v) => {

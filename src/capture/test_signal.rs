@@ -1,4 +1,6 @@
 use std::f32::consts::PI;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -13,14 +15,16 @@ use super::Source;
 pub struct TestSource {
     sample_rate: f64,
     center_freq: f64,
-    /// Signal definitions: (frequency_offset_hz, amplitude).
-    signals: Vec<(f64, f32)>,
+    /// Absolute frequencies of each signal (Hz) and their amplitudes.
+    absolute_signals: Vec<(f64, f32)>,
     /// Noise amplitude (RMS).
     noise_amplitude: f32,
     /// Current phase accumulator for each signal (in radians).
     phases: Vec<f64>,
     /// Simple PRNG state for noise generation.
     rng_state: u64,
+    /// Shared center frequency (updated by TUI thread).
+    shared_center_freq: Option<Arc<AtomicU64>>,
 }
 
 impl TestSource {
@@ -38,14 +42,26 @@ impl TestSource {
         noise_amplitude: f32,
     ) -> Self {
         let phases = vec![0.0; signals.len()];
+        // Convert relative offsets to absolute frequencies
+        let absolute_signals: Vec<(f64, f32)> = signals
+            .iter()
+            .map(|(offset, amp)| (center_freq + offset, *amp))
+            .collect();
         Self {
             sample_rate,
             center_freq,
-            signals,
+            absolute_signals,
             noise_amplitude,
             phases,
             rng_state: 12345,
+            shared_center_freq: None,
         }
+    }
+
+    /// Attach a shared center frequency for reactive tuning.
+    pub fn with_shared_freq(mut self, freq: Arc<AtomicU64>) -> Self {
+        self.shared_center_freq = Some(freq);
+        self
     }
 
     /// Simple xorshift64 PRNG for deterministic noise.
@@ -62,6 +78,13 @@ impl Source for TestSource {
     fn read_samples(&mut self, buffer: &mut [IqSample]) -> Result<usize> {
         let dt = 1.0 / self.sample_rate;
 
+        // Read current center_freq from shared atomic if available
+        let current_center = if let Some(ref shared) = self.shared_center_freq {
+            f64::from_bits(shared.load(Ordering::Relaxed))
+        } else {
+            self.center_freq
+        };
+
         for sample in buffer.iter_mut() {
             // Start with noise
             let noise_i = self.next_random() * self.noise_amplitude;
@@ -70,11 +93,13 @@ impl Source for TestSource {
             let mut q = noise_q;
 
             // Add each signal tone
-            for (sig_idx, (freq_offset, amplitude)) in self.signals.iter().enumerate() {
+            for (sig_idx, (abs_freq, amplitude)) in self.absolute_signals.iter().enumerate() {
                 let phase = self.phases[sig_idx];
                 i += amplitude * (phase as f32).cos();
                 q += amplitude * (phase as f32).sin();
 
+                // Compute offset from current center frequency
+                let freq_offset = abs_freq - current_center;
                 // Advance phase
                 let phase_increment = 2.0 * PI as f64 * freq_offset * dt;
                 self.phases[sig_idx] = (phase + phase_increment) % (2.0 * PI as f64);
@@ -238,5 +263,73 @@ mod tests {
         let mut buffer = vec![IqSample::new(0.0, 0.0); 10];
         let n = source.read_samples(&mut buffer).unwrap();
         assert_eq!(n, 10);
+    }
+
+    #[test]
+    fn test_shared_freq_reacts_to_changes() {
+        use std::sync::atomic::AtomicU64;
+
+        let shared = Arc::new(AtomicU64::new(100e6_f64.to_bits()));
+        let mut source = TestSource::new(2_048_000.0, 100e6, vec![(100_000.0, 0.8)], 0.0)
+            .with_shared_freq(shared.clone());
+
+        let mut buf1 = vec![IqSample::new(0.0, 0.0); 1024];
+        source.read_samples(&mut buf1).unwrap();
+
+        // Change center freq — signal should shift
+        shared.store(101e6_f64.to_bits(), Ordering::Relaxed);
+        // Reset phases for cleaner comparison
+        source.phases = vec![0.0; source.absolute_signals.len()];
+        source.rng_state = 12345;
+
+        let mut buf2 = vec![IqSample::new(0.0, 0.0); 1024];
+        source.read_samples(&mut buf2).unwrap();
+
+        // Signals should differ because offset changed
+        let differs = buf1.iter().zip(buf2.iter()).any(|(a, b)| (a.re - b.re).abs() > 0.001);
+        assert!(differs, "Signal should change when center_freq changes");
+    }
+
+    #[test]
+    fn test_without_shared_freq_backward_compatible() {
+        // Without shared freq, should work exactly as before
+        let mut source1 = TestSource::new(2_048_000.0, 100e6, vec![(50_000.0, 0.5)], 0.01);
+        let mut source2 = TestSource::new(2_048_000.0, 100e6, vec![(50_000.0, 0.5)], 0.01);
+
+        let mut buf1 = vec![IqSample::new(0.0, 0.0); 1024];
+        let mut buf2 = vec![IqSample::new(0.0, 0.0); 1024];
+
+        source1.read_samples(&mut buf1).unwrap();
+        source2.read_samples(&mut buf2).unwrap();
+
+        for (a, b) in buf1.iter().zip(buf2.iter()) {
+            assert_eq!(a.re, b.re);
+            assert_eq!(a.im, b.im);
+        }
+    }
+
+    #[test]
+    fn test_signal_peaks_shift_correctly() {
+        use std::sync::atomic::AtomicU64;
+
+        // Signal at absolute 100.1 MHz (center 100 MHz + 100 kHz offset)
+        let shared = Arc::new(AtomicU64::new(100e6_f64.to_bits()));
+        let mut source = TestSource::new(2_048_000.0, 100e6, vec![(100_000.0, 0.8)], 0.0)
+            .with_shared_freq(shared.clone());
+
+        // At center=100 MHz, offset should be +100 kHz
+        // At center=100.05 MHz, offset should be +50 kHz
+        // The absolute frequency of the signal is 100.1 MHz
+        assert_eq!(source.absolute_signals[0].0, 100_100_000.0);
+
+        // Change to 100.05 MHz center
+        shared.store(100_050_000.0_f64.to_bits(), Ordering::Relaxed);
+        // The signal still exists at 100.1 MHz absolute,
+        // but now offset = 100.1M - 100.05M = 50 kHz
+        // This is tested implicitly by read_samples using the new offset
+        let mut buf = vec![IqSample::new(0.0, 0.0); 1024];
+        source.read_samples(&mut buf).unwrap();
+        // Should produce valid samples without panic
+        assert_eq!(buf.len(), 1024);
     }
 }

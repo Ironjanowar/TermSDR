@@ -165,8 +165,8 @@ mod stub {
         /// Always returns an error when compiled without the `rtlsdr` feature.
         pub fn new(
             _device_index: usize,
-            center_freq: f64,
-            sample_rate: f64,
+            _center_freq: f64,
+            _sample_rate: f64,
             _gain: Option<f32>,
             _ppm: i32,
         ) -> Result<Self> {

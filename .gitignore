@@ -1,9 +1,24 @@
 *.tar.gz
 
-# Added by cargo
+# Rust
 /target
 target/
 
 # Frontend
 web/node_modules/
 web/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local

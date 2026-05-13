@@ -4,9 +4,9 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-548%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-557%20passing-brightgreen)](#testing)
 
-A terminal-based Software Defined Radio application built with Rust and [ratatui](https://github.com/ratatui/ratatui). Real-time spectrum analysis, waterfall display, and AM audio demodulation right in your terminal.
+A terminal-based Software Defined Radio application built with Rust and [ratatui](https://github.com/ratatui/ratatui). Real-time spectrum analysis, waterfall display, and AM/FM/NFM audio demodulation — in your terminal or in the browser via the built-in web frontend.
 
 <!-- TODO: Add screenshot/GIF -->
 
@@ -284,8 +284,9 @@ src/
 ├── lib.rs                  # Module declarations
 ├── audio/
 │   ├── mod.rs              # Audio control, VFO management, pipeline
-│   ├── demod.rs            # AM demodulation
-│   ├── cpal_sink.rs        # cpal audio output
+│   ├── demod.rs            # AM/FM/NFM demodulation
+│   ├── cpal_sink.rs        # cpal audio output (TUI mode)
+│   ├── ws_sink.rs          # WebSocket audio output (headless mode)
 │   └── test_signal.rs      # Audio test utilities
 ├── capture/
 │   ├── mod.rs              # Source trait + dispatch
@@ -295,6 +296,11 @@ src/
 ├── dsp/
 │   ├── mod.rs              # DSP pipeline
 │   └── fft.rs              # FFT + Hann window + dB conversion
+├── server/
+│   ├── mod.rs              # axum server, spectrum/audio broadcast
+│   ├── ws.rs               # WebSocket handler, client registry
+│   ├── protocol.rs         # Binary frame encoding, JSON message types
+│   └── commands.rs         # Command dispatcher, shared state
 └── ui/
     ├── mod.rs              # App state, event loop, key handling, VFO management
     ├── command_palette.rs  # Command palette: registry, state, execution (22 commands)
@@ -302,12 +308,197 @@ src/
     ├── waterfall.rs        # Waterfall display widget
     ├── colors.rs           # Color utilities
     └── status_bar.rs       # Status bar widget
-server/
-├── mod.rs                  # Server startup, tokio runtime, spectrum/audio broadcast
-├── ws.rs                   # WebSocket handler, client registry, broadcast
-├── protocol.rs             # Binary frame encoding, JSON state/command types
-└── commands.rs             # Command dispatcher, shared mutable state
 ```
+
+## 🌐 WebSocket Server Mode (Headless)
+
+TermSDR can run as a **headless WebSocket server**, streaming spectrum and audio data to a web browser. No terminal needed — control everything from the built-in Svelte frontend.
+
+### Quick Start
+
+```bash
+# 1. Build the backend
+cargo build --release
+
+# 2. Build the web frontend
+cd web
+npm install
+npm run build
+cd ..
+
+# 3. Run headless with test signal
+./target/release/termsdr --headless --test
+
+# 4. Open browser at http://localhost:8080
+```
+
+### Headless CLI Options
+
+| Flag | Description | Default |
+|------|-------------|----------|
+| `--headless` | Run as WebSocket server (no TUI) | — |
+| `--port` | Server port | `8080` |
+| `--bind` | Bind address | `0.0.0.0` |
+| `--no-web` | Don’t serve frontend (WS endpoint only) | — |
+| `--audio-format` | Audio encoding: `opus` or `pcm` | `opus` |
+
+### Examples
+
+```bash
+# Test signal, default port
+termsdr --headless --test
+
+# Aviation band with RTL-SDR, custom port
+termsdr --headless --features rtlsdr -f 118.1M --port 9090
+
+# Local-only access (not exposed to network)
+termsdr --headless --test --bind 127.0.0.1
+
+# WS endpoint only (bring your own frontend)
+termsdr --headless --test --no-web
+
+# PCM raw audio (lower latency on LAN, higher bandwidth)
+termsdr --headless --test --audio-format pcm
+```
+
+### What the Web Frontend Provides
+
+- 📊 **Real-time spectrum graph** — Canvas 2D, click to tune, scroll to zoom
+- 🌊 **Waterfall heatmap** — Viridis palette, drag to pan, click to tune
+- 🔊 **Live audio playback** — Web Audio API, PCM streaming (Opus planned)
+- 🏛️ **Full controls** — frequency input (with M/k/G suffixes), gain, volume, demod mode
+- ⚙️ **Settings modal** — AGC, bandpass filter, channel BW, squelch — every field has both slider and text input for exact values
+- 📍 **VFO management** — add/remove VFOs from the browser
+- 🔄 **Auto-reconnect** — exponential backoff, automatic state refresh
+- 👥 **Multi-client** — multiple browsers can connect simultaneously with shared control
+
+### Protocol
+
+The WebSocket protocol is fully documented in [`PROTOCOL.md`](PROTOCOL.md). Third-party clients (React, Flutter, native apps) can connect to the same WS endpoint — the Svelte frontend is just the reference implementation.
+
+---
+
+## 🛠️ Development Setup
+
+### Backend (Rust)
+
+```bash
+# Build
+cargo build
+
+# Build with RTL-SDR support
+cargo build --features rtlsdr
+
+# Build with Opus audio encoding
+cargo build --features opus
+
+# Run tests
+cargo test
+
+# Lint
+cargo clippy
+
+# Format
+cargo fmt
+```
+
+**System dependencies:**
+- `libasound2-dev` (Debian/Ubuntu) or `alsa-lib` (Arch) — required for audio
+- `librtlsdr-dev` — only for `--features rtlsdr`
+- `libopus-dev` — only for `--features opus`
+
+### Frontend (Svelte + TypeScript)
+
+```bash
+cd web
+
+# Install dependencies
+npm install
+
+# Development server (hot reload)
+npm run dev
+
+# Production build (output: web/dist/)
+npm run build
+
+# Preview production build
+npm run preview
+```
+
+The production build outputs to `web/dist/` which the Rust backend serves automatically at `http://host:port/` in headless mode.
+
+**Frontend tech stack:**
+- [Svelte 5](https://svelte.dev/) with `$state` / `$derived` runes
+- [TypeScript](https://www.typescriptlang.org/) (strict mode)
+- [Vite 6](https://vitejs.dev/) (build tool)
+- Canvas 2D for spectrum/waterfall rendering
+- Web Audio API for audio playback
+- No external runtime dependencies
+
+### Frontend Project Structure
+
+```
+web/
+├── src/
+│   ├── main.ts                 # Entry point
+│   ├── App.svelte              # Main layout + wiring
+│   ├── lib/
+│   │   ├── protocol.ts         # WS protocol types + binary frame parser
+│   │   ├── ws.svelte.ts        # WebSocket client + auto-reconnect
+│   │   ├── state.svelte.ts     # Reactive global state (synced with server)
+│   │   └── audio.ts            # Web Audio API player + ring buffer
+│   └── components/
+│       ├── Spectrum.svelte     # Real-time spectrum graph (Canvas 2D)
+│       ├── Waterfall.svelte    # Scrolling waterfall heatmap (Canvas 2D)
+│       ├── Header.svelte       # Top bar (freq, mode, connection status)
+│       ├── Controls.svelte     # Bottom controls bar
+│       ├── FreqInput.svelte    # Frequency input with suffix parsing
+│       ├── SettingsModal.svelte # Full settings panel (⚙️)
+│       ├── SettingsField.svelte # Reusable slider + text input field
+│       ├── Toggle.svelte       # Reusable toggle switch
+│       └── AudioControl.svelte # Audio status + mute toggle
+├── index.html
+├── package.json
+├── vite.config.ts
+├── tsconfig.json
+└── svelte.config.js
+```
+
+---
+
+## 📡 Building & Running (All Modes)
+
+### TUI Mode (default — terminal interface)
+
+```bash
+cargo build --release
+./target/release/termsdr --test              # Test signal
+./target/release/termsdr --features rtlsdr   # Real hardware
+```
+
+### Headless + Web Mode
+
+```bash
+# Build everything
+cargo build --release
+cd web && npm install && npm run build && cd ..
+
+# Run
+./target/release/termsdr --headless --test
+# Open http://localhost:8080 in your browser
+```
+
+### Headless for Raspberry Pi / Remote Server
+
+```bash
+# On the Pi/server:
+termsdr --headless --features rtlsdr -f 118.1M
+
+# On your laptop/phone:
+# Open http://<pi-ip>:8080 in the browser
+```
+
+---
 
 ## 🔧 Building
 
@@ -340,7 +531,7 @@ cargo test -- --nocapture
 cargo test command_palette
 ```
 
-Currently: **548 tests** (544 unit + 4 integration) covering types, FFT, capture, UI state, command palette, audio demodulation (AM/FM/NFM), AGC, bandpass filter, VFOs, bookmarks, and end-to-end pipeline validation.
+Currently: **557 tests** (553 unit + 4 integration) covering types, FFT, capture, UI state, command palette, audio demodulation (AM/FM/NFM), AGC, bandpass filter, VFOs, bookmarks, WebSocket server, protocol encoding/decoding, and end-to-end pipeline validation.
 
 ## 🗺️ Roadmap
 

@@ -195,6 +195,7 @@ fn run_pipeline(config: AppConfig, args: &CliArgs) -> Result<()> {
         })?;
 
     // Thread 3: TUI or WS Server (main thread)
+    let audio_ctrl_tx_server = audio_ctrl_tx.clone();
     let result = if args.headless {
         let server_config = ServerConfig {
             bind: args.bind.clone(),
@@ -202,7 +203,16 @@ fn run_pipeline(config: AppConfig, args: &CliArgs) -> Result<()> {
             no_web: args.no_web,
             audio_format: args.audio_format.clone(),
         };
-        termsdr::server::run_server(config, server_config, fft_rx, ws_audio_rx, running.clone(), Some(format_atomic_server))
+        termsdr::server::run_server(
+            config,
+            server_config,
+            fft_rx,
+            ws_audio_rx,
+            running.clone(),
+            Some(format_atomic_server),
+            Some(audio_ctrl_tx_server),
+            shared_center_freq,
+        )
     } else {
         tui_thread(config, fft_rx, running.clone(), audio_ctrl_tx.clone(), shared_center_freq, shared_averaging)
     };

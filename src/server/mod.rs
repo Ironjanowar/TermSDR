@@ -32,12 +32,20 @@ pub fn run_server(
     audio_rx: Option<Receiver<Vec<u8>>>,
     running: std::sync::Arc<std::sync::atomic::AtomicBool>,
     format_atomic: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
+    audio_ctrl_tx: Option<crossbeam_channel::Sender<crate::audio::AudioControl>>,
+    shared_center_freq: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 ) -> Result<()> {
     let rt = Runtime::new()?;
     rt.block_on(async move {
         let mut state = ServerState::new(config);
         if let Some(fa) = format_atomic {
             state = state.with_format_atomic(fa);
+        }
+        if let Some(tx) = audio_ctrl_tx {
+            state = state.with_audio_control(tx);
+        }
+        if let Some(sf) = shared_center_freq {
+            state = state.with_shared_center_freq(sf);
         }
         let clients = state.clients.clone();
 

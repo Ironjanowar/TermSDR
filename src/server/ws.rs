@@ -29,6 +29,7 @@ pub struct ServerState {
     pub shared: Arc<RwLock<SharedState>>,
     pub audio_control_tx: Option<crossbeam_channel::Sender<AudioControl>>,
     pub format_atomic: Option<Arc<std::sync::atomic::AtomicU8>>,
+    pub shared_center_freq: Option<Arc<std::sync::atomic::AtomicU64>>,
     next_id: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -41,12 +42,18 @@ impl ServerState {
             config,
             audio_control_tx: None,
             format_atomic: None,
+            shared_center_freq: None,
             next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         }
     }
 
     pub fn with_format_atomic(mut self, atomic: Arc<std::sync::atomic::AtomicU8>) -> Self {
         self.format_atomic = Some(atomic);
+        self
+    }
+
+    pub fn with_shared_center_freq(mut self, freq: Arc<std::sync::atomic::AtomicU64>) -> Self {
+        self.shared_center_freq = Some(freq);
         self
     }
 
@@ -142,6 +149,7 @@ async fn handle_socket(socket: WebSocket, state: ServerState) {
     let shared_for_read = state.shared.clone();
     let audio_tx = state.audio_control_tx.clone();
     let format_atomic_for_read = state.format_atomic.clone();
+    let shared_freq_for_read = state.shared_center_freq.clone();
 
     while let Some(result) = ws_stream.next().await {
         match result {
@@ -171,6 +179,21 @@ async fn handle_socket(socket: WebSocket, state: ServerState) {
                                             _ => WsAudioFormat::PcmRaw as u8,
                                         };
                                         atomic.store(val, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                }
+                            }
+
+                            // Update shared_center_freq atomic for capture/DSP threads
+                            if matches!(cmd, protocol::Command::SetFrequency { .. }
+                                | protocol::Command::Tune { .. }
+                                | protocol::Command::SetBandwidth { .. }
+                                | protocol::Command::Zoom { .. }) {
+                                if matches!(result, DispatchResult::Ok) {
+                                    if let Some(ref freq_atomic) = shared_freq_for_read {
+                                        freq_atomic.store(
+                                            shared.center_freq.to_bits(),
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
                                     }
                                 }
                             }

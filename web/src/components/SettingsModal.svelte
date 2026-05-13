@@ -27,6 +27,43 @@
   function setChannelBw(v: number) { wsClient.sendCommand({ cmd: 'set_channel_bw', value: Math.round(v) }); }
   function setDemod(mode: string) { wsClient.sendCommand({ cmd: 'set_demod', mode }); }
   function setGain(v: number) { wsClient.sendCommand({ cmd: 'set_gain', value: Math.round(v) }); }
+  function setFrequency(v: number) { wsClient.sendCommand({ cmd: 'set_frequency', value: Math.round(v) }); }
+
+  // Frequency display/edit state
+  let editingFreq = $state(false);
+  let freqEditText = $state('');
+
+  function formatFreqMHz(hz: number): string {
+    return (hz / 1e6).toFixed(3);
+  }
+
+  function parseFreqInput(text: string): number | null {
+    const t = text.trim().toUpperCase();
+    const m = t.match(/^([\d.]+)\s*([MKG]?)(?:HZ)?$/);
+    if (!m) return null;
+    const num = parseFloat(m[1]);
+    if (isNaN(num) || num <= 0) return null;
+    const suffix = m[2];
+    const mult = suffix === 'G' ? 1e9 : suffix === 'M' ? 1e6 : suffix === 'K' ? 1e3 : 1;
+    return Math.round(num * mult);
+  }
+
+  function startFreqEdit() {
+    editingFreq = true;
+    freqEditText = formatFreqMHz(sdrState.centerFreq) + 'M';
+  }
+
+  function commitFreqEdit() {
+    editingFreq = false;
+    const hz = parseFreqInput(freqEditText);
+    if (hz !== null) setFrequency(hz);
+  }
+
+  function freqKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') commitFreqEdit();
+    if (e.key === 'Escape') { editingFreq = false; }
+    e.stopPropagation();
+  }
 
   function setAgc(patch: Partial<{ enabled: boolean; attack_ms: number; decay_ms: number; target_level: number; max_gain_db: number }>) {
     wsClient.sendCommand({
@@ -71,6 +108,24 @@
         <!-- General -->
         <section class="section">
           <h3>General</h3>
+          <div class="freq-field">
+            <span class="field-label-inline">Frequency</span>
+            {#if editingFreq}
+              <!-- svelte-ignore a11y_autofocus -->
+              <input
+                class="freq-edit-input"
+                type="text"
+                bind:value={freqEditText}
+                onblur={commitFreqEdit}
+                onkeydown={freqKeydown}
+                autofocus
+              />
+            {:else}
+              <button class="freq-value-btn" onclick={startFreqEdit} title="Click to edit frequency">
+                {formatFreqMHz(sdrState.centerFreq)} <span class="freq-unit">MHz</span>
+              </button>
+            {/if}
+          </div>
           <SettingsField label="Volume" value={sdrState.volume} min={0} max={100} step={1} unit="%" onChange={setVolume} />
           <SettingsField label="Squelch" value={sdrState.squelch} min={-120} max={0} step={1} unit="dB" onChange={setSquelch} />
           <SettingsField label="Channel BW" value={sdrState.channelBw} min={1000} max={200000} step={1000} unit="Hz" onChange={setChannelBw} />
@@ -249,5 +304,47 @@
   .seg-btn:hover:not(.active) {
     background: #1a1a3e;
     color: #ccc;
+  }
+
+  .freq-field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .freq-value-btn {
+    background: #12122a;
+    border: 1px solid #333;
+    color: #00ff88;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.95rem;
+    font-weight: bold;
+    padding: 0.3rem 0.6rem;
+    border-radius: 4px;
+    cursor: pointer;
+    letter-spacing: 0.03em;
+  }
+
+  .freq-value-btn:hover {
+    border-color: #00d4ff;
+  }
+
+  .freq-unit {
+    color: #666;
+    font-weight: normal;
+    font-size: 0.75rem;
+  }
+
+  .freq-edit-input {
+    background: #12122a;
+    border: 1px solid #00d4ff;
+    color: #00ff88;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.95rem;
+    padding: 0.3rem 0.6rem;
+    border-radius: 4px;
+    outline: none;
+    width: 10rem;
   }
 </style>

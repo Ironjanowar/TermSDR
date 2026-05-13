@@ -7,6 +7,7 @@ description = "Terminal-based SDR application with spectrum and waterfall displa
 [features]
 default = ["rtlsdr"]
 rtlsdr = ["dep:rtlsdr_rs"]
+opus = ["dep:opus"]
 
 [dependencies]
 ratatui = "0.29"
@@ -19,7 +20,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 cpal = "0.15"
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs"] }
+futures-util = "0.3"
 rtlsdr_rs = { package = "rtlsdr", version = "0.1", optional = true }
+opus = { version = "0.3", optional = true }
 
 [dev-dependencies]
 approx = "0.5"

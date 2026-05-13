@@ -1,7 +1,9 @@
 *.tar.gz
 
-
 # Added by cargo
-
 /target
 target/
+
+# Frontend
+web/node_modules/
+web/dist/

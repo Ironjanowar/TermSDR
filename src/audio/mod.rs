@@ -1,6 +1,7 @@
 pub mod demod;
 pub mod test_signal;
 pub mod cpal_sink;
+pub mod ws_sink;
 
 use crate::types::IqSample;
 use demod::{Demodulator, DemodMode};
@@ -46,6 +47,7 @@ impl AudioSink for NullSink {
 // ============================================================================
 
 /// Messages sent to the audio thread to change parameters at runtime.
+#[derive(Debug, Clone)]
 pub enum AudioControl {
     SetCursorFreq(f64),
     SetCenterFreq(f64),

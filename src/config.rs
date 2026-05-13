@@ -42,6 +42,26 @@ pub struct CliArgs {
     /// Import bookmarks from CubicSDR XML file
     #[arg(long)]
     pub import_bookmarks: Option<String>,
+
+    /// Run in headless mode (WebSocket server, no TUI)
+    #[arg(long)]
+    pub headless: bool,
+
+    /// WebSocket server port (headless mode)
+    #[arg(long, default_value = "8080")]
+    pub port: u16,
+
+    /// WebSocket server bind address (headless mode)
+    #[arg(long, default_value = "0.0.0.0")]
+    pub bind: String,
+
+    /// Don't serve web frontend (WebSocket only)
+    #[arg(long)]
+    pub no_web: bool,
+
+    /// Audio format for WebSocket streaming
+    #[arg(long, default_value = "opus")]
+    pub audio_format: String,
 }
 
 /// Parse a frequency string like "100M", "118.1M", "433920000" into Hz.

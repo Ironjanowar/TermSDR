@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-304%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-548%20passing-brightgreen)](#testing)
 
 A terminal-based Software Defined Radio application built with Rust and [ratatui](https://github.com/ratatui/ratatui). Real-time spectrum analysis, waterfall display, and AM audio demodulation right in your terminal.
 
@@ -24,7 +24,8 @@ A terminal-based Software Defined Radio application built with Rust and [ratatui
 - **Volume & squelch controls** — adjust volume with `v`/`V`, set squelch threshold via command palette
 - **Configurable waterfall time span** — adjust how many seconds of history the waterfall shows (`t`/`T`, 5–120 s)
 - **Synthetic test signals** — develop and test without hardware using built-in signal generator
-- **4-thread pipeline architecture** — Capture → DSP/FFT → Audio demod → TUI for smooth, non-blocking operation
+- **🌐 WebSocket server mode** — run headless with `--headless` and control from any browser via the built-in Svelte web frontend
+- **4-thread pipeline architecture** — Capture → DSP/FFT → Audio demod → TUI/WS for smooth, non-blocking operation
 - **Source abstraction** — TestSource, File replay, and RTL-SDR hardware
 - **Source selection screen** — interactive startup screen to pick your signal source (auto-detects RTL-SDR devices)
 - **Frequency suffixes** — use `100M`, `118.1M`, `433.92k`, `1.42G` anywhere frequencies are expected
@@ -62,6 +63,11 @@ Check [GitHub Releases](https://github.com/Ironjanowar/TermSDR/releases) for pre
 # Run with synthetic test signals (no hardware needed)
 cargo run -- --test
 
+# Headless WebSocket server mode (no TUI, access via browser)
+cargo run -- --headless --test
+cargo run -- --headless --test --port 9090
+cargo run -- --headless --test --bind 127.0.0.1
+
 # Tune to a specific frequency
 cargo run -- --test -f 118.1M
 
@@ -91,6 +97,11 @@ cargo run -- --test -f 433.92M -s 1M --gain 20 --fft-size 4096
 | `--fft-size` | FFT size (number of bins) | `2048` |
 | `--ppm` | PPM crystal correction | `0` |
 | `--test` | Use synthetic test signal source | — |
+| `--headless` | Run as WebSocket server (no TUI) | — |
+| `--port` | WebSocket server port | `8080` |
+| `--bind` | WebSocket server bind address | `0.0.0.0` |
+| `--no-web` | Don't serve web frontend (WS only) | — |
+| `--audio-format` | Audio format: `opus` or `pcm` | `opus` |
 | `--file` | IQ file path for replay mode | — |
 | `-c`, `--config` | JSON config file path | — |
 
@@ -228,6 +239,7 @@ TermSDR supports up to **8 simultaneous VFOs** (Variable Frequency Oscillators),
 
 TermSDR uses a **4-thread pipeline** for smooth real-time operation:
 
+**TUI Mode** (default):
 ```
 ┌─────────────┐      ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
 │   Capture   │ IQ → │   DSP/FFT   │ dB → │    Audio    │      │     TUI     │
@@ -235,10 +247,20 @@ TermSDR uses a **4-thread pipeline** for smooth real-time operation:
 └─────────────┘      └─────────────┘      └─────────────┘      └─────────────┘
 ```
 
+**Headless Mode** (`--headless`):
+```
+┌─────────────┐      ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
+│   Capture   │ IQ → │   DSP/FFT   │ dB → │    Audio    │      │  WS Server  │
+│  (Thread 1) │      │  (Thread 2) │      │  (Thread 3) │      │  (Thread 4) │
+└─────────────┘      └─────────────┘      └─────────────┘      └─────────────┘
+                                           Opus/PCM →            ↕ WebSocket
+                                           WebSocketSink         ↕ HTTP (Svelte)
+```
+
 - **Thread 1 — Capture**: Reads IQ samples from the configured source (TestSource, File, or RTL-SDR) at the specified sample rate
 - **Thread 2 — DSP**: Applies Hann windowing and computes FFT, converts to dB power spectrum
-- **Thread 3 — Audio**: AM demodulation, per-VFO channel extraction, mono mix, volume/squelch, output via cpal
-- **Thread 4 — TUI**: Renders spectrum + waterfall display, handles keyboard input at ~30 FPS
+- **Thread 3 — Audio**: AM demodulation, per-VFO channel extraction, mono mix, volume/squelch, output via cpal (TUI) or WebSocketSink (headless)
+- **Thread 4 — TUI/WS**: Renders spectrum + waterfall display (TUI mode), or runs axum WebSocket server serving the Svelte frontend and streaming data to connected clients (headless mode)
 
 Threads communicate via bounded `crossbeam-channel` queues with non-blocking sends to prevent backpressure.
 
@@ -280,6 +302,11 @@ src/
     ├── waterfall.rs        # Waterfall display widget
     ├── colors.rs           # Color utilities
     └── status_bar.rs       # Status bar widget
+server/
+├── mod.rs                  # Server startup, tokio runtime, spectrum/audio broadcast
+├── ws.rs                   # WebSocket handler, client registry, broadcast
+├── protocol.rs             # Binary frame encoding, JSON state/command types
+└── commands.rs             # Command dispatcher, shared mutable state
 ```
 
 ## 🔧 Building
@@ -313,7 +340,7 @@ cargo test -- --nocapture
 cargo test command_palette
 ```
 
-Currently: **304 tests** (300 unit + 4 integration) covering types, FFT, capture, UI state, command palette, audio, VFOs, and end-to-end pipeline validation.
+Currently: **548 tests** (544 unit + 4 integration) covering types, FFT, capture, UI state, command palette, audio demodulation (AM/FM/NFM), AGC, bandpass filter, VFOs, bookmarks, and end-to-end pipeline validation.
 
 ## 🗺️ Roadmap
 
@@ -321,18 +348,24 @@ Currently: **304 tests** (300 unit + 4 integration) covering types, FFT, capture
 - 📊 Real-time spectrum + waterfall display
 - 🎯 Command palette with 22 commands
 - 🔊 AM audio demodulation (cursor = tuner)
+- 📻 FM & NFM demodulation (broadcast radio + walkie-talkies/PMR446)
 - 🔌 RTL-SDR hardware integration
 - 📍 Multiple VFOs (up to 8, simultaneous demod)
 - 🔈 Volume & squelch controls
-- 📼 IQ file replay source
+- 🎛️ Audio settings modal (AGC, bandpass filter, per-parameter controls)
+- 📡 Auto-scan peak hunting mode
+- 📚 Bookmarks — frequency catalog + personal bookmarks + CubicSDR import
+- ⏱️ Configurable waterfall time span (5–120 s)
+- 📼 IQ file replay source (stub)
+- 🌐 WebSocket server mode — headless backend + Svelte web frontend ([protocol docs](PROTOCOL.md))
 
 ### Future
-- 📻 FM demodulation (broadcast radio)
 - 📻 SSB demodulation (ham radio, maritime)
-- 🌐 WebSocket server mode (headless backend + web frontend)
 - 💾 Recording to IQ files
-- 📡 CubicSDR session import
+- 📂 Full IQ file replay implementation
+- 📡 Full CubicSDR session import (device config, zoom, active demodulators)
 - 🎨 Configurable waterfall color palettes
+- 💾 VFO/bookmark persistence across sessions
 
 ## 📄 License
 

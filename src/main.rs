@@ -9,12 +9,14 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use crossterm::event::{self, Event};
 
 use termsdr::audio::cpal_sink::CpalSink;
+use termsdr::audio::ws_sink::{WebSocketSink, WsAudioFormat};
 use termsdr::audio::{audio_thread, AudioControl, AudioSink, NullSink};
 use termsdr::capture::rtlsdr::RtlSdrSource;
 use termsdr::capture::test_signal::TestSource;
 use termsdr::capture::Source;
 use termsdr::config::CliArgs;
 use termsdr::dsp::fft::FftProcessor;
+use termsdr::server::ServerConfig;
 use termsdr::types::{AppConfig, FftResult, IqSample, SourceType};
 use termsdr::ui::{
     draw_ui, init_terminal, restore_terminal, show_source_selection, App, SourceSelection,
@@ -49,6 +51,9 @@ fn main() -> Result<()> {
             SourceType::File { path } => SourceSelection::File(path.clone()),
             _ => unreachable!(),
         }
+    } else if args.headless {
+        // Headless mode without --test or --file defaults to RTL-SDR
+        SourceSelection::RtlSdr(0)
     } else {
         // Show interactive source selection
         let mut terminal = init_terminal()?;
@@ -81,10 +86,10 @@ fn main() -> Result<()> {
     }
 
     // Run the 3-thread pipeline
-    run_pipeline(config)
+    run_pipeline(config, &args)
 }
 
-fn run_pipeline(config: AppConfig) -> Result<()> {
+fn run_pipeline(config: AppConfig, args: &CliArgs) -> Result<()> {
     // Create channels
     // Capture -> DSP: IQ blocks
     let (iq_tx_dsp, iq_rx_dsp): (Sender<Vec<IqSample>>, Receiver<Vec<IqSample>>) = bounded(4);
@@ -141,21 +146,66 @@ fn run_pipeline(config: AppConfig) -> Result<()> {
     // Thread 4: Audio
     let cursor_freq = config.center_freq; // cursor starts at center
     let channel_bw = 25_000.0;
+
+    // For headless mode, create a channel for WS audio frames
+    let (ws_audio_tx, ws_audio_rx) = if args.headless {
+        let (tx, rx) = crossbeam_channel::bounded::<Vec<u8>>(64);
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
+    let is_headless = args.headless;
+    let audio_format_str = args.audio_format.clone();
+
+    // Create format_atomic outside the thread so it can be shared with the server
+    let format_atomic = {
+        let format = WsAudioFormat::parse(&audio_format_str)
+            .unwrap_or(WsAudioFormat::PcmRaw);
+        #[cfg(not(feature = "opus"))]
+        let format = if format == WsAudioFormat::Opus {
+            eprintln!("Audio: Opus not compiled in, using PCM raw");
+            WsAudioFormat::PcmRaw
+        } else {
+            format
+        };
+        std::sync::Arc::new(std::sync::atomic::AtomicU8::new(format as u8))
+    };
+    let format_atomic_server = format_atomic.clone();
+
     let audio_handle = thread::Builder::new()
         .name("audio".into())
         .spawn(move || {
-            let sink: Box<dyn AudioSink> = match CpalSink::new(None) {
-                Ok(s) => Box::new(s),
-                Err(e) => {
-                    eprintln!("Audio: no output device ({}), audio disabled", e);
+            let sink: Box<dyn AudioSink> = if is_headless {
+                if let Some(tx) = ws_audio_tx {
+                    Box::new(WebSocketSink::new(tx, format_atomic))
+                } else {
                     Box::new(NullSink::new(48000))
+                }
+            } else {
+                match CpalSink::new(None) {
+                    Ok(s) => Box::new(s),
+                    Err(e) => {
+                        eprintln!("Audio: no output device ({}), audio disabled", e);
+                        Box::new(NullSink::new(48000))
+                    }
                 }
             };
             audio_thread(iq_rx_audio, audio_ctrl_rx, sink, center_freq, cursor_freq, channel_bw, sample_rate);
         })?;
 
-    // Thread 3: TUI (main thread)
-    let result = tui_thread(config, fft_rx, running.clone(), audio_ctrl_tx.clone(), shared_center_freq, shared_averaging);
+    // Thread 3: TUI or WS Server (main thread)
+    let result = if args.headless {
+        let server_config = ServerConfig {
+            bind: args.bind.clone(),
+            port: args.port,
+            no_web: args.no_web,
+            audio_format: args.audio_format.clone(),
+        };
+        termsdr::server::run_server(config, server_config, fft_rx, ws_audio_rx, running.clone(), Some(format_atomic_server))
+    } else {
+        tui_thread(config, fft_rx, running.clone(), audio_ctrl_tx.clone(), shared_center_freq, shared_averaging)
+    };
 
     // Signal shutdown
     running.store(false, Ordering::SeqCst);

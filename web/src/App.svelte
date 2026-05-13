@@ -5,6 +5,7 @@
   import Waterfall from './components/Waterfall.svelte';
   import Controls from './components/Controls.svelte';
   import SettingsModal from './components/SettingsModal.svelte';
+  import HelpOverlay from './components/HelpOverlay.svelte';
   import { wsClient } from './lib/ws.svelte';
   import { sdrState } from './lib/state.svelte';
   import { AudioPlayer } from './lib/audio';
@@ -15,6 +16,111 @@
 
   let audioSuspended = $state(true);
   let settingsOpen = $state(false);
+  let helpOpen = $state(false);
+
+  function handleKeydown(e: KeyboardEvent) {
+    // Don't handle keys when typing in inputs
+    const tag = (e.target as HTMLElement)?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+    // Help overlay takes priority — any key closes it
+    if (helpOpen) {
+      helpOpen = false;
+      e.preventDefault();
+      return;
+    }
+
+    switch (e.key) {
+      case 'ArrowLeft':
+        e.preventDefault();
+        wsClient.sendCommand({ cmd: 'tune', delta: -25000 });
+        break;
+      case 'ArrowRight':
+        e.preventDefault();
+        wsClient.sendCommand({ cmd: 'tune', delta: 25000 });
+        break;
+      case 'PageUp':
+        e.preventDefault();
+        wsClient.sendCommand({ cmd: 'tune', delta: 1000000 });
+        break;
+      case 'PageDown':
+        e.preventDefault();
+        wsClient.sendCommand({ cmd: 'tune', delta: -1000000 });
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        if (sdrState.gain !== null) {
+          wsClient.sendCommand({ cmd: 'set_gain', value: Math.min(50, sdrState.gain + 1) });
+        }
+        break;
+      case 'ArrowDown':
+        e.preventDefault();
+        if (sdrState.gain !== null) {
+          wsClient.sendCommand({ cmd: 'set_gain', value: Math.max(0, sdrState.gain - 1) });
+        }
+        break;
+      case '+':
+      case '=':
+        e.preventDefault();
+        wsClient.sendCommand({ cmd: 'zoom', direction: 'in' });
+        break;
+      case '-':
+        e.preventDefault();
+        wsClient.sendCommand({ cmd: 'zoom', direction: 'out' });
+        break;
+      case ' ':
+        e.preventDefault();
+        wsClient.sendCommand({ cmd: 'toggle_mute' });
+        break;
+      case '?':
+        e.preventDefault();
+        helpOpen = true;
+        break;
+      case 's':
+        e.preventDefault();
+        settingsOpen = !settingsOpen;
+        break;
+      case 'c':
+        e.preventDefault();
+        wsClient.sendCommand({ cmd: 'set_frequency', value: sdrState.centerFreq });
+        break;
+      case 'd':
+        e.preventDefault();
+        { const modes = ['AM', 'FM', 'NFM'];
+        const idx = modes.indexOf(sdrState.demodMode);
+        const next = modes[(idx + 1) % modes.length];
+        wsClient.sendCommand({ cmd: 'set_demod', mode: next }); }
+        break;
+      case 'v':
+        e.preventDefault();
+        wsClient.sendCommand({ cmd: 'set_volume', value: Math.min(100, sdrState.volume + 5) });
+        break;
+      case 'V':
+        e.preventDefault();
+        wsClient.sendCommand({ cmd: 'set_volume', value: Math.max(0, sdrState.volume - 5) });
+        break;
+      case 'w':
+        e.preventDefault();
+        wsClient.sendCommand({ cmd: 'set_channel_bw', value: Math.min(1000000, sdrState.channelBw * 2) });
+        break;
+      case 'W':
+        e.preventDefault();
+        wsClient.sendCommand({ cmd: 'set_channel_bw', value: Math.max(1000, sdrState.channelBw / 2) });
+        break;
+      case 'm':
+        e.preventDefault();
+        wsClient.sendCommand({
+          cmd: 'vfo_add',
+          freq: sdrState.cursorFreq,
+          channel_bw: sdrState.channelBw,
+          mode: sdrState.demodMode,
+        });
+        break;
+      case 'Escape':
+        if (settingsOpen) { settingsOpen = false; e.preventDefault(); }
+        break;
+    }
+  }
 
   function handleSpectrumFrame(frame: SpectrumFrame) {
     waterfall?.addSpectrumRow(frame);
@@ -79,7 +185,10 @@
   </main>
 
   <SettingsModal open={settingsOpen} onClose={() => settingsOpen = false} />
+  <HelpOverlay open={helpOpen} onClose={() => helpOpen = false} />
 </div>
+
+<svelte:window onkeydown={handleKeydown} />
 
 <style>
   :global(*, *::before, *::after) {

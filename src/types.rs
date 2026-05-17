@@ -1,3 +1,5 @@
+//! Shared types used across `TermSDR`: IQ samples, FFT results, and application configuration.
+
 use num_complex::Complex;
 use serde::{Deserialize, Serialize};
 
@@ -17,29 +19,38 @@ pub struct FftResult {
 
 impl FftResult {
     /// Returns the frequency corresponding to a given bin index.
+    #[must_use] 
+    #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
     pub fn bin_frequency(&self, bin: usize) -> f64 {
+        #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
         let n = self.bins.len() as f64;
         let bin_width = self.sample_rate / n;
         self.center_freq - (self.sample_rate / 2.0) + (bin as f64 * bin_width)
     }
 
     /// Returns the bin index closest to a given frequency.
+    #[must_use] 
     pub fn frequency_to_bin(&self, freq: f64) -> usize {
+        #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
         let n = self.bins.len() as f64;
         let bin_width = self.sample_rate / n;
         let offset = freq - (self.center_freq - self.sample_rate / 2.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // intentional truncation; value is non-negative here
         let bin = (offset / bin_width).round() as usize;
         bin.min(self.bins.len().saturating_sub(1))
     }
 
-    /// Returns the peak bin index and its dB value.
+    /// Returns the peak bin index and its `dB` value.
+    ///
+    /// # Panics
+    /// Returns the peak bin index and value. NaN values are treated as equal to other values.
+    #[must_use] 
     pub fn peak(&self) -> (usize, f32) {
         self.bins
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(i, &v)| (i, v))
-            .unwrap_or((0, f32::NEG_INFINITY))
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map_or((0, f32::NEG_INFINITY), |(i, &v)| (i, v))
     }
 }
 
@@ -70,7 +81,7 @@ pub enum SourceType {
     File { path: String },
     /// Synthetic test signal.
     Test {
-        /// Signal peaks as (frequency_offset_hz, amplitude) pairs.
+        /// Signal peaks as (`frequency_offset_hz`, amplitude) pairs.
         signals: Vec<(f64, f32)>,
     },
 }
@@ -263,14 +274,17 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_peak_with_nan() {
-        // NaN comparisons with unwrap() in partial_cmp should panic
+        // NaN values are treated as equal, so peak returns a valid non-NaN bin
         let result = FftResult {
             bins: vec![f32::NAN, -50.0, -30.0],
             center_freq: 100e6,
             sample_rate: 2.048e6,
         };
-        let _ = result.peak();
+        let (idx, val) = result.peak();
+        // With unwrap_or(Equal), NaN is treated as equal to other values;
+        // max_by returns the last equal element, so -30.0 at index 2 wins
+        assert_eq!(idx, 2);
+        assert!((val - (-30.0)).abs() < f32::EPSILON);
     }
 }

@@ -1,6 +1,8 @@
-pub mod commands;
-pub mod protocol;
-pub mod ws;
+//! WebSocket server for headless mode: remote control and FFT/audio streaming.
+
+pub(crate) mod commands;
+pub(crate) mod protocol;
+pub(crate) mod ws;
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -25,6 +27,13 @@ pub struct ServerConfig {
 /// Start the WebSocket server (blocking — runs the tokio runtime).
 ///
 /// This replaces the TUI thread in headless mode.
+///
+/// # Errors
+/// Returns an error if the tokio runtime or WebSocket server cannot be started.
+///
+/// # Panics
+/// Panics if the tokio runtime cannot be created.
+#[allow(clippy::too_many_arguments)] // server setup requires all these parameters
 pub fn run_server(
     config: AppConfig,
     server_config: ServerConfig,
@@ -69,7 +78,7 @@ pub fn run_server(
             .parse()
             .expect("Invalid bind address");
 
-        eprintln!("TermSDR WebSocket server listening on {}", addr);
+        tracing::info!("TermSDR WebSocket server listening on {addr}");
 
         // Spawn spectrum broadcast task
         let clients_spectrum = clients.clone();
@@ -109,7 +118,7 @@ pub fn run_server(
         }
 
         // Run server until shutdown
-        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(addr).await.expect("failed to bind server address");
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 while running.load(std::sync::atomic::Ordering::Relaxed) {
@@ -117,7 +126,7 @@ pub fn run_server(
                 }
             })
             .await
-            .unwrap();
+            .expect("server error");
     });
 
     Ok(())

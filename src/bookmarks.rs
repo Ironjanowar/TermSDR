@@ -1,4 +1,4 @@
-//! Bookmark system: built-in frequency catalog + user bookmarks + CubicSDR import.
+//! Bookmark system: built-in frequency catalog + user bookmarks + `CubicSDR` import.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -23,6 +23,7 @@ pub struct BookmarkStore {
 }
 
 /// Return the built-in frequency catalog (not serialized).
+#[must_use] 
 pub fn default_catalog() -> Vec<Bookmark> {
     vec![
         // Aviation (AM) — Madrid Barajas LEMD
@@ -55,6 +56,7 @@ fn bookmarks_path() -> PathBuf {
 
 impl BookmarkStore {
     /// Load user bookmarks from disk, or return empty store.
+    #[must_use] 
     pub fn load() -> Self {
         let path = bookmarks_path();
         if let Ok(data) = fs::read_to_string(&path) {
@@ -65,7 +67,10 @@ impl BookmarkStore {
     }
 
     /// Save user bookmarks to disk.
-    pub fn save(&self) -> anyhow::Result<()> {
+    ///
+    /// # Errors
+    /// Returns an error if the bookmarks file cannot be created or written.
+    pub(crate) fn save(&self) -> anyhow::Result<()> {
         let path = bookmarks_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -82,7 +87,7 @@ impl BookmarkStore {
     }
 
     /// Remove a bookmark by index and persist.
-    pub fn remove(&mut self, index: usize) {
+    pub(crate) fn remove(&mut self, index: usize) {
         if index < self.user_bookmarks.len() {
             self.user_bookmarks.remove(index);
             self.save().ok();
@@ -90,7 +95,7 @@ impl BookmarkStore {
     }
 
     /// Remove a bookmark by name (first match). Returns true if found.
-    pub fn remove_by_name(&mut self, name: &str) -> bool {
+    pub(crate) fn remove_by_name(&mut self, name: &str) -> bool {
         if let Some(idx) = self.user_bookmarks.iter().position(|b| b.name == name) {
             self.user_bookmarks.remove(idx);
             self.save().ok();
@@ -101,7 +106,10 @@ impl BookmarkStore {
     }
 }
 
-/// Import bookmarks from a CubicSDR XML file using simple string parsing.
+/// Import bookmarks from a `CubicSDR` XML file using simple string parsing.
+///
+/// # Errors
+/// Returns an error if the file cannot be read or contains malformed data.
 pub fn import_cubicsdr(path: &str) -> anyhow::Result<Vec<Bookmark>> {
     let content = fs::read_to_string(path)?;
     let mut bookmarks = Vec::new();
@@ -123,8 +131,7 @@ pub fn import_cubicsdr(path: &str) -> anyhow::Result<Vec<Bookmark>> {
 
         if let (Some(freq), Some(bw)) = (frequency, bandwidth) {
             let mode = match demod_type.as_deref() {
-                Some("AM") => DemodMode::AM,
-                Some("FM") | Some("FMS") => DemodMode::FM,
+                Some("FM" | "FMS") => DemodMode::FM,
                 Some("NFM") => DemodMode::NFM,
                 _ => DemodMode::AM,
             };
@@ -148,8 +155,8 @@ pub fn import_cubicsdr(path: &str) -> anyhow::Result<Vec<Bookmark>> {
 
 /// Extract text content from a simple XML tag like `<tag>value</tag>`.
 fn extract_xml_tag(block: &str, tag: &str) -> Option<String> {
-    let open = format!("<{}>", tag);
-    let close = format!("</{}>", tag);
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
     let start = block.find(&open)?;
     let after = start + open.len();
     let end = block[after..].find(&close)?;

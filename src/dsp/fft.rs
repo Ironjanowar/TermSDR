@@ -1,3 +1,5 @@
+//! FFT processing, windowing functions, and power-to-dB conversion.
+
 use std::f32::consts::PI;
 
 use rustfft::{FftPlanner, num_complex::Complex};
@@ -23,6 +25,7 @@ impl FftProcessor {
     /// # Arguments
     /// * `fft_size` - Number of FFT bins (must be power of 2 for efficiency)
     /// * `avg_count` - Number of frames to average (1 = no averaging)
+    #[must_use] 
     pub fn new(fft_size: usize, avg_count: usize) -> Self {
         let window = hanning_window(fft_size);
         let avg_count = avg_count.max(1);
@@ -50,6 +53,10 @@ impl FftProcessor {
     ///
     /// Returns `Some(FftResult)` when enough frames have been accumulated
     /// for averaging, or `None` if still accumulating.
+    ///
+    /// # Panics
+    /// Panics if the FFT planner returns an invalid plan.
+    #[allow(clippy::cast_possible_truncation)] // intentional truncation
     pub fn process(
         &mut self,
         samples: &[IqSample],
@@ -76,7 +83,7 @@ impl FftProcessor {
 
         // Calculate magnitude squared (power) and accumulate
         for (i, bin) in windowed.iter().enumerate() {
-            let power = (bin.re * bin.re + bin.im * bin.im) as f64;
+            let power = f64::from(bin.re * bin.re + bin.im * bin.im);
             self.avg_accum[i] += power;
         }
         self.frames_accumulated += 1;
@@ -84,14 +91,15 @@ impl FftProcessor {
         if self.frames_accumulated >= self.avg_count {
             // Compute averaged dB values with FFT shift (DC in center)
             let n = self.fft_size;
+            #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
             let avg_factor = self.frames_accumulated as f64;
             let mut bins = vec![0.0_f32; n];
 
-            for i in 0..n {
+            for (i, bin) in bins.iter_mut().enumerate().take(n) {
                 // FFT shift: swap first half and second half so DC is centered
                 let src = (i + n / 2) % n;
                 let avg_power = self.avg_accum[src] / avg_factor;
-                bins[i] = power_to_db(avg_power as f32, n);
+                *bin = power_to_db(avg_power as f32, n);
             }
 
             // Reset accumulator
@@ -110,7 +118,9 @@ impl FftProcessor {
 }
 
 /// Generate a Hanning window of the given size.
-pub fn hanning_window(size: usize) -> Vec<f32> {
+#[must_use] 
+#[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
+pub(crate) fn hanning_window(size: usize) -> Vec<f32> {
     (0..size)
         .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f32 / size as f32).cos()))
         .collect()
@@ -120,7 +130,9 @@ pub fn hanning_window(size: usize) -> Vec<f32> {
 ///
 /// Formula: 10 * log10(power / N^2), where N is FFT size.
 /// The N^2 normalization accounts for FFT scaling.
-pub fn power_to_db(power: f32, fft_size: usize) -> f32 {
+#[must_use] 
+pub(crate) fn power_to_db(power: f32, fft_size: usize) -> f32 {
+    #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
     let normalized = power / (fft_size as f32 * fft_size as f32);
     if normalized > 1e-20 {
         10.0 * normalized.log10()

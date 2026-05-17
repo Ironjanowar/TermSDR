@@ -14,6 +14,7 @@ pub enum WsAudioFormat {
 }
 
 impl WsAudioFormat {
+    #[must_use] 
     pub fn from_byte(b: u8) -> Option<Self> {
         match b {
             0x00 => Some(Self::Opus),
@@ -22,6 +23,7 @@ impl WsAudioFormat {
         }
     }
 
+    #[must_use] 
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "opus" => Some(Self::Opus),
@@ -55,7 +57,7 @@ pub struct WebSocketSink {
 }
 
 impl WebSocketSink {
-    /// Create a new WebSocketSink.
+    /// Create a new `WebSocketSink`.
     ///
     /// `tx` — sender side of the channel; the WS broadcast task reads from the receiver.
     /// `format` — shared atomic for runtime format switching.
@@ -90,6 +92,7 @@ impl WebSocketSink {
     }
 
     /// Get the current format.
+    #[must_use] 
     pub fn current_format(&self) -> WsAudioFormat {
         WsAudioFormat::from_byte(self.format.load(Ordering::Relaxed))
             .unwrap_or(WsAudioFormat::PcmRaw)
@@ -180,6 +183,7 @@ impl AudioSink for WebSocketSink {
 
 /// Decode an audio binary frame.
 /// Returns `(format_byte, audio_data)` or None if malformed.
+#[must_use] 
 pub fn decode_audio_frame(data: &[u8]) -> Option<(u8, &[u8])> {
     if data.len() < 2 {
         return None;

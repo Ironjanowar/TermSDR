@@ -1,6 +1,6 @@
-/// Viridis colormap for waterfall display.
-/// Maps normalized values [0.0, 1.0] to RGB colors.
-/// 64-entry lookup table (sufficient for terminal cells).
+//! Viridis colormap for waterfall display.
+//! Maps normalized values [0.0, 1.0] to RGB colors.
+//! 64-entry lookup table (sufficient for terminal cells).
 
 use ratatui::style::Color;
 
@@ -78,6 +78,7 @@ const VIRIDIS_64: [(u8, u8, u8); 64] = [
 /// * `db` - Power value in dB (typically -100 to 0)
 /// * `min_db` - Minimum dB value (maps to purple/dark)
 /// * `max_db` - Maximum dB value (maps to yellow/bright)
+#[must_use] 
 pub fn viridis_color(db: f32, min_db: f32, max_db: f32) -> Color {
     let range = max_db - min_db;
     let normalized = if range.abs() < f32::EPSILON {
@@ -91,13 +92,17 @@ pub fn viridis_color(db: f32, min_db: f32, max_db: f32) -> Color {
 }
 
 /// Map a normalized value [0.0, 1.0] to a Viridis palette index [0, 63].
+#[must_use] 
 pub fn viridis_index(normalized: f32) -> usize {
     let clamped = normalized.clamp(0.0, 1.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // intentional truncation; value is non-negative here
     let idx = (clamped * 63.0).round() as usize;
     idx.min(63)
 }
 
 /// Get the RGB tuple for a viridis index.
+#[must_use]
+#[allow(dead_code)]
 pub fn viridis_rgb(index: usize) -> (u8, u8, u8) {
     VIRIDIS_64[index.min(63)]
 }

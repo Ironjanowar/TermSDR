@@ -20,17 +20,23 @@ pub struct CpalSink {
 }
 
 impl CpalSink {
-    /// Create a new CpalSink.
+    /// Create a new `CpalSink`.
     ///
     /// `device_name` — if `None`, uses the default output device.
+    ///
+    /// # Errors
+    /// Returns an error if no suitable audio output device is found or the audio stream cannot be built.
+    ///
+    /// # Panics
+    /// Panics if the internal audio buffer mutex is poisoned.
     pub fn new(device_name: Option<&str>) -> Result<Self> {
         let host = cpal::default_host();
 
         let device = if let Some(name) = device_name {
             host.output_devices()
                 .context("Failed to enumerate output devices")?
-                .find(|d| d.name().map(|n| n == name).unwrap_or(false))
-                .context(format!("Audio device '{}' not found", name))?
+                .find(|d| d.name().is_ok_and(|n| n == name))
+                .context(format!("Audio device '{name}' not found"))?
         } else {
             host.default_output_device()
                 .context("No default audio output device available")?
@@ -54,7 +60,7 @@ impl CpalSink {
         let stream = device.build_output_stream(
             &config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let mut buf = buffer_clone.lock().unwrap();
+                let mut buf = buffer_clone.lock().expect("invariant: mutex not poisoned");
                 for frame in data.chunks_mut(channels) {
                     let sample = buf.pop_front().unwrap_or(0.0);
                     // Write mono to all channels
@@ -64,7 +70,7 @@ impl CpalSink {
                 }
             },
             |err| {
-                eprintln!("cpal stream error: {}", err);
+                tracing::error!("cpal stream error: {err}");
             },
             None,
         ).context("Failed to build output stream")?;
@@ -81,7 +87,7 @@ impl CpalSink {
 
 impl AudioSink for CpalSink {
     fn write(&mut self, samples: &[f32]) -> anyhow::Result<()> {
-        let mut buf = self.buffer.lock().unwrap();
+        let mut buf = self.buffer.lock().expect("invariant: mutex not poisoned");
         buf.extend(samples);
         // Cap buffer to ~1 second to prevent unbounded growth
         let max = self.sample_rate as usize;
@@ -97,6 +103,9 @@ impl AudioSink for CpalSink {
 }
 
 /// List all available audio output devices.
+///
+/// # Errors
+/// Returns an error if output devices cannot be enumerated.
 pub fn list_output_devices() -> Result<Vec<String>> {
     let host = cpal::default_host();
     let devices: Vec<String> = host

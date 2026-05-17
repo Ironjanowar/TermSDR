@@ -1,3 +1,5 @@
+//! Digital signal processing pipeline: FFT computation and spectral analysis.
+
 pub mod fft;
 
 // TODO: DSP pipeline orchestration.

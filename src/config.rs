@@ -1,9 +1,11 @@
+//! CLI argument parsing and configuration loading.
+
 use anyhow::Result;
 use clap::Parser;
 
 use crate::types::AppConfig;
 
-/// TermSDR — Terminal-based SDR application.
+/// `TermSDR` — Terminal-based SDR application.
 #[derive(Parser, Debug)]
 #[command(name = "termsdr", version, about)]
 pub struct CliArgs {
@@ -39,7 +41,7 @@ pub struct CliArgs {
     #[arg(short, long)]
     pub config: Option<String>,
 
-    /// Import bookmarks from CubicSDR XML file
+    /// Import bookmarks from `CubicSDR` XML file
     #[arg(long)]
     pub import_bookmarks: Option<String>,
 
@@ -65,7 +67,10 @@ pub struct CliArgs {
 }
 
 /// Parse a frequency string like "100M", "118.1M", "433920000" into Hz.
-pub fn parse_frequency(s: &str) -> Result<f64> {
+///
+/// # Errors
+/// Returns an error if the string cannot be parsed as a valid frequency.
+pub(crate) fn parse_frequency(s: &str) -> Result<f64> {
     let s = s.trim();
     if let Some(prefix) = s.strip_suffix('M') {
         Ok(prefix.parse::<f64>()? * 1_000_000.0)
@@ -79,7 +84,10 @@ pub fn parse_frequency(s: &str) -> Result<f64> {
 }
 
 impl CliArgs {
-    /// Convert CLI args into an AppConfig.
+    /// Convert CLI args into an `AppConfig`.
+    ///
+    /// # Errors
+    /// Returns an error if frequency or sample rate values are invalid.
     pub fn to_config(&self) -> Result<AppConfig> {
         let center_freq = parse_frequency(&self.frequency)?;
         let sample_rate = parse_frequency(&self.sample_rate)?;

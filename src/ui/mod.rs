@@ -1,9 +1,11 @@
-pub mod colors;
-pub mod command_palette;
-pub mod settings_modal;
-pub mod spectrum;
-pub mod status_bar;
-pub mod waterfall;
+//! Terminal user interface: application state, event loop, and rendering.
+
+pub(crate) mod colors;
+pub(crate) mod command_palette;
+pub(crate) mod settings_modal;
+pub(crate) mod spectrum;
+pub(crate) mod status_bar;
+pub(crate) mod waterfall;
 
 use std::io::{self, Stdout};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -49,7 +51,7 @@ const VFO_COLORS: [Color; 8] = [
 
 /// A pinned VFO (Variable Frequency Oscillator) with its own frequency and demodulator.
 #[derive(Debug, Clone)]
-pub struct Vfo {
+pub(crate) struct Vfo {
     pub id: usize,
     pub freq: f64,
     pub channel_bw: f64,
@@ -66,6 +68,7 @@ pub enum SourceSelection {
 }
 
 /// The main application state for the TUI.
+#[allow(clippy::struct_excessive_bools)] // UI state naturally has many boolean flags
 pub struct App {
     /// Current config (may be mutated by controls).
     pub config: AppConfig,
@@ -107,7 +110,7 @@ pub struct App {
     /// Squelch threshold in dB (None = disabled).
     pub squelch: Option<f32>,
     /// Pinned VFOs.
-    pub vfos: Vec<Vfo>,
+    pub(crate) vfos: Vec<Vfo>,
     /// Next VFO ID (1-based).
     pub next_vfo_id: usize,
     /// Whether VFO delete modal is shown.
@@ -122,7 +125,7 @@ pub struct App {
     pub bookmark_list: Vec<Bookmark>,
     /// Audio control channel sender.
     pub audio_control_tx: Option<crossbeam_channel::Sender<AudioControl>>,
-    /// Shared center frequency for TestSource reactivity.
+    /// Shared center frequency for `TestSource` reactivity.
     pub shared_center_freq: Option<Arc<AtomicU64>>,
     /// Spectrum averaging count.
     pub averaging: usize,
@@ -145,6 +148,7 @@ pub struct App {
 }
 
 impl App {
+    #[must_use] 
     pub fn new(config: AppConfig, audio_control_tx: Option<crossbeam_channel::Sender<AudioControl>>) -> Self {
         let center = config.center_freq;
         Self {
@@ -246,8 +250,8 @@ impl App {
 
         // Auto-range dB if we have data
         if !fft.bins.is_empty() {
-            let min = fft.bins.iter().cloned().fold(f32::INFINITY, f32::min);
-            let max = fft.bins.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let min = fft.bins.iter().copied().fold(f32::INFINITY, f32::min);
+            let max = fft.bins.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             // Smooth the range
             self.min_db = self.min_db * 0.95 + (min - 10.0) * 0.05;
             self.max_db = self.max_db * 0.95 + (max + 5.0) * 0.05;
@@ -261,6 +265,7 @@ impl App {
     }
 
     /// Auto-scan: move cursor to the strongest signal if scan is active.
+    #[allow(clippy::cast_possible_truncation)] // intentional truncation
     pub fn maybe_scan(&mut self) {
         if !self.scan_active { return; }
         if (self.last_scan_time.elapsed().as_millis() as u64) < self.scan_interval_ms { return; }
@@ -285,6 +290,7 @@ impl App {
     }
 
     /// Update FPS counter.
+    #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
     pub fn update_fps(&mut self) {
         self.frame_count += 1;
         let elapsed = self.last_fps_update.elapsed();
@@ -297,6 +303,10 @@ impl App {
     }
 
     /// Handle keyboard input.
+    ///
+    /// # Panics
+    /// Panics if internal state (e.g., VFO indices) becomes inconsistent.
+    #[allow(clippy::too_many_lines)] // large key event dispatch
     pub fn handle_key(&mut self, key: KeyEvent) {
         // Help modal takes priority — any key closes it
         if self.show_help {
@@ -355,12 +365,12 @@ impl App {
                             self.apply_settings_control(ctrl);
                         }
                     }
-                    KeyCode::Char('H') | KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    KeyCode::Char('H' | 'h') if key.modifiers.contains(KeyModifiers::SHIFT) => {
                         if let Some(ctrl) = self.settings_modal.adjust_coarse(-1) {
                             self.apply_settings_control(ctrl);
                         }
                     }
-                    KeyCode::Char('L') | KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    KeyCode::Char('L' | 'l') if key.modifiers.contains(KeyModifiers::SHIFT) => {
                         if let Some(ctrl) = self.settings_modal.adjust_coarse(1) {
                             self.apply_settings_control(ctrl);
                         }
@@ -391,7 +401,7 @@ impl App {
                     self.show_vfo_delete_modal = false;
                 }
                 KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
-                    let num = c.to_digit(10).unwrap() as usize;
+                    let num = c.to_digit(10).expect("invariant: is_ascii_digit guard") as usize;
                     if let Some(idx) = self.vfos.iter().position(|v| v.id == num) {
                         let vfo = self.vfos.remove(idx);
                         self.send_audio_control(AudioControl::RemoveVfo(vfo.id));
@@ -409,23 +419,21 @@ impl App {
                 KeyCode::Esc => {
                     self.show_bookmarks_modal = false;
                 }
-                KeyCode::Up => {
-                    if self.bookmark_selected > 0 {
+                KeyCode::Up
+                    if self.bookmark_selected > 0 => {
                         self.bookmark_selected -= 1;
                     }
-                }
-                KeyCode::Down => {
-                    if !self.bookmark_list.is_empty() && self.bookmark_selected < self.bookmark_list.len() - 1 {
+                KeyCode::Down
+                    if !self.bookmark_list.is_empty() && self.bookmark_selected < self.bookmark_list.len() - 1 => {
                         self.bookmark_selected += 1;
                     }
-                }
                 KeyCode::Enter => {
                     if let Some(bookmark) = self.bookmark_list.get(self.bookmark_selected).cloned() {
                         self.tune_to_bookmark(&bookmark);
                         self.show_bookmarks_modal = false;
                     }
                 }
-                KeyCode::Char('m') | KeyCode::Char('M') => {
+                KeyCode::Char('m' | 'M') => {
                     if let Some(bookmark) = self.bookmark_list.get(self.bookmark_selected).cloned() {
                         self.tune_to_bookmark(&bookmark);
                         self.show_bookmarks_modal = false;
@@ -618,7 +626,7 @@ impl App {
                 let g = self.config.gain.unwrap_or(0.0);
                 self.config.gain = Some((g - 1.0).max(0.0));
             }
-            KeyCode::Char('+') | KeyCode::Char('=') => {
+            KeyCode::Char('+' | '=') => {
                 // Zoom in (decrease displayed bandwidth)
                 self.config.sample_rate = (self.config.sample_rate * 0.8).max(256_000.0);
             }
@@ -660,11 +668,15 @@ impl App {
             }
             KeyCode::Char('t') => {
                 self.waterfall_time_span = (self.waterfall_time_span + 5.0).min(120.0);
-                self.max_waterfall_rows = (self.waterfall_time_span * 30.0) as usize;
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // waterfall_time_span is bounded 5..120
+                let rows = (self.waterfall_time_span * 30.0) as usize;
+                self.max_waterfall_rows = rows;
             }
             KeyCode::Char('T') => {
                 self.waterfall_time_span = (self.waterfall_time_span - 5.0).max(5.0);
-                self.max_waterfall_rows = (self.waterfall_time_span * 30.0) as usize;
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // waterfall_time_span is bounded 5..120
+                let rows = (self.waterfall_time_span * 30.0) as usize;
+                self.max_waterfall_rows = rows;
                 self.waterfall_history.truncate(self.max_waterfall_rows);
             }
             KeyCode::Char('v') => {
@@ -679,8 +691,8 @@ impl App {
                 self.command_palette.reset();
                 self.command_palette_active = true;
             }
-            KeyCode::Char('m') => {
-                if self.vfos.len() < 8 {
+            KeyCode::Char('m')
+                if self.vfos.len() < 8 => {
                     let id = self.next_vfo_id;
                     let color = VFO_COLORS[self.vfos.len() % 8];
                     let vfo = Vfo {
@@ -699,12 +711,10 @@ impl App {
                         mode: self.demod_mode,
                     });
                 }
-            }
-            KeyCode::Char('x') => {
-                if !self.vfos.is_empty() {
+            KeyCode::Char('x')
+                if !self.vfos.is_empty() => {
                     self.show_vfo_delete_modal = true;
                 }
-            }
             KeyCode::Char('d') => {
                 // Cycle demod mode: AM → FM → NFM → AM
                 let new_mode = self.demod_mode.next();
@@ -742,6 +752,8 @@ impl App {
     }
 
     /// Apply a command action from the command palette.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // intentional truncation; value is non-negative here
+    #[allow(clippy::too_many_lines)] // large command action dispatch
     fn apply_command_action(&mut self, action: CommandAction) {
         match action {
             CommandAction::SetFrequency(f) => {
@@ -893,7 +905,8 @@ impl App {
     }
 
     /// Get the display source type.
-    pub fn display_source(&self) -> DisplaySource {
+    #[must_use] 
+    pub(crate) fn display_source(&self) -> DisplaySource {
         match &self.config.source {
             SourceType::Test { .. } => DisplaySource::Test,
             SourceType::File { path } => DisplaySource::File(path.clone()),
@@ -902,23 +915,28 @@ impl App {
     }
 
     /// Get the relative cursor position (0.0–1.0) within the visible spectrum.
-    pub fn cursor_pos(&self) -> f32 {
+    #[must_use] 
+    #[allow(clippy::cast_possible_truncation)] // intentional truncation
+    pub(crate) fn cursor_pos(&self) -> f32 {
         let start = self.config.center_freq - self.config.sample_rate / 2.0;
         ((self.cursor_freq - start) / self.config.sample_rate) as f32
     }
 
     /// Get the frequency at the current cursor position.
-    pub fn cursor_frequency(&self) -> f64 {
+    #[must_use] 
+    pub(crate) fn cursor_frequency(&self) -> f64 {
         self.cursor_freq
     }
 
     /// Get the dB value at the current cursor position from the latest FFT.
-    pub fn cursor_db(&self) -> Option<f32> {
+    #[must_use] 
+    pub(crate) fn cursor_db(&self) -> Option<f32> {
         let pos = self.cursor_pos();
         self.latest_fft.as_ref().and_then(|fft| {
             if fft.bins.is_empty() {
                 return None;
             }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)] // precision loss acceptable for DSP/UI; intentional truncation; value is non-negative here
             let bin_index = (pos * (fft.bins.len() - 1) as f32) as usize;
             fft.bins.get(bin_index).copied()
         })
@@ -926,6 +944,9 @@ impl App {
 }
 
 /// Initialize the terminal for TUI.
+///
+/// # Errors
+/// Returns an error if raw mode cannot be enabled or the alternate screen cannot be entered.
 pub fn init_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -936,6 +957,9 @@ pub fn init_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
 }
 
 /// Restore the terminal to normal state.
+///
+/// # Errors
+/// Returns an error if the terminal cannot be restored.
 pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -944,6 +968,7 @@ pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
 }
 
 /// Draw the main UI.
+#[allow(clippy::too_many_lines)] // complex UI layout composition
 pub fn draw_ui(frame: &mut Frame, app: &App) {
     let size = frame.area();
 
@@ -1085,6 +1110,7 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
 }
 
 /// Draw the help/cheatsheet modal.
+#[allow(clippy::too_many_lines)] // help text layout
 fn draw_help_modal(frame: &mut Frame, size: Rect) {
     let block = Block::default()
         .title(" ⌨️  Keyboard Shortcuts ")
@@ -1193,6 +1219,7 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
 }
 
 /// Draw the command palette modal.
+#[allow(clippy::too_many_lines)] // command palette UI layout
 fn draw_command_palette(frame: &mut Frame, size: Rect, palette: &CommandPalette) {
     let filtered = palette.filtered();
     
@@ -1200,7 +1227,8 @@ fn draw_command_palette(frame: &mut Frame, size: Rect, palette: &CommandPalette)
     let max_visible = 12;
     let result_count = filtered.len().min(max_visible);
     let has_error = palette.error.is_some();
-    let error_rows: u16 = if has_error { 1 } else { 0 };
+    let error_rows: u16 = u16::from(has_error);
+    #[allow(clippy::cast_possible_truncation)] // intentional truncation
     let total_height = (3 + error_rows + result_count as u16 + 2).min(size.height);
     let width = (size.width * 60 / 100).max(40).min(size.width);
     
@@ -1254,7 +1282,7 @@ fn draw_command_palette(frame: &mut Frame, size: Rect, palette: &CommandPalette)
             };
             let error_text = palette.error.as_deref().unwrap_or("");
             let error_line = Paragraph::new(Line::from(
-                Span::styled(format!("  ⚠ {}", error_text), Style::default().fg(Color::Red))
+                Span::styled(format!("  ⚠ {error_text}"), Style::default().fg(Color::Red))
             ));
             frame.render_widget(error_line, error_area);
         }
@@ -1279,6 +1307,7 @@ fn draw_command_palette(frame: &mut Frame, size: Rect, palette: &CommandPalette)
     
     // Command list
     for (i, cmd) in filtered.iter().enumerate().take(max_visible) {
+        #[allow(clippy::cast_possible_truncation)] // intentional truncation
         let row_y = inner.y + 2 + error_offset + i as u16;
         if row_y >= inner.y + inner.height {
             break;
@@ -1334,6 +1363,7 @@ fn draw_command_palette(frame: &mut Frame, size: Rect, palette: &CommandPalette)
 fn draw_vfo_delete_modal(frame: &mut Frame, size: Rect, vfos: &[Vfo]) {
     use spectrum::format_frequency;
 
+    #[allow(clippy::cast_possible_truncation)] // intentional truncation
     let height = (vfos.len() as u16 + 5).min(size.height);
     let width = 50.min(size.width);
     let area = Rect {
@@ -1359,6 +1389,7 @@ fn draw_vfo_delete_modal(frame: &mut Frame, size: Rect, vfos: &[Vfo]) {
     };
 
     for (i, vfo) in vfos.iter().enumerate() {
+        #[allow(clippy::cast_possible_truncation)] // intentional truncation
         let y = inner.y + i as u16;
         if y >= inner.y + inner.height.saturating_sub(1) {
             break;
@@ -1480,7 +1511,7 @@ fn draw_bookmarks_modal(frame: &mut Frame, size: Rect, bookmarks: &[Bookmark], s
             let label = format!("    {} {}", freq_str, bm.name);
             let info = format!("  {} BW:{}", bm.mode.label(), bw_str);
             let line = Line::from(vec![
-                Span::styled(format!("{:<40}", label), name_style),
+                Span::styled(format!("{label:<40}"), name_style),
                 Span::styled(info, info_style),
             ]);
 
@@ -1508,6 +1539,13 @@ fn draw_bookmarks_modal(frame: &mut Frame, size: Rect, bookmarks: &[Bookmark], s
 }
 
 /// Show the source selection screen and return the user's choice.
+///
+/// # Errors
+/// Returns an error if terminal drawing or input reading fails.
+///
+/// # Panics
+/// Panics if the terminal backend is in an invalid state.
+#[allow(clippy::cast_sign_loss)] // value is non-negative here
 pub fn show_source_selection(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
 ) -> Result<Option<SourceSelection>> {
@@ -1540,7 +1578,7 @@ pub fn show_source_selection(
                     Span::styled("    (No RTL-SDR devices detected)", Style::default().fg(Color::DarkGray)),
                 ]));
             } else {
-                for (idx, name) in devices_ref.iter() {
+                for (idx, name) in devices_ref {
                     lines.push(Line::from(vec![
                         Span::styled(
                             format!("    [{}] ", idx + 1),
@@ -1581,22 +1619,23 @@ pub fn show_source_selection(
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
-                    KeyCode::Char('t') | KeyCode::Char('T') => {
+                    KeyCode::Char('t' | 'T') => {
                         return Ok(Some(SourceSelection::Test));
                     }
-                    KeyCode::Char('f') | KeyCode::Char('F') => {
+                    KeyCode::Char('f' | 'F') => {
                         let path = show_file_input(terminal)?;
                         if let Some(p) = path {
                             return Ok(Some(SourceSelection::File(p)));
                         }
                     }
                     KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
-                        let num = c.to_digit(10).unwrap() as i32;
+                        #[allow(clippy::cast_possible_wrap)] // value fits in target type
+                        let num = c.to_digit(10).expect("invariant: is_ascii_digit guard") as i32;
                         if num <= device_count {
                             return Ok(Some(SourceSelection::RtlSdr((num - 1) as usize)));
                         }
                     }
-                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                    KeyCode::Char('q' | 'Q') | KeyCode::Esc => {
                         return Ok(None);
                     }
                     _ => {}
@@ -1641,11 +1680,10 @@ fn show_file_input(
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
-                    KeyCode::Enter => {
-                        if !input.is_empty() {
+                    KeyCode::Enter
+                        if !input.is_empty() => {
                             return Ok(Some(input));
                         }
-                    }
                     KeyCode::Esc => return Ok(None),
                     KeyCode::Backspace => { input.pop(); }
                     KeyCode::Char(c) => { input.push(c); }
@@ -1657,12 +1695,14 @@ fn show_file_input(
 }
 
 /// Draw the settings modal.
+#[allow(clippy::too_many_lines)] // settings modal UI layout
 fn draw_settings_modal(frame: &mut Frame, size: Rect, modal: &SettingsModal) {
     use settings_modal::{SettingsItemKind, format_display_value};
 
     // Calculate total rows: items + section headers + title + footer
     let section_headers = modal.section_headers();
     let total_item_rows = modal.items.len() + section_headers.len();
+    #[allow(clippy::cast_possible_truncation)] // intentional truncation
     let height = (total_item_rows as u16 + 5).min(size.height); // +5 for border, title, footer
     let width = 54.min(size.width);
 
@@ -1699,9 +1739,9 @@ fn draw_settings_modal(frame: &mut Frame, size: Rect, modal: &SettingsModal) {
         // Section header
         if section_starts.contains(&i) {
             if let Some(section) = item.section {
-                let header = format!("── {} ──", section);
+                let header = format!("── {section} ──");
                 let pad = inner.width as usize;
-                let centered = format!("{:^width$}", header, width = pad);
+                let centered = format!("{header:^pad$}");
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
                         centered,
@@ -1744,6 +1784,7 @@ fn draw_settings_modal(frame: &mut Frame, size: Rect, modal: &SettingsModal) {
             SettingsItemKind::Slider { value, min, max, .. } if !modal.editing || !is_selected => {
                 let pct = ((value - min) / (max - min)).clamp(0.0, 1.0);
                 let bar_width = 10;
+                #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)] // precision loss acceptable for DSP/UI; intentional truncation; value is non-negative here
                 let filled = (pct * bar_width as f64) as usize;
                 let empty = bar_width - filled;
                 format!(" [{}{}]", "█".repeat(filled), "░".repeat(empty))
@@ -1756,7 +1797,7 @@ fn draw_settings_modal(frame: &mut Frame, size: Rect, modal: &SettingsModal) {
             frame.render_widget(Clear, row_area);
         }
 
-        let value_and_bar = format!("{}{}", value_str, bar_str);
+        let value_and_bar = format!("{value_str}{bar_str}");
         let line = Line::from(vec![
             Span::styled(label, label_style),
             Span::styled(value_and_bar, value_style),
@@ -1819,6 +1860,7 @@ fn draw_settings_modal(frame: &mut Frame, size: Rect, modal: &SettingsModal) {
             if !current_line.is_empty() {
                 lines.push(current_line);
             }
+            #[allow(clippy::cast_possible_truncation)] // intentional truncation
             let tooltip_h = (lines.len() as u16 + 2).min(size.height); // +2 for border
             let tooltip_y = area.y + area.height;
             let tooltip_y = if tooltip_y + tooltip_h > size.height {
@@ -1829,7 +1871,7 @@ fn draw_settings_modal(frame: &mut Frame, size: Rect, modal: &SettingsModal) {
             let tooltip_area = Rect {
                 x: area.x,
                 y: tooltip_y,
-                width: width,
+                width,
                 height: tooltip_h,
             };
             let tooltip_block = Block::default()
@@ -1847,11 +1889,12 @@ fn draw_settings_modal(frame: &mut Frame, size: Rect, modal: &SettingsModal) {
 }
 
 /// Format a step value nicely.
+#[allow(clippy::cast_possible_truncation)] // intentional truncation
 fn format_step(v: f64) -> String {
     if v.fract().abs() < 1e-9 {
         format!("{}", v as i64)
     } else {
-        format!("{}", v)
+        format!("{v}")
     }
 }
 

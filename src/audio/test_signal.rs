@@ -8,12 +8,13 @@ use std::f64::consts::PI;
 /// Produces: `A * (1 + m * sin(2π * f_audio * t)) * e^(j * 2π * f_carrier * t)`
 ///
 /// # Arguments
-/// * `carrier_freq` - Carrier frequency in Hz, relative to center_freq (offset)
+/// * `carrier_freq` - Carrier frequency in Hz, relative to `center_freq` (offset)
 /// * `audio_freq` - Modulating audio tone frequency in Hz
 /// * `modulation_index` - AM modulation depth, 0.0 to 1.0
 /// * `sample_rate` - Sample rate in Hz
 /// * `center_freq` - Center frequency of the "receiver" in Hz (used to compute carrier offset)
 /// * `num_samples` - Number of IQ samples to generate
+#[must_use] 
 pub fn generate_am_signal(
     carrier_freq: f64,
     audio_freq: f64,
@@ -26,6 +27,7 @@ pub fn generate_am_signal(
     let mut samples = Vec::with_capacity(num_samples);
 
     for i in 0..num_samples {
+        #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
         let t = i as f64 / sample_rate;
 
         // AM envelope: 1 + m * sin(2π * f_audio * t)
@@ -37,7 +39,9 @@ pub fn generate_am_signal(
         let carrier_q = phase.sin();
 
         // Modulated signal
+        #[allow(clippy::cast_possible_truncation)] // intentional truncation
         let i_val = (envelope * carrier_i) as f32;
+        #[allow(clippy::cast_possible_truncation)] // intentional truncation
         let q_val = (envelope * carrier_q) as f32;
 
         samples.push(IqSample::new(i_val, q_val));
@@ -47,6 +51,7 @@ pub fn generate_am_signal(
 }
 
 /// Generate a pure tone (unmodulated carrier) for testing frequency shift.
+#[must_use] 
 pub fn generate_tone(
     freq_offset: f64,
     amplitude: f64,
@@ -55,9 +60,12 @@ pub fn generate_tone(
 ) -> Vec<IqSample> {
     let mut samples = Vec::with_capacity(num_samples);
     for i in 0..num_samples {
+        #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
         let t = i as f64 / sample_rate;
         let phase = 2.0 * std::f64::consts::PI * freq_offset * t;
+        #[allow(clippy::cast_possible_truncation)] // intentional truncation
         let i_val = (amplitude * phase.cos()) as f32;
+        #[allow(clippy::cast_possible_truncation)] // intentional truncation
         let q_val = (amplitude * phase.sin()) as f32;
         samples.push(IqSample::new(i_val, q_val));
     }
@@ -70,12 +78,13 @@ pub fn generate_tone(
 /// `phase(t) = 2π * offset * t + (deviation/audio_freq) * sin(2π * audio_freq * t)`
 ///
 /// # Arguments
-/// * `carrier_freq` - Carrier frequency in Hz (absolute, offset from center_freq)
+/// * `carrier_freq` - Carrier frequency in Hz (absolute, offset from `center_freq`)
 /// * `audio_freq` - Modulating audio tone frequency in Hz
 /// * `deviation` - Frequency deviation in Hz
 /// * `sample_rate` - Sample rate in Hz
 /// * `center_freq` - Center frequency of the "receiver" in Hz
 /// * `num_samples` - Number of IQ samples to generate
+#[must_use] 
 pub fn generate_fm_signal(
     carrier_freq: f64,
     audio_freq: f64,
@@ -89,10 +98,13 @@ pub fn generate_fm_signal(
     let modulation_index = deviation / audio_freq;
 
     for i in 0..num_samples {
+        #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
         let t = i as f64 / sample_rate;
         let phase = 2.0 * PI * offset * t
             + modulation_index * (2.0 * PI * audio_freq * t).sin();
+        #[allow(clippy::cast_possible_truncation)] // intentional truncation
         let i_val = phase.cos() as f32;
+        #[allow(clippy::cast_possible_truncation)] // intentional truncation
         let q_val = phase.sin() as f32;
         samples.push(IqSample::new(i_val, q_val));
     }

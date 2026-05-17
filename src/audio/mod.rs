@@ -1,5 +1,8 @@
-pub mod demod;
-pub mod test_signal;
+//! Audio pipeline: IQ demodulation, mixing, and output routing.
+
+pub(crate) mod demod;
+#[allow(dead_code)]
+pub(crate) mod test_signal;
 pub mod cpal_sink;
 pub mod ws_sink;
 
@@ -12,6 +15,10 @@ use demod::{Demodulator, DemodMode};
 
 /// Trait for audio output destinations.
 pub trait AudioSink: Send {
+    /// Write audio samples to the output.
+    ///
+    /// # Errors
+    /// Returns an error if the samples cannot be written to the audio output.
     fn write(&mut self, samples: &[f32]) -> anyhow::Result<()>;
     fn sample_rate(&self) -> u32;
 }
@@ -23,6 +30,7 @@ pub struct NullSink {
 }
 
 impl NullSink {
+    #[must_use] 
     pub fn new(sample_rate: u32) -> Self {
         Self {
             samples: Vec::new(),
@@ -70,27 +78,234 @@ pub enum AudioControl {
     Shutdown,
 }
 
+use std::collections::HashMap;
+
 // ============================================================================
 // Audio Thread
 // ============================================================================
+
+/// Apply a control message to the audio thread state.
+/// Returns `true` if the thread should shut down.
+#[allow(clippy::too_many_arguments)] // audio thread state is tightly coupled
+fn apply_control(
+    ctrl: &AudioControl,
+    cursor_demod: &mut Demodulator,
+    vfo_demods: &mut HashMap<usize, Demodulator>,
+    volume: &mut f32,
+    squelch: &mut Option<f32>,
+    muted: &mut bool,
+    center_freq: &mut f64,
+    input_sample_rate: f64,
+    output_sample_rate: f64,
+) -> bool {
+    match *ctrl {
+        AudioControl::SetCursorFreq(f) => cursor_demod.set_cursor_freq(f),
+        AudioControl::SetCenterFreq(f) => {
+            *center_freq = f;
+            cursor_demod.set_center_freq(f);
+            for demod in vfo_demods.values_mut() {
+                demod.set_center_freq(f);
+            }
+        }
+        AudioControl::SetChannelBw(bw) => cursor_demod.set_channel_bw(bw),
+        AudioControl::SetVolume(v) => *volume = f32::from(v.min(100)) / 100.0,
+        AudioControl::SetSquelch(ref s) => *squelch = *s,
+        AudioControl::Mute(m) => *muted = m,
+        AudioControl::AddVfo { id, freq, channel_bw, mode } => {
+            let demod = Demodulator::new(
+                *center_freq,
+                freq,
+                channel_bw,
+                input_sample_rate,
+                output_sample_rate,
+                mode,
+            );
+            vfo_demods.insert(id, demod);
+        }
+        AudioControl::RemoveVfo(id) => {
+            vfo_demods.remove(&id);
+        }
+        AudioControl::SetDemodMode(mode) => {
+            cursor_demod.set_mode(mode);
+        }
+        AudioControl::SetVfoDemodMode { id, mode } => {
+            if let Some(demod) = vfo_demods.get_mut(&id) {
+                demod.set_mode(mode);
+            }
+        }
+        AudioControl::SetAgcEnabled(enabled) => {
+            cursor_demod.set_agc_enabled(enabled);
+            for demod in vfo_demods.values_mut() {
+                demod.set_agc_enabled(enabled);
+            }
+        }
+        AudioControl::SetAgcAttack(ms) => {
+            cursor_demod.set_agc_attack(ms);
+            for demod in vfo_demods.values_mut() {
+                demod.set_agc_attack(ms);
+            }
+        }
+        AudioControl::SetAgcDecay(ms) => {
+            cursor_demod.set_agc_decay(ms);
+            for demod in vfo_demods.values_mut() {
+                demod.set_agc_decay(ms);
+            }
+        }
+        AudioControl::SetAgcTarget(level) => {
+            cursor_demod.set_agc_target(level);
+            for demod in vfo_demods.values_mut() {
+                demod.set_agc_target(level);
+            }
+        }
+        AudioControl::SetAgcMaxGain(db) => {
+            cursor_demod.set_agc_max_gain(db);
+            for demod in vfo_demods.values_mut() {
+                demod.set_agc_max_gain(db);
+            }
+        }
+        AudioControl::SetBandpassEnabled(enabled) => {
+            cursor_demod.set_bandpass_enabled(enabled);
+            for demod in vfo_demods.values_mut() {
+                demod.set_bandpass_enabled(enabled);
+            }
+        }
+        AudioControl::SetBandpassLowCut(hz) => {
+            cursor_demod.set_bandpass_low_cut(hz);
+            for demod in vfo_demods.values_mut() {
+                demod.set_bandpass_low_cut(hz);
+            }
+        }
+        AudioControl::SetBandpassHighCut(hz) => {
+            cursor_demod.set_bandpass_high_cut(hz);
+            for demod in vfo_demods.values_mut() {
+                demod.set_bandpass_high_cut(hz);
+            }
+        }
+        AudioControl::Shutdown => return true,
+    }
+    false
+}
+
+/// Demodulate IQ samples, mix outputs, apply volume and squelch, write to sink.
+fn demod_mix_and_output(
+    iq_block: &[IqSample],
+    cursor_demod: &mut Demodulator,
+    vfo_demods: &mut HashMap<usize, Demodulator>,
+    muted: bool,
+    volume: f32,
+    squelch: Option<f32>,
+    sink: &mut dyn AudioSink,
+) {
+    // Collect outputs from all active demodulators with their pre-AGC levels
+    let mut outputs: Vec<(Vec<f32>, f32)> = Vec::new();
+
+    if !muted {
+        let audio = cursor_demod.process(iq_block);
+        let rms = cursor_demod.pre_agc_rms();
+        outputs.push((audio, rms));
+    }
+
+    for demod in vfo_demods.values_mut() {
+        let audio = demod.process(iq_block);
+        let rms = demod.pre_agc_rms();
+        outputs.push((audio, rms));
+    }
+
+    let mut audio = mix_outputs(outputs, cursor_demod, iq_block);
+
+    // Apply volume
+    for s in &mut audio {
+        *s *= volume;
+    }
+
+    // Squelch
+    if check_squelch(&audio, squelch) {
+        let silence = vec![0.0f32; audio.len()];
+        let _ = sink.write(&silence);
+    } else {
+        let _ = sink.write(&audio);
+    }
+}
+
+/// Mix demodulator outputs using power-weighted mixing.
+fn mix_outputs(
+    outputs: Vec<(Vec<f32>, f32)>,
+    cursor_demod: &mut Demodulator,
+    iq_block: &[IqSample],
+) -> Vec<f32> {
+    let num_active = outputs.len();
+    if num_active == 0 {
+        let silent = cursor_demod.process(iq_block);
+        vec![0.0f32; silent.len()]
+    } else if num_active == 1 {
+        outputs.into_iter().next().expect("invariant: num_active == 1").0
+    } else {
+        let max_len = outputs.iter().map(|o| o.0.len()).max().unwrap_or(0);
+        let mut mixed = vec![0.0f32; max_len];
+        let total_rms: f32 = outputs.iter().map(|o| o.1).sum();
+
+        if total_rms > 1e-10 {
+            for (output, rms) in &outputs {
+                let weight = rms / total_rms;
+                for (i, &s) in output.iter().enumerate() {
+                    mixed[i] += s * weight;
+                }
+            }
+        } else {
+            for (output, _) in &outputs {
+                for (i, &s) in output.iter().enumerate() {
+                    mixed[i] += s;
+                }
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let divisor = num_active as f32;
+            for s in &mut mixed {
+                *s /= divisor;
+            }
+        }
+        mixed
+    }
+}
+
+/// Check if audio should be silenced by squelch.
+fn check_squelch(audio: &[f32], squelch: Option<f32>) -> bool {
+    if let Some(threshold_db) = squelch {
+        #[allow(clippy::cast_precision_loss)]
+        let rms = if audio.is_empty() {
+            0.0
+        } else {
+            let sum_sq: f64 = audio.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+            (sum_sq / audio.len() as f64).sqrt()
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let power_db = if rms > 1e-20 {
+            20.0 * (rms as f32).log10()
+        } else {
+            -200.0
+        };
+        power_db < threshold_db
+    } else {
+        false
+    }
+}
 
 /// Run the audio processing loop.
 ///
 /// Receives IQ blocks, demodulates AM, applies volume/squelch/mute, and writes to sink.
 /// Exits on `Shutdown` or channel disconnect.
+///
+/// # Panics
+/// Panics if internal invariants are violated (e.g., empty demodulator output).
 pub fn audio_thread(
-    iq_rx: crossbeam_channel::Receiver<Vec<IqSample>>,
-    control_rx: crossbeam_channel::Receiver<AudioControl>,
+    iq_rx: &crossbeam_channel::Receiver<Vec<IqSample>>,
+    control_rx: &crossbeam_channel::Receiver<AudioControl>,
     mut sink: Box<dyn AudioSink>,
     mut center_freq: f64,
     cursor_freq: f64,
     channel_bw: f64,
     input_sample_rate: f64,
 ) {
-    use std::collections::HashMap;
-
-    let output_sample_rate = sink.sample_rate() as f64;
-    // Cursor demodulator (id=0)
+    let output_sample_rate = f64::from(sink.sample_rate());
     let mut cursor_demod = Demodulator::new_am(
         center_freq,
         cursor_freq,
@@ -100,116 +315,16 @@ pub fn audio_thread(
     );
 
     let mut vfo_demods: HashMap<usize, Demodulator> = HashMap::new();
-
-    let mut volume: f32 = 1.0; // 100%
+    let mut volume: f32 = 1.0;
     let mut muted = false;
-    let mut squelch: Option<f32> = None; // dB threshold
-
-    fn apply_control(
-        ctrl: AudioControl,
-        cursor_demod: &mut Demodulator,
-        vfo_demods: &mut HashMap<usize, Demodulator>,
-        volume: &mut f32,
-        squelch: &mut Option<f32>,
-        muted: &mut bool,
-        center_freq: &mut f64,
-        input_sample_rate: f64,
-        output_sample_rate: f64,
-    ) -> bool {
-        match ctrl {
-            AudioControl::SetCursorFreq(f) => cursor_demod.set_cursor_freq(f),
-            AudioControl::SetCenterFreq(f) => {
-                *center_freq = f;
-                cursor_demod.set_center_freq(f);
-                for demod in vfo_demods.values_mut() {
-                    demod.set_center_freq(f);
-                }
-            }
-            AudioControl::SetChannelBw(bw) => cursor_demod.set_channel_bw(bw),
-            AudioControl::SetVolume(v) => *volume = v.min(100) as f32 / 100.0,
-            AudioControl::SetSquelch(s) => *squelch = s,
-            AudioControl::Mute(m) => *muted = m,
-            AudioControl::AddVfo { id, freq, channel_bw, mode } => {
-                let demod = Demodulator::new(
-                    *center_freq,
-                    freq,
-                    channel_bw,
-                    input_sample_rate,
-                    output_sample_rate,
-                    mode,
-                );
-                vfo_demods.insert(id, demod);
-            }
-            AudioControl::RemoveVfo(id) => {
-                vfo_demods.remove(&id);
-            }
-            AudioControl::SetDemodMode(mode) => {
-                cursor_demod.set_mode(mode);
-            }
-            AudioControl::SetVfoDemodMode { id, mode } => {
-                if let Some(demod) = vfo_demods.get_mut(&id) {
-                    demod.set_mode(mode);
-                }
-            }
-            AudioControl::SetAgcEnabled(enabled) => {
-                cursor_demod.set_agc_enabled(enabled);
-                for demod in vfo_demods.values_mut() {
-                    demod.set_agc_enabled(enabled);
-                }
-            }
-            AudioControl::SetAgcAttack(ms) => {
-                cursor_demod.set_agc_attack(ms);
-                for demod in vfo_demods.values_mut() {
-                    demod.set_agc_attack(ms);
-                }
-            }
-            AudioControl::SetAgcDecay(ms) => {
-                cursor_demod.set_agc_decay(ms);
-                for demod in vfo_demods.values_mut() {
-                    demod.set_agc_decay(ms);
-                }
-            }
-            AudioControl::SetAgcTarget(level) => {
-                cursor_demod.set_agc_target(level);
-                for demod in vfo_demods.values_mut() {
-                    demod.set_agc_target(level);
-                }
-            }
-            AudioControl::SetAgcMaxGain(db) => {
-                cursor_demod.set_agc_max_gain(db);
-                for demod in vfo_demods.values_mut() {
-                    demod.set_agc_max_gain(db);
-                }
-            }
-            AudioControl::SetBandpassEnabled(enabled) => {
-                cursor_demod.set_bandpass_enabled(enabled);
-                for demod in vfo_demods.values_mut() {
-                    demod.set_bandpass_enabled(enabled);
-                }
-            }
-            AudioControl::SetBandpassLowCut(hz) => {
-                cursor_demod.set_bandpass_low_cut(hz);
-                for demod in vfo_demods.values_mut() {
-                    demod.set_bandpass_low_cut(hz);
-                }
-            }
-            AudioControl::SetBandpassHighCut(hz) => {
-                cursor_demod.set_bandpass_high_cut(hz);
-                for demod in vfo_demods.values_mut() {
-                    demod.set_bandpass_high_cut(hz);
-                }
-            }
-            AudioControl::Shutdown => return true,
-        }
-        false
-    }
+    let mut squelch: Option<f32> = None;
 
     loop {
         // Process all pending control messages (non-blocking)
         loop {
             match control_rx.try_recv() {
                 Ok(ctrl) => {
-                    if apply_control(ctrl, &mut cursor_demod, &mut vfo_demods, &mut volume, &mut squelch, &mut muted, &mut center_freq, input_sample_rate, output_sample_rate) {
+                    if apply_control(&ctrl, &mut cursor_demod, &mut vfo_demods, &mut volume, &mut squelch, &mut muted, &mut center_freq, input_sample_rate, output_sample_rate) {
                         return;
                     }
                 }
@@ -230,7 +345,7 @@ pub fn audio_thread(
             recv(control_rx) -> msg => {
                 match msg {
                     Ok(ctrl) => {
-                        if apply_control(ctrl, &mut cursor_demod, &mut vfo_demods, &mut volume, &mut squelch, &mut muted, &mut center_freq, input_sample_rate, output_sample_rate) {
+                        if apply_control(&ctrl, &mut cursor_demod, &mut vfo_demods, &mut volume, &mut squelch, &mut muted, &mut center_freq, input_sample_rate, output_sample_rate) {
                             return;
                         }
                         continue;
@@ -240,93 +355,7 @@ pub fn audio_thread(
             }
         }
 
-        // Demodulate: collect outputs from all active demodulators with their pre-AGC levels
-        let mut outputs: Vec<(Vec<f32>, f32)> = Vec::new(); // (audio, pre_agc_rms)
-
-        // Cursor demodulator (id=0) — only if not muted
-        if !muted {
-            let audio = cursor_demod.process(&iq_block);
-            let rms = cursor_demod.pre_agc_rms();
-            outputs.push((audio, rms));
-        }
-
-        // VFO demodulators
-        for demod in vfo_demods.values_mut() {
-            let audio = demod.process(&iq_block);
-            let rms = demod.pre_agc_rms();
-            outputs.push((audio, rms));
-        }
-
-        let num_active = outputs.len();
-
-        // Mix outputs using power-weighted mixing.
-        // VFOs with stronger pre-AGC signals get more weight in the mix.
-        // This prevents noise-only VFOs from drowning out real signals.
-        let audio = if num_active == 0 {
-            let silent = cursor_demod.process(&iq_block);
-            vec![0.0f32; silent.len()]
-        } else if num_active == 1 {
-            outputs.into_iter().next().unwrap().0
-        } else {
-            let max_len = outputs.iter().map(|o| o.0.len()).max().unwrap_or(0);
-            let mut mixed = vec![0.0f32; max_len];
-
-            // Compute weights from pre-AGC RMS levels
-            let total_rms: f32 = outputs.iter().map(|o| o.1).sum();
-
-            if total_rms > 1e-10 {
-                // Power-weighted mix: each VFO contributes proportionally to its signal strength
-                for (output, rms) in &outputs {
-                    let weight = rms / total_rms;
-                    for (i, &s) in output.iter().enumerate() {
-                        mixed[i] += s * weight;
-                    }
-                }
-            } else {
-                // All VFOs are essentially silent — simple average
-                for (output, _) in &outputs {
-                    for (i, &s) in output.iter().enumerate() {
-                        mixed[i] += s;
-                    }
-                }
-                let divisor = num_active as f32;
-                for s in &mut mixed {
-                    *s /= divisor;
-                }
-            }
-            mixed
-        };
-
-        // Apply volume
-        let mut audio = audio;
-        for s in &mut audio {
-            *s *= volume;
-        }
-
-        // Squelch: if enabled, check RMS power
-        let silenced = if let Some(threshold_db) = squelch {
-            let rms = if audio.is_empty() {
-                0.0
-            } else {
-                let sum_sq: f64 = audio.iter().map(|&s| (s as f64) * (s as f64)).sum();
-                (sum_sq / audio.len() as f64).sqrt()
-            };
-            let power_db = if rms > 1e-20 {
-                20.0 * (rms as f32).log10()
-            } else {
-                -200.0
-            };
-            power_db < threshold_db
-        } else {
-            false
-        };
-
-        if silenced {
-            let silence = vec![0.0f32; audio.len()];
-            let _ = sink.write(&silence);
-        } else {
-            let _ = sink.write(&audio);
-        }
+        demod_mix_and_output(&iq_block, &mut cursor_demod, &mut vfo_demods, muted, volume, squelch, &mut *sink);
     }
 }
 
@@ -385,7 +414,7 @@ mod tests {
         let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
 
         let handle = std::thread::spawn(move || {
-            audio_thread(iq_rx, ctrl_rx, sink, center, cursor, bw, sample_rate);
+            audio_thread(&iq_rx, &ctrl_rx, sink, center, cursor, bw, sample_rate);
         });
 
         // Send IQ data
@@ -433,7 +462,7 @@ mod tests {
 
             let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
             let handle = std::thread::spawn(move || {
-                audio_thread(iq_rx, ctrl_rx, sink, center, cursor, bw, sample_rate);
+                audio_thread(&iq_rx, &ctrl_rx, sink, center, cursor, bw, sample_rate);
             });
 
             let iq = make_test_iq(cursor, center, sample_rate, 8192);
@@ -483,7 +512,7 @@ mod tests {
 
         let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
         let handle = std::thread::spawn(move || {
-            audio_thread(iq_rx, ctrl_rx, sink, center, cursor, 25_000.0, sample_rate);
+            audio_thread(&iq_rx, &ctrl_rx, sink, center, cursor, 25_000.0, sample_rate);
         });
 
         let iq = make_test_iq(cursor, center, sample_rate, 8192);
@@ -524,7 +553,7 @@ mod tests {
 
         let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
         let handle = std::thread::spawn(move || {
-            audio_thread(iq_rx, ctrl_rx, sink, center, cursor, 25_000.0, sample_rate);
+            audio_thread(&iq_rx, &ctrl_rx, sink, center, cursor, 25_000.0, sample_rate);
         });
 
         // Signal at 100.1MHz but cursor at 100.5MHz → out of band, very weak
@@ -562,7 +591,7 @@ mod tests {
 
         let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
         let handle = std::thread::spawn(move || {
-            audio_thread(iq_rx, ctrl_rx, sink, center, 100.1e6, 25_000.0, sample_rate);
+            audio_thread(&iq_rx, &ctrl_rx, sink, center, 100.1e6, 25_000.0, sample_rate);
         });
 
         // Send first block
@@ -592,7 +621,7 @@ mod tests {
 
         let sink = Box::new(NullSink::new(48000));
         let handle = std::thread::spawn(move || {
-            audio_thread(iq_rx, ctrl_rx, sink, 100.0e6, 100.1e6, 25_000.0, 2.048e6);
+            audio_thread(&iq_rx, &ctrl_rx, sink, 100.0e6, 100.1e6, 25_000.0, 2.048e6);
         });
 
         ctrl_tx.send(AudioControl::Shutdown).unwrap();
@@ -607,7 +636,7 @@ mod tests {
 
         let sink = Box::new(NullSink::new(48000));
         let handle = std::thread::spawn(move || {
-            audio_thread(iq_rx, ctrl_rx, sink, 100.0e6, 100.1e6, 25_000.0, 2.048e6);
+            audio_thread(&iq_rx, &ctrl_rx, sink, 100.0e6, 100.1e6, 25_000.0, 2.048e6);
         });
 
         drop(iq_tx); // Disconnect
@@ -641,7 +670,7 @@ mod tests {
 
         let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
         let handle = std::thread::spawn(move || {
-            audio_thread(iq_rx, ctrl_rx, sink, center, cursor, 25_000.0, sample_rate);
+            audio_thread(&iq_rx, &ctrl_rx, sink, center, cursor, 25_000.0, sample_rate);
         });
 
         let iq = make_test_iq(cursor, center, sample_rate, 8192);
@@ -682,7 +711,7 @@ mod tests {
 
         let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
         let handle = std::thread::spawn(move || {
-            audio_thread(iq_rx, ctrl_rx, sink, center, cursor, 25_000.0, sample_rate);
+            audio_thread(&iq_rx, &ctrl_rx, sink, center, cursor, 25_000.0, sample_rate);
         });
 
         let iq = make_test_iq(cursor, center, sample_rate, 8192);
@@ -708,7 +737,7 @@ mod tests {
 
         let sink = Box::new(NullSink::new(48000));
         let handle = std::thread::spawn(move || {
-            audio_thread(iq_rx, ctrl_rx, sink, 100.0e6, 100.1e6, 25_000.0, 2.048e6);
+            audio_thread(&iq_rx, &ctrl_rx, sink, 100.0e6, 100.1e6, 25_000.0, 2.048e6);
         });
 
         ctrl_tx.send(AudioControl::Shutdown).unwrap();

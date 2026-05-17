@@ -11,6 +11,7 @@ use std::f64::consts::PI;
 
 /// Demodulation mode for a VFO or cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum DemodMode {
     /// Amplitude Modulation (aviation 118-137 MHz, HF)
     AM,
@@ -22,7 +23,8 @@ pub enum DemodMode {
 
 impl DemodMode {
     /// Default channel bandwidth for this demodulation mode.
-    pub fn default_channel_bw(&self) -> f64 {
+    #[must_use] 
+    pub fn default_channel_bw(self) -> f64 {
         match self {
             DemodMode::AM => 8_000.0,
             DemodMode::FM => 200_000.0,
@@ -31,7 +33,8 @@ impl DemodMode {
     }
 
     /// Short label for display.
-    pub fn label(&self) -> &'static str {
+    #[must_use] 
+    pub fn label(self) -> &'static str {
         match self {
             DemodMode::AM => "AM",
             DemodMode::FM => "FM",
@@ -40,7 +43,8 @@ impl DemodMode {
     }
 
     /// Cycle to the next mode: AM → FM → NFM → AM.
-    pub fn next(&self) -> DemodMode {
+    #[must_use] 
+    pub fn next(self) -> DemodMode {
         match self {
             DemodMode::AM => DemodMode::FM,
             DemodMode::FM => DemodMode::NFM,
@@ -69,7 +73,9 @@ pub fn frequency_shift(
     let mut output = Vec::with_capacity(samples.len());
 
     for &sample in samples {
+        #[allow(clippy::cast_possible_truncation)] // intentional truncation
         let cos_val = phase.cos() as f32;
+        #[allow(clippy::cast_possible_truncation)] // intentional truncation
         let sin_val = phase.sin() as f32;
         let lo = IqSample::new(cos_val, sin_val);
         output.push(sample * lo);
@@ -104,15 +110,19 @@ impl FirFilter {
     /// * `cutoff_hz` - Cutoff frequency in Hz
     /// * `sample_rate` - Sample rate in Hz
     /// * `num_taps` - Number of filter taps (should be odd)
+    #[must_use] 
+    #[allow(clippy::cast_possible_truncation)] // intentional truncation
     pub fn low_pass(cutoff_hz: f64, sample_rate: f64, num_taps: usize) -> Self {
         // Ensure odd number of taps
-        let num_taps = if num_taps % 2 == 0 { num_taps + 1 } else { num_taps };
+        let num_taps = if num_taps.is_multiple_of(2) { num_taps + 1 } else { num_taps };
+        #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
         let m = (num_taps - 1) as f64;
         let fc = cutoff_hz / sample_rate; // Normalized cutoff frequency
 
         let mut taps = Vec::with_capacity(num_taps);
 
         for i in 0..num_taps {
+            #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
             let n = i as f64;
             // Sinc function
             let sinc = if (n - m / 2.0).abs() < 1e-10 {
@@ -173,6 +183,8 @@ impl FirFilter {
     }
 
     /// Get the number of taps (filter length).
+    #[must_use]
+    #[allow(dead_code)]
     pub fn num_taps(&self) -> usize {
         self.taps.len()
     }
@@ -185,6 +197,7 @@ impl FirFilter {
 /// Decimate (downsample) IQ samples by taking every `factor`-th sample.
 ///
 /// IMPORTANT: Low-pass filter should be applied BEFORE decimation to prevent aliasing.
+#[must_use] 
 pub fn decimate(samples: &[IqSample], factor: usize) -> Vec<IqSample> {
     if factor == 0 {
         return Vec::new();
@@ -199,6 +212,7 @@ pub fn decimate(samples: &[IqSample], factor: usize) -> Vec<IqSample> {
 /// AM demodulation via envelope detection: extract the magnitude of each IQ sample.
 ///
 /// `magnitude = sqrt(I² + Q²)`
+#[must_use] 
 pub fn am_demod(samples: &[IqSample]) -> Vec<f32> {
     samples.iter().map(|s| s.norm()).collect()
 }
@@ -212,6 +226,7 @@ pub fn am_demod(samples: &[IqSample]) -> Vec<f32> {
 /// `audio[n] = arg(sample[n] * conj(sample[n-1]))`
 ///
 /// The output is the instantaneous frequency deviation (in radians per sample).
+#[must_use] 
 pub fn fm_demod(samples: &[IqSample]) -> Vec<f32> {
     if samples.len() < 2 {
         return vec![0.0; samples.len()];
@@ -244,7 +259,9 @@ impl DeEmphasis {
     /// # Arguments
     /// * `sample_rate` - Audio sample rate in Hz
     /// * `tau` - Time constant in seconds (50e-6 for Europe, 75e-6 for US)
+    #[must_use] 
     pub fn new(sample_rate: f64, tau: f64) -> Self {
+        #[allow(clippy::cast_possible_truncation)] // intentional truncation
         let alpha = (-1.0 / (sample_rate * tau)).exp() as f32;
         Self {
             alpha,
@@ -253,6 +270,8 @@ impl DeEmphasis {
     }
 
     /// Get the alpha coefficient (for testing).
+    #[must_use]
+    #[allow(dead_code)]
     pub fn alpha(&self) -> f32 {
         self.alpha
     }
@@ -288,6 +307,7 @@ impl DcRemoval {
     ///
     /// `alpha` controls the cutoff frequency. Typical value: 0.995.
     /// Higher alpha = lower cutoff = removes only DC. Lower alpha = removes more low freq.
+    #[must_use] 
     pub fn new(alpha: f64) -> Self {
         Self {
             alpha,
@@ -297,11 +317,12 @@ impl DcRemoval {
     }
 
     /// Process audio samples, removing the DC offset.
+    #[allow(clippy::cast_possible_truncation)] // intentional truncation
     pub fn process(&mut self, samples: &[f32]) -> Vec<f32> {
         let mut output = Vec::with_capacity(samples.len());
 
         for &sample in samples {
-            let x = sample as f64;
+            let x = f64::from(sample);
             let y = x - self.prev_input + self.alpha * self.prev_output;
             self.prev_input = x;
             self.prev_output = y;
@@ -341,6 +362,7 @@ impl Agc {
     /// * `decay_ms` - Decay time in ms (how fast gain rises on weak signal)
     /// * `target_level` - Desired RMS output level (e.g., 0.3)
     /// * `max_gain_db` - Maximum amplification in dB (e.g., 50.0)
+    #[must_use] 
     pub fn new(sample_rate: f64, attack_ms: f64, decay_ms: f64, target_level: f32, max_gain_db: f32) -> Self {
         let attack_coeff = (-1.0 / (sample_rate * attack_ms / 1000.0)).exp();
         let decay_coeff = (-1.0 / (sample_rate * decay_ms / 1000.0)).exp();
@@ -366,7 +388,7 @@ impl Agc {
         let mut output = Vec::with_capacity(samples.len());
         for &s in samples {
             // Update RMS estimate with exponential moving average
-            let sq = (s as f64) * (s as f64);
+            let sq = f64::from(s) * f64::from(s);
             // Use attack when signal is getting louder, decay when getting quieter
             let coeff = if sq > self.rms_estimate {
                 self.attack_coeff
@@ -375,6 +397,7 @@ impl Agc {
             };
             self.rms_estimate = coeff * self.rms_estimate + (1.0 - coeff) * sq;
 
+            #[allow(clippy::cast_possible_truncation)] // intentional truncation
             let rms = (self.rms_estimate.max(1e-20)).sqrt() as f32;
 
             // Compute desired gain
@@ -414,11 +437,15 @@ impl Agc {
     }
 
     /// Check if AGC is enabled.
+    #[must_use]
+    #[allow(dead_code)]
     pub fn enabled(&self) -> bool {
         self.enabled
     }
 
     /// Get current gain in dB.
+    #[must_use]
+    #[allow(dead_code)]
     pub fn current_gain_db(&self) -> f32 {
         20.0 * self.current_gain.log10()
     }
@@ -457,6 +484,7 @@ impl Demodulator {
     /// * `input_sample_rate` - Input sample rate from SDR in Hz
     /// * `output_sample_rate` - Desired audio output sample rate in Hz (e.g., 48000)
     /// * `mode` - Demodulation mode (AM, FM, NFM)
+    #[must_use] 
     pub fn new(
         center_freq: f64,
         cursor_freq: f64,
@@ -465,6 +493,7 @@ impl Demodulator {
         output_sample_rate: f64,
         mode: DemodMode,
     ) -> Self {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // intentional truncation; value is non-negative here
         let decimation_factor = (input_sample_rate / output_sample_rate).round() as usize;
         let decimation_factor = decimation_factor.max(1);
 
@@ -475,12 +504,14 @@ impl Demodulator {
 
         let de_emphasis = match mode {
             DemodMode::FM => {
+                #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
                 let output_sr = input_sample_rate / decimation_factor as f64;
                 Some(DeEmphasis::new(output_sr, 50e-6))
             }
             _ => None,
         };
 
+        #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
         let actual_output_sr = input_sample_rate / decimation_factor as f64;
         Self {
             fir_filter,
@@ -500,6 +531,7 @@ impl Demodulator {
     }
 
     /// Create a new AM demodulator (convenience constructor for backward compatibility).
+    #[must_use] 
     pub fn new_am(
         center_freq: f64,
         cursor_freq: f64,
@@ -513,6 +545,7 @@ impl Demodulator {
     /// Process a block of IQ samples through the full demodulation pipeline.
     ///
     /// Returns audio samples at the output sample rate.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI; intentional truncation
     pub fn process(&mut self, samples: &[IqSample]) -> Vec<f32> {
         // 1. Frequency shift: move cursor frequency to baseband
         let shift_freq = self.cursor_freq - self.center_freq;
@@ -552,11 +585,11 @@ impl Demodulator {
         let audio = self.audio_bandpass.process(&audio);
 
         // 6.5 Measure pre-AGC RMS for power-weighted mixing
-        if !audio.is_empty() {
-            let sum_sq: f64 = audio.iter().map(|&s| (s as f64) * (s as f64)).sum();
-            self.pre_agc_rms = (sum_sq / audio.len() as f64).sqrt() as f32;
-        } else {
+        if audio.is_empty() {
             self.pre_agc_rms = 0.0;
+        } else {
+            let sum_sq: f64 = audio.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+            self.pre_agc_rms = (sum_sq / audio.len() as f64).sqrt() as f32;
         }
 
         // 7. AGC
@@ -587,6 +620,7 @@ impl Demodulator {
         self.mode = mode;
         self.de_emphasis = match mode {
             DemodMode::FM => {
+                #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
                 let output_sr = self.input_sample_rate / self.decimation_factor as f64;
                 Some(DeEmphasis::new(output_sr, 50e-6))
             }
@@ -596,16 +630,23 @@ impl Demodulator {
     }
 
     /// Get the current demodulation mode.
+    #[must_use]
+    #[allow(dead_code)]
     pub fn mode(&self) -> DemodMode {
         self.mode
     }
 
     /// Get the current decimation factor.
+    #[must_use]
+    #[allow(dead_code)]
     pub fn decimation_factor(&self) -> usize {
         self.decimation_factor
     }
 
     /// Get the actual output sample rate after decimation.
+    #[must_use]
+    #[allow(dead_code)]
+    #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
     pub fn actual_output_sample_rate(&self) -> f64 {
         self.input_sample_rate / self.decimation_factor as f64
     }
@@ -647,14 +688,16 @@ impl Demodulator {
         self.audio_bandpass.set_high_cut(hz);
     }
 
-    /// Get the pre-AGC RMS level from the most recent process() call.
+    /// Get the pre-AGC RMS level from the most recent `process()` call.
     /// Used for power-weighted mixing of multiple VFOs.
+    #[must_use] 
     pub fn pre_agc_rms(&self) -> f32 {
         self.pre_agc_rms
     }
 }
 
 /// Type alias for backward compatibility.
+#[allow(dead_code)]
 pub type AmDemodulator = Demodulator;
 
 // ============================================================================
@@ -684,8 +727,9 @@ impl AudioBandpass {
     /// * `high_hz` - Upper cutoff frequency in Hz (low-pass, removes hiss/noise)
     /// * `sample_rate` - Audio sample rate in Hz
     /// * `num_taps` - Number of filter taps (should be odd)
+    #[must_use] 
     pub fn new(low_hz: f64, high_hz: f64, sample_rate: f64, num_taps: usize) -> Self {
-        let num_taps = if num_taps % 2 == 0 { num_taps + 1 } else { num_taps };
+        let num_taps = if num_taps.is_multiple_of(2) { num_taps + 1 } else { num_taps };
         let taps = Self::design_bandpass(low_hz, high_hz, sample_rate, num_taps);
         let delay_line = vec![0.0f32; num_taps];
         Self {
@@ -702,8 +746,10 @@ impl AudioBandpass {
 
     /// Design a bandpass FIR kernel using windowed sinc method.
     ///
-    /// Bandpass = lowpass(high_cutoff) - lowpass(low_cutoff), both windowed with Blackman.
+    /// Bandpass = `lowpass(high_cutoff)` - `lowpass(low_cutoff)`, both windowed with Blackman.
+    #[allow(clippy::cast_possible_truncation)] // intentional truncation
     fn design_bandpass(low_hz: f64, high_hz: f64, sample_rate: f64, num_taps: usize) -> Vec<f32> {
+        #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
         let m = (num_taps - 1) as f64;
         let fc_low = low_hz / sample_rate;
         let fc_high = high_hz / sample_rate;
@@ -711,6 +757,7 @@ impl AudioBandpass {
         let mut taps = Vec::with_capacity(num_taps);
 
         for i in 0..num_taps {
+            #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
             let n = i as f64;
             let center = m / 2.0;
 
@@ -784,12 +831,14 @@ impl AudioBandpass {
         self.pos = 0;
     }
 
-    /// Enable or disable the filter. When disabled, process() is a passthrough.
+    /// Enable or disable the filter. When disabled, `process()` is a passthrough.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
 
     /// Returns whether the filter is enabled.
+    #[must_use]
+    #[allow(dead_code)]
     pub fn enabled(&self) -> bool {
         self.enabled
     }

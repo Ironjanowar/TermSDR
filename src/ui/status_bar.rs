@@ -1,3 +1,5 @@
+//! Status bar widget: frequency, sample rate, and mode display.
+
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -19,7 +21,7 @@ impl std::fmt::Display for DisplaySource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DisplaySource::Test => write!(f, "TEST"),
-            DisplaySource::File(p) => write!(f, "FILE: {}", p),
+            DisplaySource::File(p) => write!(f, "FILE: {p}"),
             DisplaySource::RtlSdr => write!(f, "RTL-SDR"),
         }
     }
@@ -53,6 +55,7 @@ pub struct StatusBarWidget {
 }
 
 impl StatusBarWidget {
+    #[must_use] 
     pub fn new(
         center_freq: f64,
         sample_rate: f64,
@@ -78,16 +81,19 @@ impl StatusBarWidget {
         }
     }
 
+    #[must_use] 
     pub fn with_cursor(mut self, info: Option<(f64, Option<f32>)>) -> Self {
         self.cursor_info = info;
         self
     }
 
+    #[must_use] 
     pub fn with_channel_bw(mut self, bw: f64) -> Self {
         self.channel_bw = bw;
         self
     }
 
+    #[must_use] 
     pub fn with_audio(mut self, volume: u8, audio_active: bool, squelch: Option<f32>) -> Self {
         self.volume = volume;
         self.audio_active = audio_active;
@@ -95,38 +101,43 @@ impl StatusBarWidget {
         self
     }
 
+    #[must_use] 
     pub fn with_waterfall_time_span(mut self, span: f64) -> Self {
         self.waterfall_time_span = span;
         self
     }
 
+    #[must_use] 
     pub fn with_demod_mode(mut self, mode: &str) -> Self {
         self.demod_mode = mode.to_string();
         self
     }
 
+    #[must_use] 
     pub fn with_averaging(mut self, count: usize) -> Self {
         self.averaging = count;
         self
     }
 
+    #[must_use] 
     pub fn with_scan(mut self, active: bool) -> Self {
         self.scan_active = active;
         self
     }
 
     /// Format the status bar text.
+    #[must_use] 
     pub fn format_status(&self) -> String {
         let freq = format_frequency(self.center_freq);
         let bw = format_frequency(self.sample_rate);
         let gain_str = match self.gain {
-            Some(g) => format!("{:.0}dB", g),
+            Some(g) => format!("{g:.0}dB"),
             None => "AGC".to_string(),
         };
         let cursor_str = match &self.cursor_info {
             Some((freq, db)) => {
                 let db_str = match db {
-                    Some(d) => format!("{:.1}dB", d),
+                    Some(d) => format!("{d:.1}dB"),
                     None => "--".to_string(),
                 };
                 format!(" │ Cursor: {} @ {}", format_frequency(*freq), db_str)
@@ -146,7 +157,7 @@ impl StatusBarWidget {
             format!("{} 🔇 MUTED", self.demod_mode)
         };
         let sq_str = match self.squelch {
-            Some(db) => format!(" │ SQ:{:.0}dB", db),
+            Some(db) => format!(" │ SQ:{db:.0}dB"),
             None => String::new(),
         };
         let scan_str = if self.scan_active { " │ 📡SCAN" } else { "" };
@@ -185,6 +196,7 @@ impl Widget for StatusBarWidget {
         // Right-aligned help hint
         let help = " [?]help [Space]cursor ";
         if area.width as usize > status.len() + help.len() + 2 {
+            #[allow(clippy::cast_possible_truncation)] // intentional truncation
             let help_x = area.x + area.width - help.len() as u16;
             let help_style = Style::default()
                 .fg(Color::DarkGray)

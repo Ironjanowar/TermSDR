@@ -1,3 +1,5 @@
+//! WebSocket connection handling, client management, and data broadcasting.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -25,6 +27,7 @@ pub type ClientRegistry = Arc<RwLock<HashMap<ClientId, WsSender>>>;
 #[derive(Clone)]
 pub struct ServerState {
     pub clients: ClientRegistry,
+    #[allow(dead_code)]
     pub config: AppConfig,
     pub shared: Arc<RwLock<SharedState>>,
     pub audio_control_tx: Option<crossbeam_channel::Sender<AudioControl>>,
@@ -34,6 +37,8 @@ pub struct ServerState {
 }
 
 impl ServerState {
+    /// Create a new server state from the application config.
+    #[must_use] 
     pub fn new(config: AppConfig) -> Self {
         let shared = SharedState::from_config(&config);
         Self {
@@ -47,16 +52,22 @@ impl ServerState {
         }
     }
 
+    /// Attach the audio format selector atomic.
+    #[must_use]
     pub fn with_format_atomic(mut self, atomic: Arc<std::sync::atomic::AtomicU8>) -> Self {
         self.format_atomic = Some(atomic);
         self
     }
 
+    /// Attach the shared center frequency atomic (Hz, as `u64` bits of `f64`).
+    #[must_use]
     pub fn with_shared_center_freq(mut self, freq: Arc<std::sync::atomic::AtomicU64>) -> Self {
         self.shared_center_freq = Some(freq);
         self
     }
 
+    /// Attach the audio control channel sender.
+    #[must_use] 
     pub fn with_audio_control(mut self, tx: crossbeam_channel::Sender<AudioControl>) -> Self {
         self.audio_control_tx = Some(tx);
         self
@@ -95,6 +106,7 @@ pub async fn ws_handler(
 }
 
 /// Handle a single WebSocket connection.
+#[allow(clippy::too_many_lines)] // WebSocket handler with setup, message loop, and cleanup
 async fn handle_socket(socket: WebSocket, state: ServerState) {
     let client_id = state.next_client_id();
     let (mut ws_sink, mut ws_stream) = socket.split();
@@ -109,7 +121,7 @@ async fn handle_socket(socket: WebSocket, state: ServerState) {
     }
 
     let client_count = state.clients.read().await.len();
-    eprintln!("WS: client {} connected ({} total)", client_id, client_count);
+    tracing::info!("WS: client {client_id} connected ({client_count} total)");
 
     // Send initial state to the new client
     {
@@ -156,7 +168,7 @@ async fn handle_socket(socket: WebSocket, state: ServerState) {
             Ok(Message::Text(text)) => {
                 match serde_json::from_str::<protocol::Command>(&text) {
                     Ok(cmd) => {
-                        eprintln!("WS: client {} sent command: {:?}", client_id, cmd);
+                        tracing::debug!("WS: client {client_id} sent command: {cmd:?}");
 
                         let client_count = clients_for_read.read().await.len();
 
@@ -187,8 +199,8 @@ async fn handle_socket(socket: WebSocket, state: ServerState) {
                             if matches!(cmd, protocol::Command::SetFrequency { .. }
                                 | protocol::Command::Tune { .. }
                                 | protocol::Command::SetBandwidth { .. }
-                                | protocol::Command::Zoom { .. }) {
-                                if matches!(result, DispatchResult::Ok) {
+                                | protocol::Command::Zoom { .. })
+                                && matches!(result, DispatchResult::Ok) {
                                     if let Some(ref freq_atomic) = shared_freq_for_read {
                                         freq_atomic.store(
                                             shared.center_freq.to_bits(),
@@ -196,7 +208,6 @@ async fn handle_socket(socket: WebSocket, state: ServerState) {
                                         );
                                     }
                                 }
-                            }
 
                             let json = match &result {
                                 DispatchResult::Ok | DispatchResult::StateOnly => {
@@ -235,8 +246,8 @@ async fn handle_socket(socket: WebSocket, state: ServerState) {
                         }
                     }
                     Err(e) => {
-                        eprintln!("WS: client {} invalid command: {}", client_id, e);
-                        let err = ErrorMessage::new("unknown", &format!("Invalid JSON: {}", e));
+                        tracing::warn!("WS: client {client_id} invalid command: {e}");
+                        let err = ErrorMessage::new("unknown", &format!("Invalid JSON: {e}"));
                         if let Ok(json) = serde_json::to_string(&err) {
                             let registry = clients_for_read.read().await;
                             if let Some(sender) = registry.get(&client_id) {
@@ -246,8 +257,7 @@ async fn handle_socket(socket: WebSocket, state: ServerState) {
                     }
                 }
             }
-            Ok(Message::Close(_)) => break,
-            Err(_) => break,
+            Ok(Message::Close(_)) | Err(_) => break,
             _ => {}
         }
     }
@@ -260,7 +270,7 @@ async fn handle_socket(socket: WebSocket, state: ServerState) {
     write_task.abort();
 
     let remaining = state.clients.read().await.len();
-    eprintln!("WS: client {} disconnected ({} remaining)", client_id, remaining);
+    tracing::info!("WS: client {client_id} disconnected ({remaining} remaining)");
 
     // Broadcast updated client count
     {

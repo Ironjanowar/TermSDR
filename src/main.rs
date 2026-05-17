@@ -1,3 +1,8 @@
+//! `TermSDR` binary entry point.
+//!
+//! Parses CLI args, sets up capture/DSP/audio/UI threads, and starts the TUI
+//! or WebSocket server in headless mode.
+
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -23,6 +28,16 @@ use termsdr::ui::{
 };
 
 fn main() -> Result<()> {
+    // Set up file-based logging (TUI owns stdout)
+    use tracing_subscriber::EnvFilter;
+
+    let log_file = std::fs::File::create("termsdr.log").expect("Failed to create log file");
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env().add_directive("termsdr=info".parse().expect("invariant: valid tracing directive")))
+        .with_writer(std::sync::Mutex::new(log_file))
+        .with_ansi(false)
+        .init();
+
     let args = CliArgs::parse();
     let mut config = args.to_config()?;
 
@@ -35,9 +50,9 @@ fn main() -> Result<()> {
                 for b in bookmarks {
                     store.add(b);
                 }
-                println!("Imported {} bookmarks from {}", count, path);
+                tracing::info!("Imported {count} bookmarks from {path}");
             }
-            Err(e) => eprintln!("Import failed: {}", e),
+            Err(e) => tracing::error!("Import failed: {e}"),
         }
     }
 
@@ -89,6 +104,7 @@ fn main() -> Result<()> {
     run_pipeline(config, &args)
 }
 
+#[allow(clippy::too_many_lines, clippy::similar_names)] // pipeline setup with multiple threads; tx/rx pairs
 fn run_pipeline(config: AppConfig, args: &CliArgs) -> Result<()> {
     // Create channels
     // Capture -> DSP: IQ blocks
@@ -117,7 +133,7 @@ fn run_pipeline(config: AppConfig, args: &CliArgs) -> Result<()> {
         SourceType::Test { .. } | SourceType::RtlSdr { .. } => {
             Some(Arc::new(AtomicU64::new(center_freq.to_bits())))
         }
-        _ => None,
+        SourceType::File { .. } => None,
     };
 
     // Shared averaging count
@@ -130,7 +146,7 @@ fn run_pipeline(config: AppConfig, args: &CliArgs) -> Result<()> {
     let capture_handle = thread::Builder::new()
         .name("capture".into())
         .spawn(move || {
-            capture_thread(source_type, sample_rate, center_freq, fft_size, gain, ppm, iq_tx_dsp, iq_tx_audio, running_capture, shared_freq_capture)
+            capture_thread(source_type, sample_rate, center_freq, fft_size, gain, ppm, iq_tx_dsp, iq_tx_audio, running_capture, shared_freq_capture);
         })?;
 
     // Thread 2: DSP
@@ -140,7 +156,7 @@ fn run_pipeline(config: AppConfig, args: &CliArgs) -> Result<()> {
     let dsp_handle = thread::Builder::new()
         .name("dsp".into())
         .spawn(move || {
-            dsp_thread(fft_size, sample_rate, center_freq, iq_rx_dsp, fft_tx, running_dsp, shared_avg_dsp, shared_freq_dsp)
+            dsp_thread(fft_size, sample_rate, center_freq, iq_rx_dsp, fft_tx, running_dsp, shared_avg_dsp, shared_freq_dsp);
         })?;
 
     // Thread 4: Audio
@@ -164,7 +180,7 @@ fn run_pipeline(config: AppConfig, args: &CliArgs) -> Result<()> {
             .unwrap_or(WsAudioFormat::PcmRaw);
         #[cfg(not(feature = "opus"))]
         let format = if format == WsAudioFormat::Opus {
-            eprintln!("Audio: Opus not compiled in, using PCM raw");
+            tracing::warn!("Audio: Opus not compiled in, using PCM raw");
             WsAudioFormat::PcmRaw
         } else {
             format
@@ -186,12 +202,12 @@ fn run_pipeline(config: AppConfig, args: &CliArgs) -> Result<()> {
                 match CpalSink::new(None) {
                     Ok(s) => Box::new(s),
                     Err(e) => {
-                        eprintln!("Audio: no output device ({}), audio disabled", e);
+                        tracing::warn!("Audio: no output device ({e}), audio disabled");
                         Box::new(NullSink::new(48000))
                     }
                 }
             };
-            audio_thread(iq_rx_audio, audio_ctrl_rx, sink, center_freq, cursor_freq, channel_bw, sample_rate);
+            audio_thread(&iq_rx_audio, &audio_ctrl_rx, sink, center_freq, cursor_freq, channel_bw, sample_rate);
         })?;
 
     // Thread 3: TUI or WS Server (main thread)
@@ -229,6 +245,7 @@ fn run_pipeline(config: AppConfig, args: &CliArgs) -> Result<()> {
     result
 }
 
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)] // thread entry point takes ownership
 fn capture_thread(
     source_type: SourceType,
     sample_rate: f64,
@@ -243,21 +260,21 @@ fn capture_thread(
 ) {
     let mut source: Box<dyn Source> = match source_type {
         SourceType::Test { signals } => {
-            let mut src = TestSource::new(sample_rate, center_freq, signals, 0.02);
+            let mut src = TestSource::new(sample_rate, center_freq, &signals, 0.02);
             if let Some(ref freq) = shared_center_freq {
                 src = src.with_shared_freq(freq.clone());
             }
             Box::new(src)
         }
         SourceType::File { path: _ } => {
-            eprintln!("File replay not yet implemented");
+            tracing::warn!("File replay not yet implemented");
             return;
         }
         SourceType::RtlSdr { device_index } => {
             match RtlSdrSource::new(device_index, center_freq, sample_rate, gain, ppm) {
                 Ok(src) => Box::new(src),
                 Err(e) => {
-                    eprintln!("RTL-SDR error: {}", e);
+                    tracing::error!("RTL-SDR error: {e}");
                     return;
                 }
             }
@@ -265,6 +282,7 @@ fn capture_thread(
     };
 
     let block_size = fft_size;
+    #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
     let block_duration = Duration::from_secs_f64(block_size as f64 / sample_rate);
     let mut buffer = vec![IqSample::new(0.0, 0.0); block_size];
 
@@ -278,7 +296,7 @@ fn capture_thread(
             let new_freq = f64::from_bits(shared_freq.load(Ordering::Relaxed));
             if (new_freq - current_center_freq).abs() > 1.0 {
                 if let Err(e) = source.set_center_freq(new_freq) {
-                    eprintln!("Retune error: {}", e);
+                    tracing::error!("Retune error: {e}");
                 }
                 current_center_freq = new_freq;
             }
@@ -292,7 +310,7 @@ fn capture_thread(
                 let _ = tx_audio.try_send(buffer.clone());
             }
             Err(e) => {
-                eprintln!("Capture error: {}", e);
+                tracing::error!("Capture error: {e}");
                 break;
             }
         }
@@ -300,11 +318,14 @@ fn capture_thread(
         // Pace based on sample rate to avoid flooding
         let elapsed = start.elapsed();
         if elapsed < block_duration {
-            thread::sleep(block_duration - elapsed);
+            if let Some(remaining) = block_duration.checked_sub(elapsed) {
+                thread::sleep(remaining);
+            }
         }
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)] // thread entry point takes ownership
 fn dsp_thread(
     fft_size: usize,
     sample_rate: f64,
@@ -336,12 +357,13 @@ fn dsp_thread(
                     let _ = tx.try_send(result);
                 }
             }
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {},
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         }
     }
 }
 
+#[allow(clippy::needless_pass_by_value)] // thread entry point takes ownership
 fn tui_thread(
     config: AppConfig,
     fft_rx: Receiver<FftResult>,

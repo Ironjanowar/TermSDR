@@ -13,11 +13,11 @@ use super::Source;
 ///
 /// Each pair of bytes represents one IQ sample: [I0, Q0, I1, Q1, ...].
 /// The u8 value 127.5 maps to 0.0 (DC center).
-pub fn convert_u8_to_iq(raw: &[u8], output: &mut [IqSample]) -> usize {
+pub(crate) fn convert_u8_to_iq(raw: &[u8], output: &mut [IqSample]) -> usize {
     let samples = (raw.len() / 2).min(output.len());
     for i in 0..samples {
-        let i_val = (raw[i * 2] as f32 - 127.5) / 127.5;
-        let q_val = (raw[i * 2 + 1] as f32 - 127.5) / 127.5;
+        let i_val = (f32::from(raw[i * 2]) - 127.5) / 127.5;
+        let q_val = (f32::from(raw[i * 2 + 1]) - 127.5) / 127.5;
         output[i] = IqSample::new(i_val, q_val);
     }
     samples
@@ -27,25 +27,27 @@ pub fn convert_u8_to_iq(raw: &[u8], output: &mut [IqSample]) -> usize {
 
 /// Get the number of detected RTL-SDR devices.
 #[cfg(feature = "rtlsdr")]
-pub fn get_device_count() -> i32 {
+#[must_use] 
+pub(crate) fn get_device_count() -> i32 {
     rtlsdr_rs::get_device_count()
 }
 
 /// Get the name for a specific RTL-SDR device index.
 #[cfg(feature = "rtlsdr")]
-pub fn get_device_name(index: i32) -> String {
+#[must_use] 
+pub(crate) fn get_device_name(index: i32) -> String {
     rtlsdr_rs::get_device_name(index)
 }
 
 /// Get the number of detected RTL-SDR devices (stub: always 0).
 #[cfg(not(feature = "rtlsdr"))]
-pub fn get_device_count() -> i32 {
+pub(crate) fn get_device_count() -> i32 {
     0
 }
 
 /// Get the name for a specific RTL-SDR device index (stub: always empty).
 #[cfg(not(feature = "rtlsdr"))]
-pub fn get_device_name(_index: i32) -> String {
+pub(crate) fn get_device_name(_index: i32) -> String {
     String::new()
 }
 
@@ -74,8 +76,12 @@ mod hw {
         /// * `device_index` - Zero-based device index
         /// * `center_freq` - Center frequency in Hz
         /// * `sample_rate` - Sample rate in Hz
-        /// * `gain` - Tuner gain in dB, or None for AGC
+        /// * `gain` - Tuner gain in `dB`, or None for AGC
         /// * `ppm` - Frequency correction in PPM
+        ///
+        /// # Errors
+        /// Returns an error if the RTL-SDR device cannot be opened or configured.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // intentional truncation; value is non-negative here
         pub fn new(
             device_index: usize,
             center_freq: f64,
@@ -83,33 +89,34 @@ mod hw {
             gain: Option<f32>,
             ppm: i32,
         ) -> Result<Self> {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)] // intentional truncation; value fits in target type
             let mut dev = rtlsdr_rs::open(device_index as i32)
-                .map_err(|e| anyhow!("Failed to open RTL-SDR device {}: {}", device_index, e))?;
+                .map_err(|e| anyhow!("Failed to open RTL-SDR device {device_index}: {e}"))?;
 
             dev.set_center_freq(center_freq as u32)
-                .map_err(|e| anyhow!("Failed to set center freq: {}", e))?;
+                .map_err(|e| anyhow!("Failed to set center freq: {e}"))?;
 
             dev.set_sample_rate(sample_rate as u32)
-                .map_err(|e| anyhow!("Failed to set sample rate: {}", e))?;
+                .map_err(|e| anyhow!("Failed to set sample rate: {e}"))?;
 
             if let Some(g) = gain {
                 dev.set_tuner_gain_mode(true)
-                    .map_err(|e| anyhow!("Failed to set manual gain mode: {}", e))?;
+                    .map_err(|e| anyhow!("Failed to set manual gain mode: {e}"))?;
                 // rtlsdr crate uses tenths of dB
                 dev.set_tuner_gain((g * 10.0) as i32)
-                    .map_err(|e| anyhow!("Failed to set tuner gain: {}", e))?;
+                    .map_err(|e| anyhow!("Failed to set tuner gain: {e}"))?;
             } else {
                 dev.set_tuner_gain_mode(false)
-                    .map_err(|e| anyhow!("Failed to set AGC mode: {}", e))?;
+                    .map_err(|e| anyhow!("Failed to set AGC mode: {e}"))?;
             }
 
             if ppm != 0 {
                 dev.set_freq_correction(ppm)
-                    .map_err(|e| anyhow!("Failed to set freq correction: {}", e))?;
+                    .map_err(|e| anyhow!("Failed to set freq correction: {e}"))?;
             }
 
             dev.reset_buffer()
-                .map_err(|e| anyhow!("Failed to reset buffer: {}", e))?;
+                .map_err(|e| anyhow!("Failed to reset buffer: {e}"))?;
 
             Ok(Self {
                 device: dev,
@@ -125,7 +132,7 @@ mod hw {
 
             let raw_data = self.device
                 .read_sync(bytes_needed)
-                .map_err(|e| anyhow::anyhow!("RTL-SDR read error: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("RTL-SDR read error: {e}"))?;
 
             let samples = convert_u8_to_iq(&raw_data, buffer);
             Ok(samples)
@@ -139,10 +146,11 @@ mod hw {
             self.center_freq
         }
 
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // intentional truncation; value is non-negative here
         fn set_center_freq(&mut self, freq: f64) -> Result<()> {
             self.device
                 .set_center_freq(freq as u32)
-                .map_err(|e| anyhow::anyhow!("Failed to retune RTL-SDR: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to retune RTL-SDR: {e}"))?;
             self.center_freq = freq;
             Ok(())
         }

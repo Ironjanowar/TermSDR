@@ -7,7 +7,7 @@ use super::protocol::{
     self, AgcState, BandpassState, Command, ErrorMessage, StateMessage, VfoState,
 };
 
-/// VFO color palette (matches TUI's VFO_COLORS).
+/// VFO color palette (matches TUI's `VFO_COLORS`).
 const VFO_COLOR_NAMES: [&str; 8] = [
     "red", "green", "blue", "magenta", "cyan", "lightred", "white", "lightmagenta",
 ];
@@ -44,7 +44,8 @@ pub struct VfoEntry {
 }
 
 impl SharedState {
-    /// Create from AppConfig with defaults.
+    /// Create from `AppConfig` with defaults.
+    #[must_use] 
     pub fn from_config(config: &crate::types::AppConfig) -> Self {
         Self {
             center_freq: config.center_freq,
@@ -66,7 +67,8 @@ impl SharedState {
         }
     }
 
-    /// Build a StateMessage from current state.
+    /// Build a `StateMessage` from current state.
+    #[must_use] 
     pub fn to_state_message(&self, clients_connected: usize) -> StateMessage {
         StateMessage {
             msg_type: "state".to_string(),
@@ -101,13 +103,14 @@ impl SharedState {
 pub enum DispatchResult {
     /// Command succeeded, state was mutated. Broadcast new state to all clients.
     Ok,
-    /// Command succeeded but state was NOT mutated (e.g. get_state). Just send state to requester.
+    /// Command succeeded but state was NOT mutated (e.g. `get_state`). Just send state to requester.
     StateOnly,
     /// Command failed with an error message. Send error to requester only.
     Error(ErrorMessage),
 }
 
 /// Dispatch a command, mutating shared state and returning audio control messages to send.
+#[allow(clippy::too_many_lines)] // large match dispatch over all command types
 pub fn dispatch(
     cmd: &Command,
     state: &mut SharedState,
@@ -242,7 +245,7 @@ pub fn dispatch(
                 send(&mut audio_msgs, AudioControl::RemoveVfo(*id));
             } else {
                 return (DispatchResult::Error(ErrorMessage::new(
-                    "vfo_remove", &format!("VFO {} not found", id)
+                    "vfo_remove", &format!("VFO {id} not found")
                 )), audio_msgs);
             }
         }
@@ -300,7 +303,7 @@ pub fn dispatch(
         Command::SetAudioFormat { format } => {
             match format.as_str() {
                 "opus" | "pcm" => {
-                    state.audio_format = format.clone();
+                    state.audio_format.clone_from(format);
                 }
                 _ => {
                     return (DispatchResult::Error(ErrorMessage::new(

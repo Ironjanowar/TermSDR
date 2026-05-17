@@ -16,7 +16,7 @@ fn test_pipeline_detects_signal_at_correct_frequency() {
     let mut source = TestSource::new(
         sample_rate,
         center_freq,
-        vec![(signal_offset, 0.8)],
+        &[(signal_offset, 0.8)],
         0.01, // low noise
     );
 
@@ -78,7 +78,7 @@ fn test_pipeline_detects_multiple_signals() {
         (-300_000.0, 0.6), // 300 kHz below center
     ];
 
-    let mut source = TestSource::new(sample_rate, center_freq, signals.clone(), 0.005);
+    let mut source = TestSource::new(sample_rate, center_freq, &signals, 0.005);
 
     let mut buffer = vec![IqSample::new(0.0, 0.0); fft_size];
     source.read_samples(&mut buffer).unwrap();
@@ -130,7 +130,7 @@ fn test_pipeline_threads_start_stop() {
     // Capture thread
     let r1 = running.clone();
     let t1 = thread::spawn(move || {
-        let mut source = TestSource::new(sample_rate, center_freq, vec![(50_000.0, 0.5)], 0.01);
+        let mut source = TestSource::new(sample_rate, center_freq, &[(50_000.0, 0.5)], 0.01);
         let mut buf = vec![IqSample::new(0.0, 0.0); fft_size];
         while r1.load(Ordering::Relaxed) {
             source.read_samples(&mut buf).unwrap();
@@ -186,7 +186,7 @@ fn test_source_trait_used_generically() {
             .unwrap()
     }
 
-    let mut source = TestSource::new(1_024_000.0, 100e6, vec![(50_000.0, 0.7)], 0.01);
+    let mut source = TestSource::new(1_024_000.0, 100e6, &[(50_000.0, 0.7)], 0.01);
     let result = process_source(&mut source, 1024);
     assert_eq!(result.bins.len(), 1024);
     assert_eq!(result.sample_rate, 1_024_000.0);

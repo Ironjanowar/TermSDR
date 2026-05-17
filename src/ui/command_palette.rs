@@ -12,7 +12,7 @@ pub struct Command {
     pub description: &'static str,
     /// Whether this command accepts a parameter after the name.
     pub accepts_param: bool,
-    /// Whether a parameter is mandatory (subset of accepts_param).
+    /// Whether a parameter is mandatory (subset of `accepts_param`).
     pub requires_param: bool,
     /// Hotkey equivalent (for display).
     pub hotkey: &'static str,
@@ -23,8 +23,15 @@ pub struct CommandRegistry {
     commands: Vec<Command>,
 }
 
+impl Default for CommandRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CommandRegistry {
     /// Create a new registry with all built-in commands.
+    #[must_use] 
     pub fn new() -> Self {
         let mut commands = vec![
             Command { name: "averaging", description: "Set spectrum averaging (1-20)", accepts_param: true, requires_param: true, hotkey: "-" },
@@ -63,11 +70,13 @@ impl CommandRegistry {
     }
 
     /// Get all commands.
+    #[must_use] 
     pub fn all(&self) -> &[Command] {
         &self.commands
     }
 
     /// Filter commands by prefix (case-insensitive).
+    #[must_use] 
     pub fn filter(&self, query: &str) -> Vec<&Command> {
         if query.is_empty() {
             return self.commands.iter().collect();
@@ -92,7 +101,14 @@ pub struct CommandPalette {
     pub error: Option<String>,
 }
 
+impl Default for CommandPalette {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CommandPalette {
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             input: String::new(),
@@ -111,6 +127,7 @@ impl CommandPalette {
 
     /// Get filtered commands based on current input.
     /// Only the command name part (before space) is used for filtering.
+    #[must_use] 
     pub fn filtered(&self) -> Vec<&Command> {
         let query = self.command_part();
         self.registry.filter(query)
@@ -174,6 +191,7 @@ impl CommandPalette {
     }
 
     /// Get the selected command name (resolved from filtered list or input).
+    #[must_use] 
     pub fn selected_command_name(&self) -> Option<&str> {
         let filtered = self.filtered();
         if let Some(cmd) = filtered.get(self.selected) {
@@ -183,13 +201,18 @@ impl CommandPalette {
         }
     }
 
-    /// Execute the current command. Returns Ok(action) on success, Err(message) on error.
+    /// Execute the current command. Returns `Ok(action)` on success, `Err(message)` on error.
+    ///
+    /// # Errors
+    /// Returns an error string if the command is unknown or has invalid arguments.
+    ///
+    /// # Panics
+    /// Panics if frequency parsing produces an unexpected state.
+    #[allow(clippy::too_many_lines)] // large match dispatch over all command actions
     pub fn execute(&self) -> Result<CommandAction, String> {
         // If there's an exact match in filtered results, use that
         let filtered = self.filtered();
-        let cmd = if let Some(cmd) = filtered.get(self.selected) {
-            cmd
-        } else {
+        let Some(cmd) = filtered.get(self.selected) else {
             return Err("Unknown command".to_string());
         };
         let cmd_name = cmd.name;
@@ -198,31 +221,31 @@ impl CommandPalette {
 
         // Check if a required parameter is missing
         if cmd.requires_param && param.is_none() {
-            return Err(format!("{} requires a value (e.g. {} 100M)", cmd_name, cmd_name));
+            return Err(format!("{cmd_name} requires a value (e.g. {cmd_name} 100M)"));
         }
 
         match cmd_name {
             "averaging" => {
-                let p = param.unwrap();
+                let p = param.expect("invariant: requires_param verified");
                 match p.parse::<usize>() {
-                    Ok(v) if v >= 1 && v <= 20 => Ok(CommandAction::SetAveraging(v)),
+                    Ok(v) if (1..=20).contains(&v) => Ok(CommandAction::SetAveraging(v)),
                     Ok(_) => Err("Averaging must be 1-20".to_string()),
-                    Err(_) => Err(format!("Invalid averaging value: '{}'", p)),
+                    Err(_) => Err(format!("Invalid averaging value: '{p}'")),
                 }
             }
             "bandwidth" => {
                 // requires_param check already ensures param is Some
-                let p = param.unwrap();
+                let p = param.expect("invariant: requires_param verified");
                 parse_frequency(p)
                     .map(CommandAction::SetBandwidth)
-                    .map_err(|_| format!("Invalid bandwidth: '{}'", p))
+                    .map_err(|_| format!("Invalid bandwidth: '{p}'"))
             }
             "bookmark-add" => {
-                let p = param.unwrap();
+                let p = param.expect("invariant: requires_param verified");
                 Ok(CommandAction::AddBookmark(p.to_string()))
             }
             "bookmark-remove" => {
-                let p = param.unwrap();
+                let p = param.expect("invariant: requires_param verified");
                 Ok(CommandAction::RemoveBookmark(p.to_string()))
             }
             "bookmarks" => Ok(CommandAction::ShowBookmarks),
@@ -232,7 +255,7 @@ impl CommandPalette {
                 if let Some(p) = param {
                     parse_frequency(p)
                         .map(CommandAction::SetChannelBw)
-                        .map_err(|_| format!("Invalid channel bandwidth: '{}'", p))
+                        .map_err(|_| format!("Invalid channel bandwidth: '{p}'"))
                 } else {
                     // No param: double channel BW like 'w'
                     Ok(CommandAction::WidenChannelBw)
@@ -252,10 +275,10 @@ impl CommandPalette {
             }
             "frequency" => {
                 // requires_param check already ensures param is Some
-                let p = param.unwrap();
+                let p = param.expect("invariant: requires_param verified");
                 parse_frequency(p)
                     .map(CommandAction::SetFrequency)
-                    .map_err(|_| format!("Invalid frequency: '{}'", p))
+                    .map_err(|_| format!("Invalid frequency: '{p}'"))
             }
             "output" => Err("Audio output selection not yet implemented".to_string()),
             "gain+" => Ok(CommandAction::GainUp),
@@ -264,11 +287,11 @@ impl CommandPalette {
             "quit" => Ok(CommandAction::Quit),
             "scan" => Ok(CommandAction::ToggleScan),
             "scan-interval" => {
-                let p = param.unwrap();
+                let p = param.expect("invariant: requires_param verified");
                 match p.parse::<u64>() {
-                    Ok(ms) if ms >= 50 && ms <= 5000 => Ok(CommandAction::SetScanInterval(ms)),
+                    Ok(ms) if (50..=5000).contains(&ms) => Ok(CommandAction::SetScanInterval(ms)),
                     Ok(_) => Err("Scan interval must be 50-5000 ms".to_string()),
-                    Err(_) => Err(format!("Invalid interval: '{}'", p)),
+                    Err(_) => Err(format!("Invalid interval: '{p}'")),
                 }
             }
             "toggle-cursor" => Ok(CommandAction::ToggleCursor),
@@ -280,41 +303,41 @@ impl CommandPalette {
                 if let Some(p) = param {
                     match p.parse::<f32>() {
                         Ok(db) => Ok(CommandAction::SetSquelch(Some(db))),
-                        Err(_) => Err(format!("Invalid squelch value: '{}'", p)),
+                        Err(_) => Err(format!("Invalid squelch value: '{p}'")),
                     }
                 } else {
                     Ok(CommandAction::SetSquelch(None))
                 }
             }
             "volume" => {
-                let p = param.unwrap();
+                let p = param.expect("invariant: requires_param verified");
                 match p.parse::<u8>() {
                     Ok(v) if v <= 100 => Ok(CommandAction::SetVolume(v)),
                     Ok(_) => Err("Volume must be 0-100".to_string()),
-                    Err(_) => Err(format!("Invalid volume: '{}'", p)),
+                    Err(_) => Err(format!("Invalid volume: '{p}'")),
                 }
             }
             "zoom-in" => Ok(CommandAction::ZoomIn),
             "waterfall" => {
-                let p = param.unwrap();
+                let p = param.expect("invariant: requires_param verified");
                 match p.parse::<f64>() {
-                    Ok(secs) if secs >= 5.0 && secs <= 120.0 => Ok(CommandAction::SetWaterfallTimeSpan(secs)),
+                    Ok(secs) if (5.0..=120.0).contains(&secs) => Ok(CommandAction::SetWaterfallTimeSpan(secs)),
                     Ok(_) => Err("Waterfall time span must be 5-120 seconds".to_string()),
-                    Err(_) => Err(format!("Invalid time span: '{}'", p)),
+                    Err(_) => Err(format!("Invalid time span: '{p}'")),
                 }
             }
             "zoom-out" => Ok(CommandAction::ZoomOut),
             "vfo-add" => {
-                let p = param.unwrap();
+                let p = param.expect("invariant: requires_param verified");
                 parse_frequency(p)
                     .map(CommandAction::AddVfo)
-                    .map_err(|_| format!("Invalid frequency: '{}'", p))
+                    .map_err(|_| format!("Invalid frequency: '{p}'"))
             }
             "vfo-remove" => {
-                let p = param.unwrap();
+                let p = param.expect("invariant: requires_param verified");
                 match p.parse::<usize>() {
                     Ok(id) if id > 0 => Ok(CommandAction::RemoveVfo(id)),
-                    _ => Err(format!("Invalid VFO ID: '{}'", p)),
+                    _ => Err(format!("Invalid VFO ID: '{p}'")),
                 }
             }
             "vfo-clear" => Ok(CommandAction::ClearVfos),

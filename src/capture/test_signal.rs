@@ -1,3 +1,5 @@
+//! Synthetic signal generator for testing the DSP and audio pipelines without hardware.
+
 use std::f32::consts::PI;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -33,12 +35,13 @@ impl TestSource {
     /// # Arguments
     /// * `sample_rate` - Sample rate in Hz
     /// * `center_freq` - Center frequency in Hz
-    /// * `signals` - List of (frequency_offset_hz, amplitude) pairs
+    /// * `signals` - List of (`frequency_offset_hz`, amplitude) pairs
     /// * `noise_amplitude` - RMS amplitude of white noise floor
+    #[must_use] 
     pub fn new(
         sample_rate: f64,
         center_freq: f64,
-        signals: Vec<(f64, f32)>,
+        signals: &[(f64, f32)],
         noise_amplitude: f32,
     ) -> Self {
         let phases = vec![0.0; signals.len()];
@@ -59,12 +62,14 @@ impl TestSource {
     }
 
     /// Attach a shared center frequency for reactive tuning.
+    #[must_use]
     pub fn with_shared_freq(mut self, freq: Arc<AtomicU64>) -> Self {
         self.shared_center_freq = Some(freq);
         self
     }
 
     /// Simple xorshift64 PRNG for deterministic noise.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI; intentional truncation; value fits in target type
     fn next_random(&mut self) -> f32 {
         self.rng_state ^= self.rng_state << 13;
         self.rng_state ^= self.rng_state >> 7;
@@ -75,6 +80,7 @@ impl TestSource {
 }
 
 impl Source for TestSource {
+    #[allow(clippy::cast_possible_truncation)] // intentional truncation
     fn read_samples(&mut self, buffer: &mut [IqSample]) -> Result<usize> {
         let dt = 1.0 / self.sample_rate;
 
@@ -101,8 +107,8 @@ impl Source for TestSource {
                 // Compute offset from current center frequency
                 let freq_offset = abs_freq - current_center;
                 // Advance phase
-                let phase_increment = 2.0 * PI as f64 * freq_offset * dt;
-                self.phases[sig_idx] = (phase + phase_increment) % (2.0 * PI as f64);
+                let phase_increment = 2.0 * f64::from(PI) * freq_offset * dt;
+                self.phases[sig_idx] = (phase + phase_increment) % (2.0 * f64::from(PI));
             }
 
             *sample = IqSample::new(i, q);
@@ -126,7 +132,7 @@ mod tests {
 
     #[test]
     fn test_produces_correct_number_of_samples() {
-        let mut source = TestSource::new(2_048_000.0, 100e6, vec![(100_000.0, 0.8)], 0.01);
+        let mut source = TestSource::new(2_048_000.0, 100e6, &[(100_000.0, 0.8)], 0.01);
         let mut buffer = vec![IqSample::new(0.0, 0.0); 2048];
         let n = source.read_samples(&mut buffer).unwrap();
         assert_eq!(n, 2048);
@@ -134,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_noise_only_has_low_amplitude() {
-        let mut source = TestSource::new(2_048_000.0, 100e6, vec![], 0.01);
+        let mut source = TestSource::new(2_048_000.0, 100e6, &[], 0.01);
         let mut buffer = vec![IqSample::new(0.0, 0.0); 4096];
         source.read_samples(&mut buffer).unwrap();
 
@@ -147,7 +153,7 @@ mod tests {
     #[test]
     fn test_signal_has_expected_amplitude() {
         let amplitude = 0.8_f32;
-        let mut source = TestSource::new(2_048_000.0, 100e6, vec![(100_000.0, amplitude)], 0.0);
+        let mut source = TestSource::new(2_048_000.0, 100e6, &[(100_000.0, amplitude)], 0.0);
         let mut buffer = vec![IqSample::new(0.0, 0.0); 4096];
         source.read_samples(&mut buffer).unwrap();
 
@@ -166,7 +172,7 @@ mod tests {
         let mut source = TestSource::new(
             2_048_000.0,
             100e6,
-            vec![(100_000.0, 0.5), (-200_000.0, 0.3)],
+            &[(100_000.0, 0.5), (-200_000.0, 0.3)],
             0.0,
         );
         let mut buffer = vec![IqSample::new(0.0, 0.0); 2048];
@@ -182,15 +188,15 @@ mod tests {
 
     #[test]
     fn test_source_trait_properties() {
-        let source = TestSource::new(2_048_000.0, 100e6, vec![], 0.01);
+        let source = TestSource::new(2_048_000.0, 100e6, &[], 0.01);
         assert_eq!(source.sample_rate(), 2_048_000.0);
         assert_eq!(source.center_freq(), 100e6);
     }
 
     #[test]
     fn test_deterministic_output() {
-        let mut source1 = TestSource::new(2_048_000.0, 100e6, vec![(50_000.0, 0.5)], 0.01);
-        let mut source2 = TestSource::new(2_048_000.0, 100e6, vec![(50_000.0, 0.5)], 0.01);
+        let mut source1 = TestSource::new(2_048_000.0, 100e6, &[(50_000.0, 0.5)], 0.01);
+        let mut source2 = TestSource::new(2_048_000.0, 100e6, &[(50_000.0, 0.5)], 0.01);
 
         let mut buf1 = vec![IqSample::new(0.0, 0.0); 1024];
         let mut buf2 = vec![IqSample::new(0.0, 0.0); 1024];
@@ -208,7 +214,7 @@ mod tests {
 
     #[test]
     fn test_zero_length_buffer() {
-        let mut source = TestSource::new(2_048_000.0, 100e6, vec![(100_000.0, 0.8)], 0.01);
+        let mut source = TestSource::new(2_048_000.0, 100e6, &[(100_000.0, 0.8)], 0.01);
         let mut buffer: Vec<IqSample> = vec![];
         let n = source.read_samples(&mut buffer).unwrap();
         assert_eq!(n, 0);
@@ -216,7 +222,7 @@ mod tests {
 
     #[test]
     fn test_empty_signals_list() {
-        let mut source = TestSource::new(2_048_000.0, 100e6, vec![], 0.0);
+        let mut source = TestSource::new(2_048_000.0, 100e6, &[], 0.0);
         let mut buffer = vec![IqSample::new(0.0, 0.0); 100];
         let n = source.read_samples(&mut buffer).unwrap();
         assert_eq!(n, 100);
@@ -230,7 +236,7 @@ mod tests {
     #[test]
     fn test_very_high_frequency_offset() {
         // Beyond Nyquist — should still produce samples without panic
-        let mut source = TestSource::new(2_048_000.0, 100e6, vec![(10_000_000.0, 0.8)], 0.0);
+        let mut source = TestSource::new(2_048_000.0, 100e6, &[(10_000_000.0, 0.8)], 0.0);
         let mut buffer = vec![IqSample::new(0.0, 0.0); 1024];
         let n = source.read_samples(&mut buffer).unwrap();
         assert_eq!(n, 1024);
@@ -238,7 +244,7 @@ mod tests {
 
     #[test]
     fn test_very_large_amplitude() {
-        let mut source = TestSource::new(2_048_000.0, 100e6, vec![(100_000.0, 100.0)], 0.0);
+        let mut source = TestSource::new(2_048_000.0, 100e6, &[(100_000.0, 100.0)], 0.0);
         let mut buffer = vec![IqSample::new(0.0, 0.0); 1024];
         source.read_samples(&mut buffer).unwrap();
         let max_mag = buffer.iter().map(|s| s.norm()).fold(0.0_f32, f32::max);
@@ -247,7 +253,7 @@ mod tests {
 
     #[test]
     fn test_negative_amplitude() {
-        let mut source = TestSource::new(2_048_000.0, 100e6, vec![(100_000.0, -0.5)], 0.0);
+        let mut source = TestSource::new(2_048_000.0, 100e6, &[(100_000.0, -0.5)], 0.0);
         let mut buffer = vec![IqSample::new(0.0, 0.0); 1024];
         source.read_samples(&mut buffer).unwrap();
         // Negative amplitude just inverts the signal; magnitude should be ~0.5
@@ -259,7 +265,7 @@ mod tests {
     fn test_zero_sample_rate() {
         // dt = 1/0 = inf, phase_increment = inf, phase wraps
         // Should not panic
-        let mut source = TestSource::new(0.0, 100e6, vec![(100_000.0, 0.5)], 0.01);
+        let mut source = TestSource::new(0.0, 100e6, &[(100_000.0, 0.5)], 0.01);
         let mut buffer = vec![IqSample::new(0.0, 0.0); 10];
         let n = source.read_samples(&mut buffer).unwrap();
         assert_eq!(n, 10);
@@ -270,7 +276,7 @@ mod tests {
         use std::sync::atomic::AtomicU64;
 
         let shared = Arc::new(AtomicU64::new(100e6_f64.to_bits()));
-        let mut source = TestSource::new(2_048_000.0, 100e6, vec![(100_000.0, 0.8)], 0.0)
+        let mut source = TestSource::new(2_048_000.0, 100e6, &[(100_000.0, 0.8)], 0.0)
             .with_shared_freq(shared.clone());
 
         let mut buf1 = vec![IqSample::new(0.0, 0.0); 1024];
@@ -293,8 +299,8 @@ mod tests {
     #[test]
     fn test_without_shared_freq_backward_compatible() {
         // Without shared freq, should work exactly as before
-        let mut source1 = TestSource::new(2_048_000.0, 100e6, vec![(50_000.0, 0.5)], 0.01);
-        let mut source2 = TestSource::new(2_048_000.0, 100e6, vec![(50_000.0, 0.5)], 0.01);
+        let mut source1 = TestSource::new(2_048_000.0, 100e6, &[(50_000.0, 0.5)], 0.01);
+        let mut source2 = TestSource::new(2_048_000.0, 100e6, &[(50_000.0, 0.5)], 0.01);
 
         let mut buf1 = vec![IqSample::new(0.0, 0.0); 1024];
         let mut buf2 = vec![IqSample::new(0.0, 0.0); 1024];
@@ -314,7 +320,7 @@ mod tests {
 
         // Signal at absolute 100.1 MHz (center 100 MHz + 100 kHz offset)
         let shared = Arc::new(AtomicU64::new(100e6_f64.to_bits()));
-        let mut source = TestSource::new(2_048_000.0, 100e6, vec![(100_000.0, 0.8)], 0.0)
+        let mut source = TestSource::new(2_048_000.0, 100e6, &[(100_000.0, 0.8)], 0.0)
             .with_shared_freq(shared.clone());
 
         // At center=100 MHz, offset should be +100 kHz

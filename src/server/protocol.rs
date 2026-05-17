@@ -1,3 +1,5 @@
+//! Binary and JSON protocol definitions for WebSocket communication.
+
 use crate::audio::demod::DemodMode;
 use crate::types::FftResult;
 use serde::{Deserialize, Serialize};
@@ -7,17 +9,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const TAG_SPECTRUM: u8 = 0x01;
 
 /// Tag byte for audio binary frames (Phase 3).
+#[allow(dead_code)]
 pub const TAG_AUDIO: u8 = 0x02;
 
-/// Encode an FftResult into a binary spectrum frame.
+/// Encode an `FftResult` into a binary spectrum frame.
 ///
 /// Format: `[0x01][timestamp_ms: u64 LE][num_bins: u16 LE][dB: f32 LE × N]`
+#[must_use] 
 pub fn encode_spectrum_frame(fft: &FftResult) -> Vec<u8> {
+    #[allow(clippy::cast_possible_truncation)] // intentional truncation
     let timestamp_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
 
+    #[allow(clippy::cast_possible_truncation)] // intentional truncation
     let num_bins = fft.bins.len() as u16;
     let capacity = 1 + 8 + 2 + fft.bins.len() * 4;
     let mut buf = Vec::with_capacity(capacity);
@@ -35,6 +41,8 @@ pub fn encode_spectrum_frame(fft: &FftResult) -> Vec<u8> {
 /// Decode a binary spectrum frame back into its components.
 ///
 /// Returns `(timestamp_ms, bins)` or `None` if the frame is malformed.
+#[must_use]
+#[allow(dead_code)]
 pub fn decode_spectrum_frame(data: &[u8]) -> Option<(u64, Vec<f32>)> {
     if data.len() < 11 {
         return None;
@@ -150,6 +158,8 @@ pub struct StateMessage {
 
 impl StateMessage {
     /// Create a basic state message from config (backward compat for minimal state).
+    #[must_use]
+    #[allow(dead_code)]
     pub fn from_config(config: &crate::types::AppConfig, clients: usize) -> Self {
         Self {
             msg_type: "state".to_string(),
@@ -249,6 +259,7 @@ pub struct ErrorMessage {
 }
 
 impl ErrorMessage {
+    #[must_use] 
     pub fn new(cmd: &str, message: &str) -> Self {
         Self {
             msg_type: "error".to_string(),
@@ -262,6 +273,7 @@ impl ErrorMessage {
 // Helper: parse demod mode string
 // ============================================================================
 
+#[must_use] 
 pub fn parse_demod_mode(s: &str) -> Option<DemodMode> {
     match s.to_uppercase().as_str() {
         "AM" => Some(DemodMode::AM),
@@ -272,6 +284,8 @@ pub fn parse_demod_mode(s: &str) -> Option<DemodMode> {
 }
 
 /// Convert a ratatui Color to a string for the protocol.
+#[must_use]
+#[allow(dead_code)]
 pub fn color_to_string(color: ratatui::style::Color) -> String {
     match color {
         ratatui::style::Color::Red => "red".to_string(),
@@ -280,7 +294,6 @@ pub fn color_to_string(color: ratatui::style::Color) -> String {
         ratatui::style::Color::Magenta => "magenta".to_string(),
         ratatui::style::Color::Cyan => "cyan".to_string(),
         ratatui::style::Color::LightRed => "lightred".to_string(),
-        ratatui::style::Color::White => "white".to_string(),
         ratatui::style::Color::LightMagenta => "lightmagenta".to_string(),
         _ => "white".to_string(),
     }

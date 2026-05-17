@@ -1,3 +1,5 @@
+//! Settings modal overlay for adjusting runtime parameters.
+
 use crate::audio::AudioControl;
 use crate::audio::demod::DemodMode;
 
@@ -76,6 +78,7 @@ impl Default for SettingsModal {
 
 impl SettingsModal {
     /// Create a new settings modal with default items.
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             visible: false,
@@ -87,6 +90,7 @@ impl SettingsModal {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // declarative settings list
     fn default_items() -> Vec<SettingsItem> {
         vec![
             SettingsItem {
@@ -115,7 +119,7 @@ impl SettingsModal {
                 label: "Channel BW",
                 section: None,
                 kind: SettingsItemKind::Slider {
-                    value: 8000.0, min: 1000.0, max: 250000.0,
+                    value: 8000.0, min: 1000.0, max: 250_000.0,
                     fine_step: 500.0, coarse_step: 5000.0, unit: "Hz",
                 },
                 id: SettingsItemId::ChannelBw,
@@ -231,12 +235,12 @@ impl SettingsModal {
             match item.id {
                 SettingsItemId::Volume => {
                     if let SettingsItemKind::Slider { ref mut value, .. } = item.kind {
-                        *value = volume as f64;
+                        *value = f64::from(volume);
                     }
                 }
                 SettingsItemId::Squelch => {
                     if let SettingsItemKind::Slider { ref mut value, .. } = item.kind {
-                        *value = squelch.unwrap_or(-120.0) as f64;
+                        *value = f64::from(squelch.unwrap_or(-120.0));
                     }
                 }
                 SettingsItemId::ChannelBw => {
@@ -271,7 +275,7 @@ impl SettingsModal {
         self.showing_help = !self.showing_help;
     }
 
-    /// Reset the selected item to its default value. Returns the AudioControl if changed.
+    /// Reset the selected item to its default value. Returns the `AudioControl` if changed.
     pub fn reset_to_default(&mut self) -> Option<AudioControl> {
         if self.items.is_empty() { return None; }
         let item = &mut self.items[self.selected_index];
@@ -322,7 +326,7 @@ impl SettingsModal {
         match &mut item.kind {
             SettingsItemKind::Slider { value, min, max, fine_step, coarse_step, .. } => {
                 let step = if coarse { *coarse_step } else { *fine_step };
-                *value = (*value + step * direction as f64).clamp(*min, *max);
+                *value = (*value + step * f64::from(direction)).clamp(*min, *max);
             }
             SettingsItemKind::Toggle { value } => {
                 *value = !*value;
@@ -398,11 +402,13 @@ impl SettingsModal {
     }
 
     /// Get the current selected item (if any).
+    #[must_use] 
     pub fn selected_item(&self) -> Option<&SettingsItem> {
         self.items.get(self.selected_index)
     }
 
-    /// Build the AudioControl message for a given item index.
+    /// Build the `AudioControl` message for a given item index.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // intentional truncation; value is non-negative here
     fn audio_control_for(&self, index: usize) -> Option<AudioControl> {
         let item = &self.items[index];
         match item.id {
@@ -413,6 +419,7 @@ impl SettingsModal {
             }
             SettingsItemId::Squelch => {
                 if let SettingsItemKind::Slider { value, .. } = &item.kind {
+                    #[allow(clippy::cast_possible_truncation)] // intentional truncation
                     let sq = if *value <= -120.0 { None } else { Some(*value as f32) };
                     Some(AudioControl::SetSquelch(sq))
                 } else { None }
@@ -476,6 +483,7 @@ impl SettingsModal {
     }
 
     /// Get the list of sections with their row ranges for rendering.
+    #[must_use] 
     pub fn section_headers(&self) -> Vec<(usize, &'static str)> {
         let mut headers = Vec::new();
         let mut last_section: Option<Option<&str>> = None;
@@ -493,16 +501,18 @@ impl SettingsModal {
 }
 
 /// Format a float value nicely (strip trailing zeros).
+#[allow(clippy::cast_possible_truncation)] // intentional truncation
 fn format_value(v: f64) -> String {
     if v.fract().abs() < 1e-9 {
         format!("{}", v as i64)
     } else {
-        let s = format!("{:.2}", v);
+        let s = format!("{v:.2}");
         s.trim_end_matches('0').trim_end_matches('.').to_string()
     }
 }
 
 /// Format a value with its unit for display.
+#[must_use] 
 pub fn format_display_value(kind: &SettingsItemKind) -> String {
     match kind {
         SettingsItemKind::Slider { value, unit, .. } => {

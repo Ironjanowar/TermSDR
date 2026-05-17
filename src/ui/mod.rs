@@ -37,6 +37,51 @@ use spectrum::SpectrumWidget;
 use status_bar::{DisplaySource, StatusBarWidget};
 use waterfall::WaterfallWidget;
 
+/// Fine tuning step in Hz (25 kHz, one NFM channel).
+const TUNE_STEP_FINE: f64 = 25_000.0;
+
+/// Coarse tuning step in Hz (1 MHz).
+const TUNE_STEP_COARSE: f64 = 1_000_000.0;
+
+/// Zoom-in bandwidth multiplier (reduce by 20%).
+const ZOOM_IN_FACTOR: f64 = 0.8;
+
+/// Zoom-out bandwidth multiplier (increase by 25%).
+const ZOOM_OUT_FACTOR: f64 = 1.25;
+
+/// Minimum allowed sample rate / bandwidth in Hz (256 kHz).
+const MIN_BANDWIDTH: f64 = 256_000.0;
+
+/// Maximum allowed sample rate / bandwidth in Hz (3.2 MHz).
+const MAX_BANDWIDTH: f64 = 3_200_000.0;
+
+/// Minimum channel bandwidth in Hz (1 kHz).
+const MIN_CHANNEL_BW: f64 = 1_000.0;
+
+/// Maximum channel bandwidth in Hz (1 MHz).
+const MAX_CHANNEL_BW: f64 = 1_000_000.0;
+
+/// Default maximum waterfall history rows.
+const DEFAULT_MAX_WATERFALL_ROWS: usize = 600;
+
+/// Default scan interval in milliseconds.
+const DEFAULT_SCAN_INTERVAL_MS: u64 = 500;
+
+/// Target UI frame rate (~30 FPS).
+#[allow(dead_code)]
+const UI_FRAME_DURATION_MS: u64 = 33;
+
+/// Default audio volume (0–100).
+pub(crate) const DEFAULT_VOLUME: u8 = 80;
+
+/// Default squelch level in dB.
+#[allow(dead_code)]
+const DEFAULT_SQUELCH_DB: f32 = -60.0;
+
+/// dB floor value for empty/missing spectrum data.
+#[allow(dead_code)]
+const SPECTRUM_DB_FLOOR: f32 = -100.0;
+
 /// VFO color palette (8 colors, assigned in order, reused if needed).
 const VFO_COLORS: [Color; 8] = [
     Color::Red,
@@ -155,7 +200,7 @@ impl App {
             config,
             latest_fft: None,
             waterfall_history: Vec::new(),
-            max_waterfall_rows: 600,
+            max_waterfall_rows: DEFAULT_MAX_WATERFALL_ROWS,
             waterfall_time_span: 20.0,
             fps: 0.0,
             should_quit: false,
@@ -171,7 +216,7 @@ impl App {
             channel_bw: DemodMode::AM.default_channel_bw(),
             command_palette_active: false,
             command_palette: CommandPalette::new(),
-            volume: 80,
+            volume: DEFAULT_VOLUME,
             squelch: None,
             vfos: Vec::new(),
             next_vfo_id: 1,
@@ -186,7 +231,7 @@ impl App {
             shared_averaging: None,
             demod_mode: DemodMode::AM,
             scan_active: false,
-            scan_interval_ms: 500,
+            scan_interval_ms: DEFAULT_SCAN_INTERVAL_MS,
             last_scan_time: Instant::now(),
             settings_modal: SettingsModal::new(),
             frame_count: 0,
@@ -578,8 +623,8 @@ impl App {
                     self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
                 } else {
                     // Fine tune: visual scroll right (lower freq)
-                    self.config.center_freq += 25_000.0;
-                    self.cursor_freq += 25_000.0;
+                    self.config.center_freq += TUNE_STEP_FINE;
+                    self.cursor_freq += TUNE_STEP_FINE;
                     self.sync_shared_center_freq();
                     self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
                 }
@@ -592,26 +637,26 @@ impl App {
                     self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
                 } else {
                     // Fine tune: visual scroll left (higher freq)
-                    self.config.center_freq -= 25_000.0;
-                    self.cursor_freq -= 25_000.0;
+                    self.config.center_freq -= TUNE_STEP_FINE;
+                    self.cursor_freq -= TUNE_STEP_FINE;
                     self.sync_shared_center_freq();
                     self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
                 }
             }
             KeyCode::PageUp => {
                 // Coarse tune: +1 MHz
-                self.config.center_freq += 1_000_000.0;
+                self.config.center_freq += TUNE_STEP_COARSE;
                 if !self.cursor_active {
-                    self.cursor_freq += 1_000_000.0;
+                    self.cursor_freq += TUNE_STEP_COARSE;
                     self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
                 }
                 self.sync_shared_center_freq();
             }
             KeyCode::PageDown => {
                 // Coarse tune: -1 MHz
-                self.config.center_freq -= 1_000_000.0;
+                self.config.center_freq -= TUNE_STEP_COARSE;
                 if !self.cursor_active {
-                    self.cursor_freq -= 1_000_000.0;
+                    self.cursor_freq -= TUNE_STEP_COARSE;
                     self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
                 }
                 self.sync_shared_center_freq();
@@ -628,11 +673,11 @@ impl App {
             }
             KeyCode::Char('+' | '=') => {
                 // Zoom in (decrease displayed bandwidth)
-                self.config.sample_rate = (self.config.sample_rate * 0.8).max(256_000.0);
+                self.config.sample_rate = (self.config.sample_rate * ZOOM_IN_FACTOR).max(MIN_BANDWIDTH);
             }
             KeyCode::Char('-') => {
                 // Zoom out (increase displayed bandwidth)
-                self.config.sample_rate = (self.config.sample_rate * 1.25).min(3_200_000.0);
+                self.config.sample_rate = (self.config.sample_rate * ZOOM_OUT_FACTOR).min(MAX_BANDWIDTH);
             }
             KeyCode::Char('f') => {
                 self.freq_input_mode = true;
@@ -659,11 +704,11 @@ impl App {
                 self.show_help = true;
             }
             KeyCode::Char('w') => {
-                self.channel_bw = (self.channel_bw * 2.0).min(1_000_000.0);
+                self.channel_bw = (self.channel_bw * 2.0).min(MAX_CHANNEL_BW);
                 self.send_audio_control(AudioControl::SetChannelBw(self.channel_bw));
             }
             KeyCode::Char('W') => {
-                self.channel_bw = (self.channel_bw / 2.0).max(1_000.0);
+                self.channel_bw = (self.channel_bw / 2.0).max(MIN_CHANNEL_BW);
                 self.send_audio_control(AudioControl::SetChannelBw(self.channel_bw));
             }
             KeyCode::Char('t') => {
@@ -766,7 +811,7 @@ impl App {
                 self.send_audio_control(AudioControl::SetChannelBw(self.channel_bw));
             }
             CommandAction::WidenChannelBw => {
-                self.channel_bw = (self.channel_bw * 2.0).min(1_000_000.0);
+                self.channel_bw = (self.channel_bw * 2.0).min(MAX_CHANNEL_BW);
                 self.send_audio_control(AudioControl::SetChannelBw(self.channel_bw));
             }
             CommandAction::CenterCursor => {
@@ -789,23 +834,23 @@ impl App {
             CommandAction::Quit => self.should_quit = true,
             CommandAction::ToggleCursor => self.cursor_active = !self.cursor_active,
             CommandAction::TuneUp => {
-                self.config.center_freq += 25_000.0;
+                self.config.center_freq += TUNE_STEP_FINE;
                 self.sync_shared_center_freq();
             }
             CommandAction::TuneDown => {
-                self.config.center_freq -= 25_000.0;
+                self.config.center_freq -= TUNE_STEP_FINE;
                 self.sync_shared_center_freq();
             }
             CommandAction::TuneCoarseUp => {
-                self.config.center_freq += 1_000_000.0;
+                self.config.center_freq += TUNE_STEP_COARSE;
                 self.sync_shared_center_freq();
             }
             CommandAction::TuneCoarseDown => {
-                self.config.center_freq -= 1_000_000.0;
+                self.config.center_freq -= TUNE_STEP_COARSE;
                 self.sync_shared_center_freq();
             }
-            CommandAction::ZoomIn => self.config.sample_rate = (self.config.sample_rate * 0.8).max(256_000.0),
-            CommandAction::ZoomOut => self.config.sample_rate = (self.config.sample_rate * 1.25).min(3_200_000.0),
+            CommandAction::ZoomIn => self.config.sample_rate = (self.config.sample_rate * ZOOM_IN_FACTOR).max(MIN_BANDWIDTH),
+            CommandAction::ZoomOut => self.config.sample_rate = (self.config.sample_rate * ZOOM_OUT_FACTOR).min(MAX_BANDWIDTH),
             CommandAction::SetVolume(v) => {
                 self.volume = v;
                 self.send_audio_control(AudioControl::SetVolume(self.volume));

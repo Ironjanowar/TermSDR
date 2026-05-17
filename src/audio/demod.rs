@@ -5,6 +5,42 @@ use serde::{Serialize, Deserialize};
 use crate::types::IqSample;
 use std::f64::consts::PI;
 
+/// Default channel bandwidth for AM mode in Hz.
+pub const AM_DEFAULT_CHANNEL_BW: f64 = 8_000.0;
+
+/// Default channel bandwidth for wideband FM mode in Hz.
+pub const FM_DEFAULT_CHANNEL_BW: f64 = 200_000.0;
+
+/// Default channel bandwidth for narrowband FM mode in Hz.
+pub const NFM_DEFAULT_CHANNEL_BW: f64 = 25_000.0;
+
+/// Default DC removal filter coefficient (IIR high-pass alpha).
+pub const DC_REMOVAL_ALPHA: f64 = 0.995;
+
+/// Number of FIR filter taps for channel filtering.
+pub const FIR_NUM_TAPS: usize = 101;
+
+/// Default AGC attack time in milliseconds.
+pub const DEFAULT_AGC_ATTACK_MS: f64 = 10.0;
+
+/// Default AGC decay time in milliseconds.
+pub const DEFAULT_AGC_DECAY_MS: f64 = 300.0;
+
+/// Default AGC target output level (0.0–1.0).
+pub const DEFAULT_AGC_TARGET_LEVEL: f32 = 0.3;
+
+/// Default AGC maximum gain in dB.
+pub const DEFAULT_AGC_MAX_GAIN_DB: f32 = 50.0;
+
+/// Default bandpass filter low cutoff in Hz (voice low end).
+pub const DEFAULT_BANDPASS_LOW_HZ: f64 = 300.0;
+
+/// Default bandpass filter high cutoff in Hz (voice high end).
+pub const DEFAULT_BANDPASS_HIGH_HZ: f64 = 3400.0;
+
+/// FM de-emphasis time constant in seconds (50 µs, European standard).
+pub const FM_DEEMPHASIS_TAU: f64 = 50e-6;
+
 // ============================================================================
 // Demodulation Mode
 // ============================================================================
@@ -26,9 +62,9 @@ impl DemodMode {
     #[must_use] 
     pub fn default_channel_bw(self) -> f64 {
         match self {
-            DemodMode::AM => 8_000.0,
-            DemodMode::FM => 200_000.0,
-            DemodMode::NFM => 25_000.0,
+            DemodMode::AM => AM_DEFAULT_CHANNEL_BW,
+            DemodMode::FM => FM_DEFAULT_CHANNEL_BW,
+            DemodMode::NFM => NFM_DEFAULT_CHANNEL_BW,
         }
     }
 
@@ -499,14 +535,13 @@ impl Demodulator {
 
         // FIR filter: cutoff at half the channel bandwidth
         // Use 101 taps — good tradeoff between rejection and latency
-        let num_taps = 101;
-        let fir_filter = FirFilter::low_pass(channel_bw / 2.0, input_sample_rate, num_taps);
+        let fir_filter = FirFilter::low_pass(channel_bw / 2.0, input_sample_rate, FIR_NUM_TAPS);
 
         let de_emphasis = match mode {
             DemodMode::FM => {
                 #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
                 let output_sr = input_sample_rate / decimation_factor as f64;
-                Some(DeEmphasis::new(output_sr, 50e-6))
+                Some(DeEmphasis::new(output_sr, FM_DEEMPHASIS_TAU))
             }
             _ => None,
         };
@@ -515,7 +550,7 @@ impl Demodulator {
         let actual_output_sr = input_sample_rate / decimation_factor as f64;
         Self {
             fir_filter,
-            dc_removal: DcRemoval::new(0.995),
+            dc_removal: DcRemoval::new(DC_REMOVAL_ALPHA),
             shift_phase: 0.0,
             decimation_factor,
             cursor_freq,
@@ -523,8 +558,8 @@ impl Demodulator {
             input_sample_rate,
             mode,
             de_emphasis,
-            agc: Agc::new(actual_output_sr, 10.0, 300.0, 0.3, 50.0),
-            audio_bandpass: AudioBandpass::new(300.0, 3400.0, actual_output_sr, 101),
+            agc: Agc::new(actual_output_sr, DEFAULT_AGC_ATTACK_MS, DEFAULT_AGC_DECAY_MS, DEFAULT_AGC_TARGET_LEVEL, DEFAULT_AGC_MAX_GAIN_DB),
+            audio_bandpass: AudioBandpass::new(DEFAULT_BANDPASS_LOW_HZ, DEFAULT_BANDPASS_HIGH_HZ, actual_output_sr, FIR_NUM_TAPS),
             prev_sample: IqSample::new(0.0, 0.0),
             pre_agc_rms: 0.0,
         }
@@ -612,7 +647,7 @@ impl Demodulator {
 
     /// Update the channel bandwidth. Recalculates the FIR filter.
     pub fn set_channel_bw(&mut self, bw: f64) {
-        self.fir_filter = FirFilter::low_pass(bw / 2.0, self.input_sample_rate, 101);
+        self.fir_filter = FirFilter::low_pass(bw / 2.0, self.input_sample_rate, FIR_NUM_TAPS);
     }
 
     /// Set the demodulation mode. Reconfigures de-emphasis and resets FM state.
@@ -622,7 +657,7 @@ impl Demodulator {
             DemodMode::FM => {
                 #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
                 let output_sr = self.input_sample_rate / self.decimation_factor as f64;
-                Some(DeEmphasis::new(output_sr, 50e-6))
+                Some(DeEmphasis::new(output_sr, FM_DEEMPHASIS_TAU))
             }
             _ => None,
         };

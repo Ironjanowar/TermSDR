@@ -23,6 +23,18 @@ use termsdr::config::CliArgs;
 use termsdr::dsp::fft::FftProcessor;
 use termsdr::server::ServerConfig;
 use termsdr::types::{AppConfig, FftResult, IqSample, SourceType};
+
+/// Audio output sample rate in Hz.
+const AUDIO_OUTPUT_SAMPLE_RATE: u32 = 48000;
+
+/// Default channel bandwidth in Hz.
+const DEFAULT_CHANNEL_BW: f64 = 25_000.0;
+
+/// DSP receive timeout in milliseconds.
+const DSP_RECV_TIMEOUT_MS: u64 = 100;
+
+/// Target TUI frame time in milliseconds (~30 FPS).
+const TUI_FRAME_TIME_MS: u64 = 33;
 use termsdr::ui::{
     draw_ui, init_terminal, restore_terminal, show_source_selection, App, SourceSelection,
 };
@@ -161,7 +173,7 @@ fn run_pipeline(config: AppConfig, args: &CliArgs) -> Result<()> {
 
     // Thread 4: Audio
     let cursor_freq = config.center_freq; // cursor starts at center
-    let channel_bw = 25_000.0;
+    let channel_bw = DEFAULT_CHANNEL_BW;
 
     // For headless mode, create a channel for WS audio frames
     let (ws_audio_tx, ws_audio_rx) = if args.headless {
@@ -196,14 +208,14 @@ fn run_pipeline(config: AppConfig, args: &CliArgs) -> Result<()> {
                 if let Some(tx) = ws_audio_tx {
                     Box::new(WebSocketSink::new(tx, format_atomic))
                 } else {
-                    Box::new(NullSink::new(48000))
+                    Box::new(NullSink::new(AUDIO_OUTPUT_SAMPLE_RATE))
                 }
             } else {
                 match CpalSink::new(None) {
                     Ok(s) => Box::new(s),
                     Err(e) => {
                         tracing::warn!("Audio: no output device ({e}), audio disabled");
-                        Box::new(NullSink::new(48000))
+                        Box::new(NullSink::new(AUDIO_OUTPUT_SAMPLE_RATE))
                     }
                 }
             };
@@ -341,7 +353,7 @@ fn dsp_thread(
     let mut current_center_freq = center_freq;
 
     while running.load(Ordering::Relaxed) {
-        match rx.recv_timeout(Duration::from_millis(100)) {
+        match rx.recv_timeout(Duration::from_millis(DSP_RECV_TIMEOUT_MS)) {
             Ok(samples) => {
                 // Check for averaging change
                 let new_avg = shared_averaging.load(Ordering::Relaxed);
@@ -377,7 +389,7 @@ fn tui_thread(
     app.shared_center_freq = shared_center_freq;
     app.shared_averaging = Some(shared_averaging);
 
-    let target_frame_time = Duration::from_millis(33); // ~30 FPS
+    let target_frame_time = Duration::from_millis(TUI_FRAME_TIME_MS); // ~30 FPS
 
     while !app.should_quit && running.load(Ordering::Relaxed) {
         let frame_start = Instant::now();

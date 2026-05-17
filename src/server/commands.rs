@@ -12,6 +12,33 @@ const VFO_COLOR_NAMES: [&str; 8] = [
     "red", "green", "blue", "magenta", "cyan", "lightred", "white", "lightmagenta",
 ];
 
+/// Minimum allowed sample rate / bandwidth in Hz (256 kHz).
+const MIN_BANDWIDTH: f64 = 256_000.0;
+
+/// Maximum allowed sample rate / bandwidth in Hz (3.2 MHz).
+const MAX_BANDWIDTH: f64 = 3_200_000.0;
+
+/// Zoom-in bandwidth multiplier (reduce by 20%).
+const ZOOM_IN_FACTOR: f64 = 0.8;
+
+/// Zoom-out bandwidth multiplier (increase by 25%).
+const ZOOM_OUT_FACTOR: f64 = 1.25;
+
+/// Maximum volume level.
+const MAX_VOLUME: u8 = 100;
+
+/// Squelch threshold below which squelch is disabled (dB).
+const SQUELCH_OFF_THRESHOLD: f32 = -100.0;
+
+/// Minimum allowed channel bandwidth in Hz (1 kHz).
+const MIN_CHANNEL_BW: f64 = 1_000.0;
+
+/// Maximum allowed channel bandwidth in Hz (1 MHz).
+const MAX_CHANNEL_BW: f64 = 1_000_000.0;
+
+/// Maximum number of VFOs allowed.
+const MAX_VFOS: usize = 8;
+
 /// Shared mutable state for the headless server.
 /// Mirrors the fields from `App` that the WS protocol exposes.
 #[derive(Debug, Clone)]
@@ -144,7 +171,7 @@ pub fn dispatch(
         }
 
         Command::SetBandwidth { value } => {
-            if *value < 256_000.0 || *value > 3_200_000.0 {
+            if *value < MIN_BANDWIDTH || *value > MAX_BANDWIDTH {
                 return (DispatchResult::Error(ErrorMessage::new(
                     "set_bandwidth", "Bandwidth must be between 256kHz and 3.2MHz"
                 )), audio_msgs);
@@ -154,8 +181,8 @@ pub fn dispatch(
 
         Command::Zoom { direction } => {
             match direction.as_str() {
-                "in" => state.sample_rate = (state.sample_rate * 0.8).max(256_000.0),
-                "out" => state.sample_rate = (state.sample_rate * 1.25).min(3_200_000.0),
+                "in" => state.sample_rate = (state.sample_rate * ZOOM_IN_FACTOR).max(MIN_BANDWIDTH),
+                "out" => state.sample_rate = (state.sample_rate * ZOOM_OUT_FACTOR).min(MAX_BANDWIDTH),
                 _ => {
                     return (DispatchResult::Error(ErrorMessage::new(
                         "zoom", "Direction must be 'in' or 'out'"
@@ -166,7 +193,7 @@ pub fn dispatch(
 
         // ── Audio ──
         Command::SetVolume { value } => {
-            if *value > 100 {
+            if *value > MAX_VOLUME {
                 return (DispatchResult::Error(ErrorMessage::new(
                     "set_volume", "Volume must be 0-100"
                 )), audio_msgs);
@@ -177,7 +204,7 @@ pub fn dispatch(
 
         Command::SetSquelch { value } => {
             state.squelch = *value;
-            let sq = if *value <= -100.0 { None } else { Some(*value) };
+            let sq = if *value <= SQUELCH_OFF_THRESHOLD { None } else { Some(*value) };
             send(&mut audio_msgs, AudioControl::SetSquelch(sq));
         }
 
@@ -198,7 +225,7 @@ pub fn dispatch(
         }
 
         Command::SetChannelBw { value } => {
-            if *value < 1_000.0 || *value > 1_000_000.0 {
+            if *value < MIN_CHANNEL_BW || *value > MAX_CHANNEL_BW {
                 return (DispatchResult::Error(ErrorMessage::new(
                     "set_channel_bw", "Channel BW must be between 1kHz and 1MHz"
                 )), audio_msgs);
@@ -215,7 +242,7 @@ pub fn dispatch(
 
         // ── VFOs ──
         Command::VfoAdd { freq, channel_bw, mode } => {
-            if state.vfos.len() >= 8 {
+            if state.vfos.len() >= MAX_VFOS {
                 return (DispatchResult::Error(ErrorMessage::new(
                     "vfo_add", "Maximum 8 VFOs"
                 )), audio_msgs);

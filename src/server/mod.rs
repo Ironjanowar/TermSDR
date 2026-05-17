@@ -1,6 +1,7 @@
 //! WebSocket server for headless mode: remote control and FFT/audio streaming.
 
 pub(crate) mod commands;
+pub(crate) mod error;
 pub(crate) mod protocol;
 pub(crate) mod ws;
 

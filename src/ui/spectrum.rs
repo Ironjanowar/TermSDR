@@ -1,5 +1,8 @@
 //! Spectrum display widget: frequency-domain power visualization.
 
+/// dB floor value for empty/missing spectrum data.
+const SPECTRUM_DB_FLOOR: f32 = -100.0;
+
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -379,7 +382,7 @@ fn spectrum_gradient(intensity: f32) -> Color {
 /// Resample FFT bins to fit chart width using max-pooling.
 pub fn resample_bins(bins: &[f32], target_width: usize) -> Vec<f32> {
     if target_width == 0 || bins.is_empty() {
-        return vec![-100.0; target_width.max(1)];
+        return vec![SPECTRUM_DB_FLOOR; target_width.max(1)];
     }
 
     let mut result = Vec::with_capacity(target_width);
@@ -399,7 +402,7 @@ pub fn resample_bins(bins: &[f32], target_width: usize) -> Vec<f32> {
                 .fold(f32::NEG_INFINITY, f32::max);
             result.push(max_val);
         } else {
-            result.push(bins.get(start).copied().unwrap_or(-100.0));
+            result.push(bins.get(start).copied().unwrap_or(SPECTRUM_DB_FLOOR));
         }
     }
 

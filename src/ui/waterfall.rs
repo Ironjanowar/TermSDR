@@ -1,5 +1,8 @@
 //! Waterfall display widget: scrolling time-frequency power visualization.
 
+/// dB floor value for empty/missing waterfall data.
+const WATERFALL_DB_FLOOR: f32 = -100.0;
+
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -213,7 +216,7 @@ impl Widget for WaterfallWidget<'_> {
 #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
 fn resample_waterfall_row(bins: &[f32], target_width: usize) -> Vec<f32> {
     if target_width == 0 || bins.is_empty() {
-        return vec![-100.0; target_width.max(1)];
+        return vec![WATERFALL_DB_FLOOR; target_width.max(1)];
     }
 
     #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
@@ -230,7 +233,7 @@ fn resample_waterfall_row(bins: &[f32], target_width: usize) -> Vec<f32> {
                 let sum: f32 = bins[start..end].iter().sum();
                 sum / (end - start) as f32
             } else {
-                bins.get(start).copied().unwrap_or(-100.0)
+                bins.get(start).copied().unwrap_or(WATERFALL_DB_FLOOR)
             }
         })
         .collect()

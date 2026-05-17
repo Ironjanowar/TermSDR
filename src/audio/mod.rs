@@ -9,6 +9,9 @@ pub mod ws_sink;
 use crate::types::IqSample;
 use demod::{Demodulator, DemodMode};
 
+/// dB floor value for silence/zero-power audio.
+const AUDIO_DB_FLOOR: f32 = -200.0;
+
 // ============================================================================
 // Audio Sink Abstraction
 // ============================================================================
@@ -281,7 +284,7 @@ fn check_squelch(audio: &[f32], squelch: Option<f32>) -> bool {
         let power_db = if rms > 1e-20 {
             20.0 * (rms as f32).log10()
         } else {
-            -200.0
+            AUDIO_DB_FLOOR
         };
         power_db < threshold_db
     } else {

@@ -40,6 +40,17 @@ const TAG_AUDIO: u8 = 0x02;
 #[allow(dead_code)]
 const OPUS_FRAME_SAMPLES: usize = 960;
 
+/// Audio sample rate for WebSocket streaming in Hz.
+const WS_AUDIO_SAMPLE_RATE: u32 = 48000;
+
+/// Opus encoder bitrate in bits per second.
+#[allow(dead_code)]
+const OPUS_BITRATE: i32 = 32000;
+
+/// Maximum size of an encoded Opus frame in bytes.
+#[allow(dead_code)]
+const MAX_OPUS_FRAME_BYTES: usize = 4000;
+
 /// WebSocket audio sink that sends audio frames to connected clients
 /// via a crossbeam channel (bridging sync audio thread → async WS broadcast).
 pub struct WebSocketSink {
@@ -67,9 +78,9 @@ impl WebSocketSink {
     ) -> Self {
         #[cfg(feature = "opus")]
         let encoder = {
-            match opus::Encoder::new(48000, opus::Channels::Mono, opus::Application::Voip) {
+            match opus::Encoder::new(WS_AUDIO_SAMPLE_RATE, opus::Channels::Mono, opus::Application::Voip) {
                 Ok(mut enc) => {
-                    let _ = enc.set_bitrate(opus::Bitrate::Bits(32000));
+                    let _ = enc.set_bitrate(opus::Bitrate::Bits(OPUS_BITRATE));
                     Some(enc)
                 }
                 Err(e) => {
@@ -84,7 +95,7 @@ impl WebSocketSink {
         Self {
             tx,
             format,
-            sample_rate: 48000,
+            sample_rate: WS_AUDIO_SAMPLE_RATE,
             buffer: Vec::with_capacity(OPUS_FRAME_SAMPLES * 2),
             #[cfg(feature = "opus")]
             encoder,
@@ -117,7 +128,7 @@ impl WebSocketSink {
     #[cfg(feature = "opus")]
     fn send_opus_frame(&mut self, samples: &[f32]) {
         if let Some(ref mut encoder) = self.encoder {
-            let mut output = vec![0u8; 4000]; // max opus frame
+            let mut output = vec![0u8; MAX_OPUS_FRAME_BYTES];
             match encoder.encode_float(samples, &mut output) {
                 Ok(len) => {
                     let mut frame = Vec::with_capacity(2 + len);

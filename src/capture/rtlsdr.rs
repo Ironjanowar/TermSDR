@@ -6,6 +6,11 @@
 use crate::types::IqSample;
 use super::Source;
 
+/// RTL-SDR unsigned 8-bit DC center value.
+/// Raw u8 samples are centered at 127.5; subtracting this and dividing by it
+/// maps the range [0, 255] to approximately [-1.0, 1.0].
+const RTL_SDR_DC_OFFSET: f32 = 127.5;
+
 /// Convert raw RTL-SDR u8 IQ data to Complex<f32> samples.
 ///
 /// RTL-SDR outputs unsigned 8-bit IQ pairs. This converts them to the
@@ -16,8 +21,8 @@ use super::Source;
 pub(crate) fn convert_u8_to_iq(raw: &[u8], output: &mut [IqSample]) -> usize {
     let samples = (raw.len() / 2).min(output.len());
     for i in 0..samples {
-        let i_val = (f32::from(raw[i * 2]) - 127.5) / 127.5;
-        let q_val = (f32::from(raw[i * 2 + 1]) - 127.5) / 127.5;
+        let i_val = (f32::from(raw[i * 2]) - RTL_SDR_DC_OFFSET) / RTL_SDR_DC_OFFSET;
+        let q_val = (f32::from(raw[i * 2 + 1]) - RTL_SDR_DC_OFFSET) / RTL_SDR_DC_OFFSET;
         output[i] = IqSample::new(i_val, q_val);
     }
     samples

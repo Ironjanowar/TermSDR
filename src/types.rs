@@ -6,6 +6,21 @@ use serde::{Deserialize, Serialize};
 /// An IQ sample is a complex f32 value (I = real, Q = imaginary).
 pub type IqSample = Complex<f32>;
 
+/// Default center frequency in Hz (100 MHz, FM broadcast band).
+pub const DEFAULT_CENTER_FREQ: f64 = 100_000_000.0;
+
+/// Default sample rate in Hz (2.048 MS/s).
+pub const DEFAULT_SAMPLE_RATE: f64 = 2_048_000.0;
+
+/// Default FFT size (number of bins).
+pub const DEFAULT_FFT_SIZE: usize = 2048;
+
+/// Default test signal frequency offset in Hz (+100 kHz).
+pub const DEFAULT_TEST_SIGNAL_OFFSET: f64 = 100_000.0;
+
+/// Default test signal amplitude.
+pub const DEFAULT_TEST_SIGNAL_AMPLITUDE: f32 = 0.8;
+
 /// Result of an FFT computation: power values in dB.
 #[derive(Debug, Clone)]
 pub struct FftResult {
@@ -89,13 +104,13 @@ pub enum SourceType {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            center_freq: 100_000_000.0, // 100 MHz (FM broadcast)
-            sample_rate: 2_048_000.0,    // 2.048 MS/s
-            fft_size: 2048,
+            center_freq: DEFAULT_CENTER_FREQ,
+            sample_rate: DEFAULT_SAMPLE_RATE,
+            fft_size: DEFAULT_FFT_SIZE,
             gain: None, // AGC
             ppm: 0,
             source: SourceType::Test {
-                signals: vec![(100_000.0, 0.8)], // 100 kHz offset, amplitude 0.8
+                signals: vec![(DEFAULT_TEST_SIGNAL_OFFSET, DEFAULT_TEST_SIGNAL_AMPLITUDE)],
             },
         }
     }

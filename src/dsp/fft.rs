@@ -6,6 +6,9 @@ use rustfft::{FftPlanner, num_complex::Complex};
 
 use crate::types::{FftResult, IqSample};
 
+/// Floor value in dB for very small/zero power values.
+const DB_FLOOR: f32 = -200.0;
+
 /// FFT processor with windowing and dB conversion.
 pub struct FftProcessor {
     fft_size: usize,
@@ -137,7 +140,7 @@ pub(crate) fn power_to_db(power: f32, fft_size: usize) -> f32 {
     if normalized > 1e-20 {
         10.0 * normalized.log10()
     } else {
-        -200.0 // Floor for very small values
+        DB_FLOOR // Floor for very small values
     }
 }
 

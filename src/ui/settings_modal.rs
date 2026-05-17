@@ -1,5 +1,8 @@
 //! Settings modal overlay for adjusting runtime parameters.
 
+/// Squelch "off" threshold in dB. Values at or below this disable squelch.
+const SQUELCH_OFF_DB: f32 = -120.0;
+
 use crate::audio::AudioControl;
 use crate::audio::demod::DemodMode;
 
@@ -97,34 +100,34 @@ impl SettingsModal {
                 label: "Volume",
                 section: None,
                 kind: SettingsItemKind::Slider {
-                    value: 80.0, min: 0.0, max: 100.0,
+                    value: f64::from(super::DEFAULT_VOLUME), min: 0.0, max: 100.0,
                     fine_step: 1.0, coarse_step: 10.0, unit: "%",
                 },
                 id: SettingsItemId::Volume,
                 help_text: "Master audio output volume. Affects all demodulated audio.",
-                default_kind: DefaultKind::Slider(80.0),
+                default_kind: DefaultKind::Slider(f64::from(super::DEFAULT_VOLUME)),
             },
             SettingsItem {
                 label: "Squelch",
                 section: None,
                 kind: SettingsItemKind::Slider {
-                    value: -120.0, min: -120.0, max: 0.0,
+                    value: f64::from(SQUELCH_OFF_DB), min: f64::from(SQUELCH_OFF_DB), max: 0.0,
                     fine_step: 1.0, coarse_step: 10.0, unit: "dB",
                 },
                 id: SettingsItemId::Squelch,
                 help_text: "Mutes audio when signal power is below this threshold. Set to a level just above the noise floor to silence static between transmissions.",
-                default_kind: DefaultKind::Slider(-120.0),
+                default_kind: DefaultKind::Slider(f64::from(SQUELCH_OFF_DB)),
             },
             SettingsItem {
                 label: "Channel BW",
                 section: None,
                 kind: SettingsItemKind::Slider {
-                    value: 8000.0, min: 1000.0, max: 250_000.0,
+                    value: crate::audio::demod::AM_DEFAULT_CHANNEL_BW, min: 1000.0, max: 250_000.0,
                     fine_step: 500.0, coarse_step: 5000.0, unit: "Hz",
                 },
                 id: SettingsItemId::ChannelBw,
                 help_text: "RF channel bandwidth. Narrower = less noise but may cut signal. For AM aviation: 6-8 kHz. For FM broadcast: 200 kHz.",
-                default_kind: DefaultKind::Slider(8000.0),
+                default_kind: DefaultKind::Slider(crate::audio::demod::AM_DEFAULT_CHANNEL_BW),
             },
             SettingsItem {
                 label: "Demod Mode",
@@ -150,40 +153,40 @@ impl SettingsModal {
                 label: "Attack",
                 section: Some("AGC"),
                 kind: SettingsItemKind::Slider {
-                    value: 10.0, min: 1.0, max: 100.0,
+                    value: crate::audio::demod::DEFAULT_AGC_ATTACK_MS, min: 1.0, max: 100.0,
                     fine_step: 1.0, coarse_step: 10.0, unit: "ms",
                 },
                 id: SettingsItemId::AgcAttack,
                 help_text: "How fast AGC reduces gain when a loud signal arrives. Lower = faster response, prevents clipping.",
-                default_kind: DefaultKind::Slider(10.0),
+                default_kind: DefaultKind::Slider(crate::audio::demod::DEFAULT_AGC_ATTACK_MS),
             },
             SettingsItem {
                 label: "Decay",
                 section: Some("AGC"),
                 kind: SettingsItemKind::Slider {
-                    value: 300.0, min: 50.0, max: 2000.0,
+                    value: crate::audio::demod::DEFAULT_AGC_DECAY_MS, min: 50.0, max: 2000.0,
                     fine_step: 10.0, coarse_step: 100.0, unit: "ms",
                 },
                 id: SettingsItemId::AgcDecay,
                 help_text: "How fast AGC increases gain when signal gets weaker. Higher = slower, avoids amplifying noise between words.",
-                default_kind: DefaultKind::Slider(300.0),
+                default_kind: DefaultKind::Slider(crate::audio::demod::DEFAULT_AGC_DECAY_MS),
             },
             SettingsItem {
                 label: "Target Level",
                 section: Some("AGC"),
                 kind: SettingsItemKind::Slider {
-                    value: 0.3, min: 0.05, max: 1.0,
+                    value: f64::from(crate::audio::demod::DEFAULT_AGC_TARGET_LEVEL), min: 0.05, max: 1.0,
                     fine_step: 0.05, coarse_step: 0.1, unit: "",
                 },
                 id: SettingsItemId::AgcTarget,
                 help_text: "Desired RMS output level. Higher = louder normalized output.",
-                default_kind: DefaultKind::Slider(0.3),
+                default_kind: DefaultKind::Slider(f64::from(crate::audio::demod::DEFAULT_AGC_TARGET_LEVEL)),
             },
             SettingsItem {
                 label: "Max Gain",
                 section: Some("AGC"),
                 kind: SettingsItemKind::Slider {
-                    value: 50.0, min: 1.0, max: 100.0,
+                    value: f64::from(crate::audio::demod::DEFAULT_AGC_MAX_GAIN_DB), min: 1.0, max: 100.0,
                     fine_step: 1.0, coarse_step: 10.0, unit: "dB",
                 },
                 id: SettingsItemId::AgcMaxGain,
@@ -203,12 +206,12 @@ impl SettingsModal {
                 label: "Low Cut",
                 section: Some("Audio Filter"),
                 kind: SettingsItemKind::Slider {
-                    value: 300.0, min: 50.0, max: 1000.0,
+                    value: crate::audio::demod::DEFAULT_BANDPASS_LOW_HZ, min: 50.0, max: 1000.0,
                     fine_step: 50.0, coarse_step: 100.0, unit: "Hz",
                 },
                 id: SettingsItemId::BandpassLowCut,
                 help_text: "High-pass cutoff frequency. Removes low-frequency rumble and hum below this frequency. Standard voice: 300 Hz.",
-                default_kind: DefaultKind::Slider(300.0),
+                default_kind: DefaultKind::Slider(crate::audio::demod::DEFAULT_BANDPASS_LOW_HZ),
             },
             SettingsItem {
                 label: "High Cut",
@@ -240,7 +243,7 @@ impl SettingsModal {
                 }
                 SettingsItemId::Squelch => {
                     if let SettingsItemKind::Slider { ref mut value, .. } = item.kind {
-                        *value = f64::from(squelch.unwrap_or(-120.0));
+                        *value = f64::from(squelch.unwrap_or(SQUELCH_OFF_DB));
                     }
                 }
                 SettingsItemId::ChannelBw => {
@@ -420,7 +423,7 @@ impl SettingsModal {
             SettingsItemId::Squelch => {
                 if let SettingsItemKind::Slider { value, .. } = &item.kind {
                     #[allow(clippy::cast_possible_truncation)] // intentional truncation
-                    let sq = if *value <= -120.0 { None } else { Some(*value as f32) };
+                    let sq = if *value <= f64::from(SQUELCH_OFF_DB) { None } else { Some(*value as f32) };
                     Some(AudioControl::SetSquelch(sq))
                 } else { None }
             }

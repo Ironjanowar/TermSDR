@@ -84,12 +84,13 @@ pub struct AgcState {
 
 impl Default for AgcState {
     fn default() -> Self {
+        use crate::audio::demod;
         Self {
             enabled: true,
-            attack_ms: 10.0,
-            decay_ms: 300.0,
-            target_level: 0.3,
-            max_gain_db: 50.0,
+            attack_ms: demod::DEFAULT_AGC_ATTACK_MS,
+            decay_ms: demod::DEFAULT_AGC_DECAY_MS,
+            target_level: demod::DEFAULT_AGC_TARGET_LEVEL,
+            max_gain_db: demod::DEFAULT_AGC_MAX_GAIN_DB,
         }
     }
 }
@@ -107,10 +108,11 @@ pub struct BandpassState {
 
 impl Default for BandpassState {
     fn default() -> Self {
+        use crate::audio::demod;
         Self {
             enabled: true,
-            low_hz: 300.0,
-            high_hz: 3400.0,
+            low_hz: demod::DEFAULT_BANDPASS_LOW_HZ,
+            high_hz: demod::DEFAULT_BANDPASS_HIGH_HZ,
         }
     }
 }
@@ -242,12 +244,12 @@ pub enum Command {
     SetAudioFormat { format: String },
 }
 
-fn default_agc_attack() -> f64 { 10.0 }
-fn default_agc_decay() -> f64 { 300.0 }
-fn default_agc_target() -> f32 { 0.3 }
-fn default_agc_max_gain() -> f32 { 50.0 }
-fn default_bandpass_low() -> f64 { 300.0 }
-fn default_bandpass_high() -> f64 { 3400.0 }
+fn default_agc_attack() -> f64 { crate::audio::demod::DEFAULT_AGC_ATTACK_MS }
+fn default_agc_decay() -> f64 { crate::audio::demod::DEFAULT_AGC_DECAY_MS }
+fn default_agc_target() -> f32 { crate::audio::demod::DEFAULT_AGC_TARGET_LEVEL }
+fn default_agc_max_gain() -> f32 { crate::audio::demod::DEFAULT_AGC_MAX_GAIN_DB }
+fn default_bandpass_low() -> f64 { crate::audio::demod::DEFAULT_BANDPASS_LOW_HZ }
+fn default_bandpass_high() -> f64 { crate::audio::demod::DEFAULT_BANDPASS_HIGH_HZ }
 
 /// Server error response.
 #[derive(Debug, Clone, Serialize, Deserialize)]

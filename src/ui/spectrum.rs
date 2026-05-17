@@ -590,4 +590,34 @@ mod tests {
             .with_squelch(None);
         assert!(widget.squelch.is_none());
     }
+
+    #[test]
+    fn smoke_render_no_data() {
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| {
+            let widget = SpectrumWidget::new(None, -80.0, 0.0);
+            f.render_widget(widget, f.area());
+        }).unwrap();
+    }
+
+    #[test]
+    fn smoke_render_with_fft() {
+        use crate::types::FftResult;
+        let fft = FftResult {
+            bins: vec![-50.0; 256],
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        };
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| {
+            let widget = SpectrumWidget::new(Some(&fft), -80.0, 0.0)
+                .with_cursor(Some(0.5), true, 100e6, Some(-50.0))
+                .with_bandwidth(Some(25_000.0), 100e6, 2.048e6)
+                .with_squelch(Some(-60.0))
+                .with_scan(true);
+            f.render_widget(widget, f.area());
+        }).unwrap();
+    }
 }

@@ -300,4 +300,28 @@ mod tests {
         assert_eq!(result.len(), 2);
         // Just verify no panic
     }
+
+    #[test]
+    fn smoke_render_empty() {
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let history: Vec<Vec<f32>> = Vec::new();
+        terminal.draw(|f| {
+            let widget = WaterfallWidget::new(&history, -80.0, 0.0);
+            f.render_widget(widget, f.area());
+        }).unwrap();
+    }
+
+    #[test]
+    fn smoke_render_with_data() {
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let history: Vec<Vec<f32>> = (0..10).map(|_| vec![-50.0; 64]).collect();
+        terminal.draw(|f| {
+            let widget = WaterfallWidget::new(&history, -80.0, 0.0)
+                .with_cursor(Some(0.5), true)
+                .with_bandwidth(Some(25_000.0), 100e6, 100e6, 2.048e6);
+            f.render_widget(widget, f.area());
+        }).unwrap();
+    }
 }

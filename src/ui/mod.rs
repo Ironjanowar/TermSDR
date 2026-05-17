@@ -3097,4 +3097,86 @@ mod tests {
         app.apply_command_action(CommandAction::SetScanInterval(200));
         assert_eq!(app.scan_interval_ms, 200);
     }
+
+    #[test]
+    fn smoke_draw_ui_default() {
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let app = App::new(AppConfig::default(), None);
+        terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    }
+
+    #[test]
+    fn smoke_draw_ui_with_fft() {
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new(AppConfig::default(), None);
+        app.push_fft(FftResult {
+            bins: vec![-50.0; 1024],
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        });
+        terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    }
+
+    #[test]
+    fn smoke_draw_ui_with_overlays() {
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new(AppConfig::default(), None);
+        app.push_fft(FftResult {
+            bins: vec![-50.0; 1024],
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        });
+        app.show_help = true;
+        terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    }
+
+    #[test]
+    fn smoke_draw_ui_freq_input() {
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new(AppConfig::default(), None);
+        app.freq_input_mode = true;
+        app.freq_input_buf = "100M".to_string();
+        terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    }
+
+    #[test]
+    fn smoke_draw_ui_bw_input() {
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new(AppConfig::default(), None);
+        app.bw_input_mode = true;
+        app.bw_input_buf = "2M".to_string();
+        terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    }
+
+    #[test]
+    fn smoke_draw_ui_command_palette() {
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new(AppConfig::default(), None);
+        app.command_palette_active = true;
+        app.command_palette.input = "freq".to_string();
+        terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    }
+
+    #[test]
+    fn smoke_draw_ui_settings_modal() {
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new(AppConfig::default(), None);
+        app.settings_modal.visible = true;
+        terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    }
+
+    #[test]
+    fn smoke_draw_ui_small_terminal() {
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let app = App::new(AppConfig::default(), None);
+        terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    }
 }

@@ -305,6 +305,24 @@ pub fn color_to_string(color: ratatui::style::Color) -> String {
 mod tests {
     use super::*;
     use crate::types::FftResult;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn spectrum_encode_decode_bins_roundtrip(
+            num_bins in 0usize..=2048
+        ) {
+            let bins: Vec<f32> = vec![-50.0; num_bins];
+            let fft = FftResult { bins: bins.clone(), center_freq: 100e6, sample_rate: 2.048e6 };
+            let encoded = encode_spectrum_frame(&fft);
+            let (ts, decoded_bins) = decode_spectrum_frame(&encoded).unwrap();
+            prop_assert!(ts > 0);
+            prop_assert_eq!(decoded_bins.len(), num_bins);
+            for (a, b) in bins.iter().zip(decoded_bins.iter()) {
+                prop_assert!((a - b).abs() < f32::EPSILON);
+            }
+        }
+    }
 
     #[test]
     fn test_encode_decode_spectrum_frame_roundtrip() {

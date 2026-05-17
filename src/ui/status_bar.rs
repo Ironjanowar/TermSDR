@@ -293,4 +293,25 @@ mod tests {
             "FILE: test.iq"
         );
     }
+
+    #[test]
+    fn smoke_render_status_bar() {
+        let backend = ratatui::backend::TestBackend::new(120, 3);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| {
+            let widget = StatusBarWidget::new(
+                100_000_000.0,
+                2_048_000.0,
+                None,
+                DisplaySource::Test,
+                30.0,
+            ).with_cursor(Some((100e6, Some(-50.0))))
+            .with_channel_bw(25_000.0)
+            .with_audio(80, true, Some(-60.0))
+            .with_demod_mode("AM")
+            .with_averaging(4)
+            .with_scan(true);
+            f.render_widget(widget, f.area());
+        }).unwrap();
+    }
 }

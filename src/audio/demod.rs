@@ -887,6 +887,38 @@ impl AudioBandpass {
 mod tests {
     use super::*;
     use crate::audio::test_signal::{generate_am_signal, generate_fm_signal, generate_tone};
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn decimate_output_length(input_len in 1usize..=1000, factor in 1usize..=16) {
+            let input: Vec<IqSample> = vec![IqSample::new(0.0, 0.0); input_len];
+            let output = decimate(&input, factor);
+            let expected = (input_len + factor - 1) / factor;
+            prop_assert_eq!(output.len(), expected);
+        }
+
+        #[test]
+        fn dc_removal_output_mean_near_zero(len in 1000usize..=5000, dc_offset in -10.0f32..10.0) {
+            let input: Vec<f32> = vec![dc_offset; len];
+            let mut remover = DcRemoval::new(DC_REMOVAL_ALPHA);
+            let output = remover.process(&input);
+            // After settling, last samples should be near zero
+            let tail = &output[output.len() - 100..];
+            let mean: f32 = tail.iter().sum::<f32>() / tail.len() as f32;
+            prop_assert!(mean.abs() < 0.5, "DC removal mean {} too high for offset {}", mean, dc_offset);
+        }
+
+        #[test]
+        fn fm_demod_constant_frequency_near_zero(len in 10usize..=500) {
+            // Constant frequency (no modulation) should produce near-zero output
+            let carrier: Vec<IqSample> = (0..len).map(|_| IqSample::new(1.0, 0.0)).collect();
+            let output = fm_demod(&carrier);
+            for &s in &output[1..] {
+                prop_assert!(s.abs() < 0.01, "FM demod of constant carrier should be near zero, got {}", s);
+            }
+        }
+    }
 
     // ========================================================================
     // 1. Frequency shift tests

@@ -148,6 +148,37 @@ pub(crate) fn power_to_db(power: f32, fft_size: usize) -> f32 {
 mod tests {
     use super::*;
     use crate::types::IqSample;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn hanning_window_values_in_unit_range(size in 2usize..=4096) {
+            let window = hanning_window(size);
+            for &v in &window {
+                prop_assert!(v >= 0.0 && v <= 1.0, "Window value {} out of [0,1]", v);
+            }
+        }
+
+        #[test]
+        fn hanning_window_is_symmetric(size in 4usize..=4096) {
+            let window = hanning_window(size);
+            // Periodic Hanning: w[i] == w[N-i] for i in 1..N
+            for i in 1..size / 2 {
+                prop_assert!(
+                    (window[i] - window[size - i]).abs() < 1e-5,
+                    "Asymmetry at {}: {} vs {}", i, window[i], window[size - i]
+                );
+            }
+        }
+
+        #[test]
+        fn power_to_db_is_monotonic(a in 0.001f32..1000.0, b in 0.001f32..1000.0) {
+            let fft_size = 1024;
+            if a < b {
+                prop_assert!(power_to_db(a, fft_size) <= power_to_db(b, fft_size));
+            }
+        }
+    }
 
     #[test]
     fn test_hanning_window_shape() {

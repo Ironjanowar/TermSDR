@@ -2,7 +2,7 @@
 
 > **CubicSDR-like experience, but in the terminal.**
 
-[![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange?logo=rust)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.87%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-557%20passing-brightgreen)](#testing)
 
@@ -34,7 +34,7 @@ A terminal-based Software Defined Radio application built with Rust and [ratatui
 
 ### Prerequisites
 
-- [Rust toolchain](https://rustup.rs/) (1.70+)
+- [Rust toolchain](https://rustup.rs/) (1.87+; required by Rubato 5.1)
 - ALSA development libraries (Linux): `libasound2-dev` or equivalent
 - **For RTL-SDR hardware support:** `librtlsdr-dev` (e.g. `sudo apt install librtlsdr-dev`)
 

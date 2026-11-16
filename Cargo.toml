@@ -2,6 +2,7 @@
 name = "termsdr"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.87"
 description = "Terminal-based SDR application with spectrum and waterfall displays"
 
 [features]
@@ -29,6 +30,7 @@ opus = { version = "0.3", optional = true }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+rubato = "=5.1.0"
 
 [dev-dependencies]
 approx = "0.5"

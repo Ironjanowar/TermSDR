@@ -1,6 +1,7 @@
 //! Audio pipeline: IQ demodulation, mixing, and output routing.
 
 pub(crate) mod demod;
+pub mod profile;
 #[allow(dead_code)]
 pub(crate) mod test_signal;
 pub mod cpal_sink;

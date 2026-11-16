@@ -1,6 +1,6 @@
 //! Signal capture sources: RTL-SDR hardware, IQ file replay, and synthetic test signals.
 
-pub(crate) mod file;
+pub mod file;
 pub mod rtlsdr;
 pub mod test_signal;
 

@@ -16,6 +16,7 @@ use crossterm::event::{self, Event};
 use termsdr::audio::cpal_sink::CpalSink;
 use termsdr::audio::ws_sink::{WebSocketSink, WsAudioFormat};
 use termsdr::audio::{audio_thread, AudioControl, AudioSink, NullSink};
+use termsdr::capture::file::FileSource;
 use termsdr::capture::rtlsdr::RtlSdrSource;
 use termsdr::capture::test_signal::TestSource;
 use termsdr::capture::Source;
@@ -117,7 +118,30 @@ fn main() -> Result<()> {
 }
 
 #[allow(clippy::too_many_lines, clippy::similar_names)] // pipeline setup with multiple threads; tx/rx pairs
-fn run_pipeline(config: AppConfig, args: &CliArgs) -> Result<()> {
+fn run_pipeline(mut config: AppConfig, args: &CliArgs) -> Result<()> {
+    // Open the IQ file before the threads start: its metadata (SigMF sidecar or the
+    // explicit raw-file flags) is authoritative for replay, so the FFT axis, audio
+    // decimation, and pacing all use the rates the recording actually has.
+    let mut file_source = None;
+    if let SourceType::File { path } = &config.source {
+        let source = FileSource::new(
+            path,
+            args.iq_format,
+            args.file_sample_rate,
+            args.file_center_frequency,
+        )?;
+        config.sample_rate = source.sample_rate();
+        config.center_freq = source.center_freq();
+        tracing::info!(
+            "File replay: {} ({:?}) at {:.0} Hz, centered at {:.0} Hz",
+            path,
+            source.format(),
+            source.sample_rate(),
+            source.center_freq()
+        );
+        file_source = Some(source);
+    }
+
     // Create channels
     // Capture -> DSP: IQ blocks
     let (iq_tx_dsp, iq_rx_dsp): (Sender<Vec<IqSample>>, Receiver<Vec<IqSample>>) = bounded(4);
@@ -158,7 +182,7 @@ fn run_pipeline(config: AppConfig, args: &CliArgs) -> Result<()> {
     let capture_handle = thread::Builder::new()
         .name("capture".into())
         .spawn(move || {
-            capture_thread(source_type, sample_rate, center_freq, fft_size, gain, ppm, iq_tx_dsp, iq_tx_audio, running_capture, shared_freq_capture);
+            capture_thread(source_type, file_source, sample_rate, center_freq, fft_size, gain, ppm, iq_tx_dsp, iq_tx_audio, running_capture, shared_freq_capture);
         })?;
 
     // Thread 2: DSP
@@ -260,6 +284,7 @@ fn run_pipeline(config: AppConfig, args: &CliArgs) -> Result<()> {
 #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)] // thread entry point takes ownership
 fn capture_thread(
     source_type: SourceType,
+    file_source: Option<FileSource>,
     sample_rate: f64,
     center_freq: f64,
     fft_size: usize,
@@ -278,9 +303,13 @@ fn capture_thread(
             }
             Box::new(src)
         }
-        SourceType::File { path: _ } => {
-            tracing::warn!("File replay not yet implemented");
-            return;
+        SourceType::File { .. } => {
+            let Some(src) = file_source else {
+                tracing::error!("File replay source was not opened");
+                running.store(false, Ordering::SeqCst);
+                return;
+            };
+            Box::new(src)
         }
         SourceType::RtlSdr { device_index } => {
             match RtlSdrSource::new(device_index, center_freq, sample_rate, gain, ppm) {
@@ -295,7 +324,14 @@ fn capture_thread(
 
     let block_size = fft_size;
     #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
-    let block_duration = Duration::from_secs_f64(block_size as f64 / sample_rate);
+    let block_secs = block_size as f64 / sample_rate;
+    // `Duration::from_secs_f64` panics on a value it cannot represent, which would take
+    // the capture thread down before the first read. Pacing is a soft constraint, so
+    // fall back to a one-second floor and keep the pipeline running instead.
+    let block_duration = Duration::try_from_secs_f64(block_secs).unwrap_or_else(|_| {
+        tracing::warn!("Capture: cannot represent a {block_secs} s block duration; pacing at 1 s");
+        Duration::from_secs(1)
+    });
     let mut buffer = vec![IqSample::new(0.0, 0.0); block_size];
 
     let mut current_center_freq = center_freq;
@@ -315,14 +351,28 @@ fn capture_thread(
         }
 
         match source.read_samples(&mut buffer) {
-            Ok(_) => {
+            // Ok(0) is the Source EOF convention: the file is exhausted, so stop the
+            // pipeline instead of spinning on stale samples.
+            Ok(0) => {
+                tracing::info!("Capture source exhausted; stopping");
+                running.store(false, Ordering::SeqCst);
+                break;
+            }
+            Ok(count) => {
+                // Only the samples actually produced are valid; `buffer[count..]` still
+                // holds the previous block and must never reach DSP or audio.
+                let block = buffer[..count].to_vec();
                 // Send to DSP (non-blocking)
-                let _ = tx_dsp.try_send(buffer.clone());
+                let _ = tx_dsp.try_send(block.clone());
                 // Send to Audio (non-blocking, tolerate drops)
-                let _ = tx_audio.try_send(buffer.clone());
+                let _ = tx_audio.try_send(block);
             }
             Err(e) => {
                 tracing::error!("Capture error: {e}");
+                // A read error is as terminal as EOF: without clearing the flag the DSP,
+                // audio, and server threads keep looping against a dead source, which
+                // hangs a headless server and freezes the TUI.
+                running.store(false, Ordering::SeqCst);
                 break;
             }
         }
@@ -355,6 +405,11 @@ fn dsp_thread(
     while running.load(Ordering::Relaxed) {
         match rx.recv_timeout(Duration::from_millis(DSP_RECV_TIMEOUT_MS)) {
             Ok(samples) => {
+                // A short final block from a file source cannot fill an FFT frame, and
+                // `FftProcessor::process` requires at least `fft_size` samples.
+                if samples.len() < fft_size {
+                    continue;
+                }
                 // Check for averaging change
                 let new_avg = shared_averaging.load(Ordering::Relaxed);
                 if new_avg != current_avg {
@@ -419,4 +474,231 @@ fn tui_thread(
 
     restore_terminal(&mut terminal)?;
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    //! Capture-thread stop contract (blocker-fix round).
+    //!
+    //! # Why this test lives in the binary crate, and why it uses no test double
+    //!
+    //! The behaviour under test is what `capture_thread` does to the shared `running`
+    //! flag when `source.read_samples` returns `Err` — and `capture_thread` is a private
+    //! fn of this binary crate taking eleven arguments. It cannot be called from a lib or
+    //! integration test, so the options were:
+    //!
+    //! 1. *Extract a pure `fn handle_read_result(result, &AtomicBool) -> Outcome` into the
+    //!    library and test that.* Rejected for this round: the extraction is production
+    //!    work, so the test could only reference a function that does not exist yet — a
+    //!    compile error that would take the whole suite down instead of reporting a
+    //!    behaviour failure.
+    //! 2. *A `#[cfg(test)] mod tests` in this file.* Chosen. This is the same module tree,
+    //!    so the private fn is reachable with no visibility change and no production edit.
+    //!    This module is the only addition to the file; it contains tests and fixtures.
+    //!
+    //! The source is a **real** [`FileSource`], not a scripted stub, so the test exercises
+    //! the production decode path end to end. The read error is provoked the second way the
+    //! reviewers reached it: a dataset that is valid at open time (whole number of samples),
+    //! truncated to a partial sample while it is open. The first way — a directory, which
+    //! `File::open` accepts on Linux — is required to fail at *open* time by
+    //! `directory_path_is_rejected_at_open_time` in `capture::file`, so it is not used here.
+    //!
+    //! A note on what a failing assertion here means: this is a behaviour failure, not a
+    //! compile error. Everything below compiles against the current signatures; only the
+    //! `Err` arm's effect on `running` is wrong.
+
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicUsize;
+
+    /// Number of FFT bins used by these tests: small, so each block is a handful of
+    /// samples and the paced loop finishes in microseconds.
+    const TEST_FFT_SIZE: usize = 4;
+
+    /// Sample rate used by these tests.
+    const TEST_SAMPLE_RATE: f64 = 1_024_000.0;
+
+    /// Center frequency used by these tests.
+    const TEST_CENTER_FREQ: f64 = 118_100_000.0;
+
+    static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(0);
+
+    /// Self-cleaning temporary directory holding generated IQ fixtures.
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let index = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "termsdr-capture-thread-{}-{index}-{label}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+
+        /// Write a fixture and return its path.
+        fn write(&self, name: &str, bytes: &[u8]) -> String {
+            let file_path = self.path.join(name);
+            std::fs::write(&file_path, bytes).expect("write fixture");
+            file_path
+                .to_str()
+                .expect("invariant: temp paths are UTF-8")
+                .to_string()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// Interleaved raw cu8 IQ pairs.
+    fn cu8_bytes(samples: &[(u8, u8)]) -> Vec<u8> {
+        samples.iter().flat_map(|(i, q)| [*i, *q]).collect()
+    }
+
+    /// Truncate an open dataset to `len` bytes, simulating a file that shrinks under an
+    /// open reader (a copy still being written, a crashed recorder, a full disk).
+    fn truncate(path: &str, len: u64) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open fixture for truncation")
+            .set_len(len)
+            .expect("truncate fixture");
+    }
+
+    /// Open a real `FileSource` over `path` the way `run_pipeline` does.
+    fn open_source(path: &str) -> FileSource {
+        FileSource::new(
+            path,
+            Some(termsdr::capture::file::IqFileFormat::Cu8),
+            Some(TEST_SAMPLE_RATE),
+            Some(TEST_CENTER_FREQ),
+        )
+        .expect("open fixture as a raw cu8 FileSource")
+    }
+
+    /// Drive the real `capture_thread` once and return the shared flag plus the blocks it
+    /// handed to DSP.
+    ///
+    /// `capture_thread` is called inline rather than spawned: every terminating path in
+    /// its read loop breaks out, so the call returns as soon as the scripted file ends.
+    fn run_capture(source: FileSource, path: &str) -> (Arc<AtomicBool>, Vec<Vec<IqSample>>) {
+        let running = Arc::new(AtomicBool::new(true));
+        let (tx_dsp, rx_dsp) = bounded(8);
+        let (tx_audio, _rx_audio) = bounded(8);
+
+        capture_thread(
+            SourceType::File {
+                path: path.to_string(),
+            },
+            Some(source),
+            TEST_SAMPLE_RATE,
+            TEST_CENTER_FREQ,
+            TEST_FFT_SIZE,
+            None,
+            0,
+            tx_dsp,
+            tx_audio,
+            running.clone(),
+            None,
+        );
+
+        let blocks: Vec<Vec<IqSample>> = rx_dsp.try_iter().collect();
+        (running, blocks)
+    }
+
+    /// A read error must stop the pipeline.
+    ///
+    /// This is the blocker: the `Err` arm logged and `break`-ed without clearing
+    /// `running`, so the DSP, audio, and server threads kept looping against a dead
+    /// source. Headless, that is a server that never exits (measured: exit 124 after a
+    /// 20 s timeout, versus ~106 ms for a clean EOF); in the TUI, a frozen display.
+    ///
+    /// The dataset here is a valid four-sample file truncated to five bytes (two and a
+    /// half samples) after it was opened, so `read_samples` genuinely returns the
+    /// "ended mid-sample" error through the production decode path.
+    #[test]
+    fn mid_sample_read_error_stops_the_pipeline() {
+        let dir = TempDir::new("mid-sample");
+        let path = dir.write("shrinks.cu8", &cu8_bytes(&[(0, 0), (64, 64), (128, 128), (192, 192)]));
+        let source = open_source(&path);
+        // Five bytes: one whole sample plus three bytes of the next.
+        truncate(&path, 5);
+
+        let (running, blocks) = run_capture(source, &path);
+
+        assert!(
+            blocks.is_empty(),
+            "a failing read must not deliver IQ blocks to DSP, got {} block(s)",
+            blocks.len()
+        );
+        assert!(
+            !running.load(Ordering::SeqCst),
+            "a read error must clear the shared `running` flag; leaving it set keeps the \
+             DSP/audio/server threads alive against a dead source (headless hang, TUI freeze)"
+        );
+    }
+
+    /// End of file must stop the pipeline — the sibling arm that already works.
+    ///
+    /// Kept next to the error test so the two stop reasons stay symmetric: a refactor that
+    /// drops either one is then obvious.
+    #[test]
+    fn eof_stops_the_pipeline() {
+        let dir = TempDir::new("eof");
+        let path = dir.write("two.cu8", &cu8_bytes(&[(0, 255), (255, 0)]));
+        let source = open_source(&path);
+
+        let (running, blocks) = run_capture(source, &path);
+
+        // The two samples are forwarded, then EOF stops the loop.
+        assert_eq!(
+            blocks.len(),
+            1,
+            "the samples before EOF must reach DSP exactly once, got {} block(s)",
+            blocks.len()
+        );
+        assert_eq!(blocks[0].len(), 2, "only the samples produced may be forwarded");
+        assert!(
+            !running.load(Ordering::SeqCst),
+            "EOF must clear the shared `running` flag so replay ends cleanly"
+        );
+    }
+
+    /// A short final block must forward only the samples actually produced, and the loop
+    /// must keep going rather than stopping after the first block.
+    ///
+    /// This is the non-regression side of the same switch: a fix for the error arm must
+    /// not clear `running` on a *successful* read, and only `buffer[..count]` may reach
+    /// DSP (the tail still holds the previous block).
+    #[test]
+    fn partial_final_block_forwards_actual_count_then_eof_stops() {
+        let dir = TempDir::new("partial");
+        // Three samples with a four-sample block: one short block, then EOF.
+        let path = dir.write("three.cu8", &cu8_bytes(&[(0, 0), (128, 128), (255, 255)]));
+        let source = open_source(&path);
+
+        let (running, blocks) = run_capture(source, &path);
+
+        assert_eq!(
+            blocks.len(),
+            1,
+            "one short block must be forwarded before the EOF stop, got {}",
+            blocks.len()
+        );
+        assert_eq!(
+            blocks[0].len(),
+            3,
+            "only the three samples produced may be forwarded, not the full four-sample buffer"
+        );
+        assert!(
+            !running.load(Ordering::SeqCst),
+            "the trailing EOF must stop the pipeline"
+        );
+    }
 }

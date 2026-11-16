@@ -3,6 +3,7 @@
 use anyhow::Result;
 use clap::Parser;
 
+use crate::capture::file::IqFileFormat;
 use crate::types::AppConfig;
 
 /// `TermSDR` — Terminal-based SDR application.
@@ -36,6 +37,18 @@ pub struct CliArgs {
     /// IQ file path for file replay mode
     #[arg(long)]
     pub file: Option<String>,
+
+    /// Sample format of a raw IQ file (`SigMF` datasets provide it themselves)
+    #[arg(long, value_enum)]
+    pub iq_format: Option<IqFileFormat>,
+
+    /// Sample rate of a raw IQ file in Hz (`SigMF` datasets provide it themselves)
+    #[arg(long)]
+    pub file_sample_rate: Option<f64>,
+
+    /// Center frequency of a raw IQ file in Hz (`SigMF` datasets provide it themselves)
+    #[arg(long)]
+    pub file_center_frequency: Option<f64>,
 
     /// JSON config file path
     #[arg(short, long)]
@@ -234,5 +247,121 @@ mod tests {
             }
             _ => panic!("Expected File source"),
         }
+    }
+
+    // === IQ file replay CLI metadata (plan Task 3) ===
+    //
+    // Frozen contract for the raw-file flags:
+    //
+    // ```text
+    // --iq-format <cu8|cf32le>          -> CliArgs::iq_format: Option<IqFileFormat>
+    // --file-sample-rate <Hz>           -> CliArgs::file_sample_rate: Option<f64>
+    // --file-center-frequency <Hz>      -> CliArgs::file_center_frequency: Option<f64>
+    // ```
+    //
+    // Decisions frozen here where the plan left a choice:
+    //
+    // * `--iq-format` takes the `IqFileFormat` `ValueEnum` directly, so clap rejects
+    //   unknown formats instead of the capture layer failing later. The accepted
+    //   spellings are `cu8` and `cf32le` — the variant must carry
+    //   `#[value(name = "cf32le")]`, because a bare derive would only accept
+    //   `cf32-le` and the plan's documented spelling would stop working.
+    // * The two frequency flags parse plain `f64` Hz, exactly as the plan writes
+    //   `<Hz>`. They deliberately do not accept the `118.1M` shorthand that
+    //   `--sample-rate`/`--frequency` accept: file metadata is a machine-facing
+    //   value and must not be re-scaled implicitly.
+    // * All three default to `None` so that a `.sigmf-meta` dataset can supply them
+    //   and so existing invocations keep their behavior.
+    // * These fields reference `crate::capture::file::IqFileFormat`, which requires
+    //   `pub mod file;` in `src/capture/mod.rs` (a `pub` field cannot expose a
+    //   `pub(crate)` type).
+
+    use crate::capture::file::IqFileFormat;
+
+    #[test]
+    fn cli_iq_format_flag_parses_cu8() {
+        let args = CliArgs::parse_from(["termsdr", "--file", "capture.iq", "--iq-format", "cu8"]);
+        assert_eq!(args.iq_format, Some(IqFileFormat::Cu8));
+    }
+
+    #[test]
+    fn cli_iq_format_flag_parses_cf32le() {
+        let args =
+            CliArgs::parse_from(["termsdr", "--file", "capture.iq", "--iq-format", "cf32le"]);
+        assert_eq!(args.iq_format, Some(IqFileFormat::Cf32Le));
+    }
+
+    #[test]
+    fn cli_iq_format_flag_defaults_to_none() {
+        let args = CliArgs::parse_from(["termsdr", "--file", "capture.iq"]);
+        assert!(args.iq_format.is_none());
+    }
+
+    #[test]
+    fn cli_iq_format_flag_rejects_unknown_format() {
+        let result =
+            CliArgs::try_parse_from(["termsdr", "--file", "capture.iq", "--iq-format", "s16"]);
+        assert!(
+            result.is_err(),
+            "unknown --iq-format must be rejected by clap, not accepted"
+        );
+    }
+
+    #[test]
+    fn cli_file_sample_rate_parses_hz() {
+        let args = CliArgs::parse_from([
+            "termsdr",
+            "--file",
+            "capture.iq",
+            "--file-sample-rate",
+            "2048000",
+        ]);
+        assert_eq!(args.file_sample_rate, Some(2_048_000.0));
+    }
+
+    #[test]
+    fn cli_file_center_frequency_parses_hz() {
+        let args = CliArgs::parse_from([
+            "termsdr",
+            "--file",
+            "capture.iq",
+            "--file-center-frequency",
+            "118100000",
+        ]);
+        assert_eq!(args.file_center_frequency, Some(118_100_000.0));
+    }
+
+    #[test]
+    fn cli_file_metadata_flags_default_to_none() {
+        let args = CliArgs::parse_from(["termsdr", "--file", "capture.sigmf-meta"]);
+        assert!(args.file_sample_rate.is_none());
+        assert!(args.file_center_frequency.is_none());
+    }
+
+    #[test]
+    fn cli_file_metadata_flags_reject_non_numeric_hz() {
+        let rate = CliArgs::try_parse_from([
+            "termsdr",
+            "--file",
+            "capture.iq",
+            "--file-sample-rate",
+            "2.048M",
+        ]);
+        assert!(
+            rate.is_err(),
+            "--file-sample-rate must accept plain Hz only, got accepted shorthand"
+        );
+
+        let freq = CliArgs::try_parse_from([
+            "termsdr",
+            "--file",
+            "capture.iq",
+            "--file-center-frequency",
+            "118.1M",
+        ]);
+        assert!(
+            freq.is_err(),
+            "--file-center-frequency must accept plain Hz only, got accepted shorthand"
+        );
     }
 }

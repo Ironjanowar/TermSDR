@@ -77,8 +77,12 @@ cargo run -- --test -s 2.048M
 # Set RF gain (dB)
 cargo run -- --test --gain 30
 
-# Replay from IQ file
-cargo run -- --file recording.iq -f 100M
+# Replay a raw IQ file (format + rate + center must be given)
+cargo run -- --file recording.cu8 --iq-format cu8 \
+    --file-sample-rate 2048000 --file-center-frequency 118100000
+
+# Replay a SigMF dataset pair (metadata comes from the .sigmf-meta sidecar)
+cargo run -- --file capture.sigmf-meta
 
 # With RTL-SDR hardware (requires --features rtlsdr)
 cargo run --features rtlsdr
@@ -102,7 +106,10 @@ cargo run -- --test -f 433.92M -s 1M --gain 20 --fft-size 4096
 | `--bind` | WebSocket server bind address | `0.0.0.0` |
 | `--no-web` | Don't serve web frontend (WS only) | — |
 | `--audio-format` | Audio format: `opus` or `pcm` | `opus` |
-| `--file` | IQ file path for replay mode | — |
+| `--file` | IQ file path for replay mode (raw file, `.sigmf-meta`, or `.sigmf-data`) | — |
+| `--iq-format` | Raw IQ sample format: `cu8` or `cf32le` | — |
+| `--file-sample-rate` | Raw IQ sample rate in Hz | — |
+| `--file-center-frequency` | Raw IQ center frequency in Hz | — |
 | `-c`, `--config` | JSON config file path | — |
 
 ## ⌨️ Keyboard Shortcuts
@@ -271,7 +278,7 @@ All signal sources implement the `Source` trait:
 | Source | Status | Description |
 |--------|--------|-------------|
 | `TestSource` | ✅ Ready | Synthetic signals with configurable peaks + noise floor |
-| `FileSource` | ✅ Ready | Replay from IQ recordings |
+| `FileSource` | ✅ Ready | Deterministic replay of raw IQ or SigMF datasets |
 | `RtlSdrSource` | ✅ Ready | Real hardware via librtlsdr (requires `--features rtlsdr`) |
 
 ### Project Structure
@@ -547,13 +554,12 @@ Currently: **557 tests** (553 unit + 4 integration) covering types, FFT, capture
 - 📡 Auto-scan peak hunting mode
 - 📚 Bookmarks — frequency catalog + personal bookmarks + CubicSDR import
 - ⏱️ Configurable waterfall time span (5–120 s)
-- 📼 IQ file replay source (stub)
+- 📼 IQ file replay — raw `cu8`/`cf32le` and SigMF datasets
 - 🌐 WebSocket server mode — headless backend + Svelte web frontend ([protocol docs](PROTOCOL.md))
 
 ### Future
 - 📻 SSB demodulation (ham radio, maritime)
 - 💾 Recording to IQ files
-- 📂 Full IQ file replay implementation
 - 📡 Full CubicSDR session import (device config, zoom, active demodulators)
 - 🎨 Configurable waterfall color palettes
 - 💾 VFO/bookmark persistence across sessions

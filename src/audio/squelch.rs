@@ -137,6 +137,13 @@ pub(crate) const CLOSE_HANG_MS: f64 = 250.0;
 /// measurably during the 10 ms a real transmission needs to open the gate.
 pub(crate) const NOISE_FLOOR_TIME_CONSTANT_MS: f64 = 250.0;
 
+/// Largest block a single [`ChannelPowerSample`] may describe, in frames.
+///
+/// One second at 48 kHz. The gate counts its intervals frame by frame, so an absurd block would
+/// stall the audio thread inside one call; the real channelizer emits about 96 frames per block
+/// and the bound only rejects caller-side mistakes.
+pub(crate) const MAX_BLOCK_FRAMES: usize = 48_000;
+
 /// One channel power measurement: the block mean of a `ChannelizedBlock`, in dBFS.
 ///
 /// `frames` is the number of channelized frames the measurement covers, at the sample rate given
@@ -184,8 +191,6 @@ pub(crate) struct SquelchUpdate {
 pub(crate) struct SquelchState {
     /// Threshold source: auto margin, fixed manual threshold, or unconditionally open.
     mode: SquelchMode,
-    /// Channelized frame rate the timing constants are converted against, in hertz.
-    frame_rate_hz: f64,
     /// Frames of consecutive signal needed to open, in frames.
     open_confirm_frames: u64,
     /// Frames of consecutive silence needed to close, in frames.
@@ -259,7 +264,6 @@ impl SquelchState {
         Ok(Self {
             open: matches!(mode, SquelchMode::Open),
             mode,
-            frame_rate_hz: sample_rate_hz,
             open_confirm_frames,
             close_hang_frames,
             noise_floor_coefficient: noise_floor_coefficient.clamp(f32::MIN_POSITIVE, 1.0),
@@ -279,13 +283,28 @@ impl SquelchState {
     ///
     /// # Errors
     ///
+    /// A block's whole extent is taken as one constant power, so at most one transition can fall
+    /// inside it. [`SquelchUpdate::open`] is the gate state at the *end* of the block: when a
+    /// transition is reported, the frames before [`SquelchTransition::at_frame`] belong to the old
+    /// state, so a caller that must not pass pre-confirmation audio splits the block there.
+    ///
+    /// # Errors
+    ///
     /// Returns an error, leaving every value reported by this state unchanged, when the frame
-    /// clock would overflow or `sample.power_dbfs` is not finite.
+    /// clock would overflow, `sample.power_dbfs` is not finite, or the block exceeds
+    /// [`MAX_BLOCK_FRAMES`].
     pub fn process(&mut self, sample: ChannelPowerSample) -> Result<SquelchUpdate> {
         if !sample.power_dbfs.is_finite() {
             anyhow::bail!(
                 "squelch channel power {} dBFS is not finite",
                 sample.power_dbfs
+            );
+        }
+        if sample.frames > MAX_BLOCK_FRAMES {
+            anyhow::bail!(
+                "squelch block of {} frames exceeds the {MAX_BLOCK_FRAMES}-frame limit; a single \
+                 measurement should cover a fraction of a second, not minutes",
+                sample.frames
             );
         }
         let block_frames = u64::try_from(sample.frames)
@@ -330,8 +349,11 @@ impl SquelchState {
     /// The switch itself never reports a transition — the caller initiated it and already knows —
     /// but it never fabricates one either: the gate is only released when the new mode is
     /// [`SquelchMode::Open`]. Leaving [`SquelchMode::Open`] keeps the gate open and lets the hang
-    /// timer close it from the next blocks on. Sub-frame timer progress is preserved, because the
-    /// counters are expressed in frames and the frame rate does not change.
+    /// timer close it from the next blocks on.
+    ///
+    /// Both interval counters restart. A new mode or threshold redefines what counts as signal, so
+    /// partial progress measured against the previous rule must not let the gate open (or close)
+    /// without a full [`OPEN_CONFIRM_MS`] of signal under the new one.
     ///
     /// # Errors
     ///
@@ -341,13 +363,25 @@ impl SquelchState {
         mode.validate()
             .with_context(|| format!("invalid squelch mode {mode:?}"))?;
 
+        // Both interval counters restart unconditionally. A mode or threshold change redefines
+        // what "above the threshold" means, so credit accumulated against the previous rule must
+        // not make the gate open (or close) without a full confirmation interval under the new one.
         self.mode = mode;
+        self.confirmed_frames = 0;
+        self.hung_frames = 0;
         if matches!(mode, SquelchMode::Open) {
             self.open = true;
-            self.confirmed_frames = 0;
-            self.hung_frames = 0;
         }
         Ok(())
+    }
+
+    /// Stream clock value: frames consumed since construction.
+    ///
+    /// Exposed for tests that assert a rejected measurement leaves the clock untouched.
+    #[cfg(test)]
+    #[must_use]
+    pub fn frames_elapsed_for_test(&self) -> u64 {
+        self.frames_elapsed
     }
 
     /// Whether audio should pass in the current state.
@@ -429,12 +463,17 @@ impl SquelchState {
             self.confirmed_frames = 0;
         }
 
-        // Noise floor tracking: only for a frame the gate observed as closed and whose power is at
-        // or below the close threshold, so an active transmission can never drag the floor upward
-        // and slowly release the gate. The frame that completes the open confirmation is included
-        // because the gate still observed it closed; every frame the open state governs is not.
+        // Noise floor tracking: only for a frame the gate observed as closed and whose power is
+        // strictly below the close threshold, so an active transmission can never drag the floor
+        // upward and slowly release the gate. The same strict comparison as the hang counter keeps
+        // both rules describing the identical region, and a power parked exactly on the close
+        // threshold neither counts toward the hang nor feeds the floor.
+        //
+        // The frame that completes the open confirmation never reaches this point: the `return`
+        // above fires first, and confirmation also requires power at or above the open threshold,
+        // which is a full hysteresis width above the close threshold.
         let close_threshold_dbfs = self.close_threshold_dbfs();
-        if power_dbfs <= close_threshold_dbfs {
+        if power_dbfs < close_threshold_dbfs {
             self.noise_floor_dbfs +=
                 self.noise_floor_coefficient * (power_dbfs - self.noise_floor_dbfs);
         }
@@ -1328,5 +1367,100 @@ mod tests {
         let update = feed(&mut state, between_dbfs, 48_000, 4_800);
         assert!(!update.open, "the fixture must not open the gate");
         assert_abs_diff_eq!(update.noise_floor_dbfs, floor_before, epsilon = 0.01);
+    }
+
+    #[test]
+    fn a_mode_change_restarts_the_confirmation_and_hang_counters() {
+        // 479 frames of signal against a manual threshold, then the threshold is raised above that
+        // signal. The stale credit must not open the gate on the first frame under the new rule:
+        // a full 10 ms of signal at or above the *new* threshold is required.
+        let mut state = SquelchState::new(
+            SquelchMode::Manual {
+                threshold_dbfs: -60.0,
+            },
+            RATE_HZ,
+        )
+        .expect("a finite manual threshold must construct");
+
+        feed(&mut state, -50.0, 479, 479);
+        assert!(!state.is_open(), "479 frames is short of the confirmation");
+
+        state
+            .set_mode(SquelchMode::Manual {
+                threshold_dbfs: -40.0,
+            })
+            .expect("raising the threshold is a valid mode");
+
+        let first = feed(&mut state, -39.0, 1, 1);
+        assert!(
+            !first.open,
+            "a mode change must restart the confirmation counter, not open on stale credit"
+        );
+        let completed = feed(&mut state, -39.0, 479, 479);
+        assert!(
+            completed.open,
+            "480 frames under the new threshold must open the gate"
+        );
+
+        // The hang counter follows the same rule when leaving a closed state.
+        let mut dropping = SquelchState::new(
+            SquelchMode::Manual {
+                threshold_dbfs: -60.0,
+            },
+            RATE_HZ,
+        )
+        .expect("a finite manual threshold must construct");
+        feed(&mut dropping, -50.0, 480, 480);
+        assert!(dropping.is_open(), "the fixture must open the gate");
+        feed(&mut dropping, -70.0, 11_999, 11_999);
+        assert!(dropping.is_open(), "11999 frames is short of the hang");
+        dropping
+            .set_mode(SquelchMode::Manual {
+                threshold_dbfs: -90.0,
+            })
+            .expect("lowering the threshold is a valid mode");
+        let after = feed(&mut dropping, -95.0, 1, 1);
+        assert!(
+            after.open,
+            "a mode change must restart the hang counter, not close on stale credit"
+        );
+    }
+
+    #[test]
+    fn absurd_block_sizes_are_rejected_without_touching_state() {
+        let mut state = auto_state();
+        settle_noise_floor(&mut state);
+        let clock_before = state.frames_elapsed_for_test();
+        let floor_before = state.noise_floor_dbfs();
+
+        let error = state
+            .process(ChannelPowerSample {
+                power_dbfs: -80.0,
+                frames: MAX_BLOCK_FRAMES + 1,
+            })
+            .expect_err("a block longer than the documented limit must be rejected");
+        assert!(
+            error.to_string().contains("limit"),
+            "the rejection must name the frame limit, got: {error}"
+        );
+        assert_eq!(
+            state.frames_elapsed_for_test(),
+            clock_before,
+            "a rejected oversized block must not advance the clock"
+        );
+        assert_abs_diff_eq!(
+            state.noise_floor_dbfs(),
+            floor_before,
+            epsilon = f32::EPSILON
+        );
+        assert!(
+            state
+                .process(ChannelPowerSample {
+                    power_dbfs: -80.0,
+                    frames: MAX_BLOCK_FRAMES,
+                })
+                .is_ok(),
+            "a block exactly at the limit must be accepted"
+        );
     }
 }

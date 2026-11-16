@@ -6,7 +6,12 @@
 use std::f64::consts::PI;
 use std::time::Instant;
 
-use termsdr::dsp::resampler::{create_complex_resampler, ComplexResampler};
+use proptest::prelude::*;
+
+use termsdr::dsp::resampler::{
+    create_complex_resampler, create_decimated_real_resampler, create_real_resampler,
+    ComplexResampler, RealResampler, ResamplerCreationError,
+};
 use termsdr::types::IqSample;
 
 const OUTPUT_RATE_HZ: u32 = 48_000;
@@ -84,19 +89,24 @@ fn fixed_partitions(total: usize, block_size: usize) -> impl Iterator<Item = usi
     std::iter::repeat(block_size).take(total.div_ceil(block_size))
 }
 
-fn randomized_partitions(total: usize) -> Vec<usize> {
+fn seeded_partitions(total: usize, seed: u32, max_size: usize) -> Vec<usize> {
     // Fixed seed and integer LCG make this workload reproducible without another dependency.
-    let mut state = 0x6d2b_79f5_u32;
+    let mut state = seed | 1;
     let mut remaining = total;
     let mut partitions = Vec::new();
     while remaining > 0 {
         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let size = 1 + usize::try_from(state % 4096).expect("partition fits usize");
+        let span = u32::try_from(max_size).expect("partition cap fits u32");
+        let size = 1 + usize::try_from(state % span).expect("partition fits usize");
         let size = size.min(remaining);
         partitions.push(size);
         remaining -= size;
     }
     partitions
+}
+
+fn randomized_partitions(total: usize) -> Vec<usize> {
+    seeded_partitions(total, 0x6d2b_79f5, 4096)
 }
 
 fn complex_tone(sample_rate_hz: u32, frequency_hz: f64, samples: usize) -> Vec<IqSample> {
@@ -120,22 +130,81 @@ fn deterministic_multitone(sample_rate_hz: u32, samples: usize) -> Vec<IqSample>
     output
 }
 
+fn real_tone(sample_rate_hz: u32, frequency_hz: f64, samples: usize) -> Vec<f32> {
+    complex_tone(sample_rate_hz, frequency_hz, samples)
+        .into_iter()
+        .map(|sample| sample.re)
+        .collect()
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn rms_of_differences(
+    left_len: usize,
+    right_len: usize,
+    pairs: impl Iterator<Item = (f32, f32)>,
+) -> f64 {
+    assert_eq!(left_len, right_len, "aligned lengths differ");
+    assert!(left_len > 0, "RMS comparison requires output samples");
+    let sum_squared = pairs
+        .map(|(left, right)| {
+            let difference = f64::from(left) - f64::from(right);
+            difference * difference
+        })
+        .sum::<f64>();
+    (sum_squared / left_len as f64).sqrt()
+}
+
+fn real_rms_difference(left: &[f32], right: &[f32]) -> f64 {
+    rms_of_differences(
+        left.len(),
+        right.len(),
+        left.iter().zip(right).map(|(&a, &b)| (a, b)),
+    )
+}
+
+fn resample_real_partitions(
+    input_rate_hz: u32,
+    input: &[f32],
+    partitions: impl Iterator<Item = usize>,
+) -> Vec<f32> {
+    let result: anyhow::Result<_> = create_real_resampler(input_rate_hz, OUTPUT_RATE_HZ);
+    let mut resampler = result.expect("dependency-gate rates must produce a real resampler");
+    let mut output = Vec::new();
+    let mut offset = 0;
+    for requested in partitions {
+        if offset == input.len() {
+            break;
+        }
+        assert!(requested > 0, "partitions must contain at least one sample");
+        let end = offset.saturating_add(requested).min(input.len());
+        resampler
+            .process(&input[offset..end], &mut output)
+            .expect("real adapter rejected a valid input partition");
+        offset = end;
+    }
+    assert_eq!(
+        offset,
+        input.len(),
+        "partition sequence did not cover input"
+    );
+    resampler
+        .flush(&mut output)
+        .expect("real adapter failed to flush delayed output at EOF");
+    output
+}
+
 fn rms_difference(
     left: &[IqSample],
     right: &[IqSample],
     component: impl Fn(IqSample) -> f32,
 ) -> f64 {
-    assert_eq!(left.len(), right.len(), "aligned lengths differ");
-    assert!(!left.is_empty(), "RMS comparison requires output samples");
-    let sum_squared = left
-        .iter()
-        .zip(right)
-        .map(|(&a, &b)| {
-            let difference = f64::from(component(a)) - f64::from(component(b));
-            difference * difference
-        })
-        .sum::<f64>();
-    (sum_squared / left.len() as f64).sqrt()
+    rms_of_differences(
+        left.len(),
+        right.len(),
+        left.iter()
+            .zip(right)
+            .map(|(&a, &b)| (component(a), component(b))),
+    )
 }
 
 fn tone_coefficient(
@@ -300,11 +369,266 @@ fn ten_seconds_produces_exact_rational_output_count() {
         finish(&mut resampler, &mut output);
 
         let expected = usize::try_from(OUTPUT_RATE_HZ).expect("rate fits usize") * 10;
-        let error = output.len().abs_diff(expected);
+        assert_eq!(
+            output.len(),
+            expected,
+            "{input_rate_hz} Hz -> {OUTPUT_RATE_HZ} Hz must produce exactly {expected} samples"
+        );
+    }
+}
+
+#[test]
+fn one_khz_complex_tone_frequency_is_accurate() {
+    // At 48 kHz a 1 kHz tone repeats every 48 output samples, so a 480-cycle window is 23,040
+    // samples long and contains an integer number of cycles. Two consecutive windows therefore
+    // give leakage-free coefficients at the nominal frequency, and the coefficient phase
+    // difference across the contiguous windows is the frequency offset times the window spacing.
+    // Phase differencing over T = 0.48 s is unambiguous only within +/-1/(2T) = +/-1.0417 Hz, so
+    // the +/-1 Hz tolerance uses 96% of the resolvable half-range; the gain assertion below is the
+    // sharper detector, since a 480-cycle window loses ~1.6e-3 Hz of apparent frequency per unit
+    // of gain error.
+    const WINDOW_SAMPLES: usize = 23_040;
+    const WINDOW_SECONDS: f64 = 23_040.0 / 48_000.0;
+    let input_rate_hz = 2_048_000;
+    let tone_hz = 1_000.0;
+    let sample_count = usize::try_from(input_rate_hz).expect("rate fits usize");
+    let input = complex_tone(input_rate_hz, tone_hz, sample_count);
+    let output = resample_partitions(input_rate_hz, &input, fixed_partitions(sample_count, 2048));
+
+    let start = QUALITY_SETTLING_OUTPUT_SAMPLES;
+    assert!(
+        start + 2 * WINDOW_SAMPLES <= output.samples.len(),
+        "one second of output must hold two full 480-cycle windows"
+    );
+    let first = tone_coefficient(
+        &output.samples[start..start + WINDOW_SAMPLES],
+        tone_hz,
+        |sample| sample.re,
+    );
+    let second = tone_coefficient(
+        &output.samples[start + WINDOW_SAMPLES..start + 2 * WINDOW_SAMPLES],
+        tone_hz,
+        |sample| sample.re,
+    );
+
+    let gain = f64::midpoint(magnitude(first), magnitude(second));
+    let phase_offset = wrap_phase(phase(second) - phase(first));
+    let measured_hz = tone_hz + phase_offset / (2.0 * PI * WINDOW_SECONDS);
+
+    assert!(
+        (measured_hz - tone_hz).abs() <= 1.0,
+        "1 kHz tone measured at {measured_hz:.6} Hz; require |error| <= 1 Hz"
+    );
+    assert!(
+        (gain - 1.0).abs() <= 1.0e-6,
+        "1 kHz tone gain measured at {gain:.9}; require |gain - 1| <= 1e-6"
+    );
+}
+
+#[test]
+fn real_resampler_flush_lifecycle() {
+    let result: anyhow::Result<_> = create_real_resampler(2_048_000, OUTPUT_RATE_HZ);
+    let mut resampler = result.expect("real resampler must be created for a required rate pair");
+    let mut output = Vec::new();
+
+    resampler
+        .process(&[], &mut output)
+        .expect("empty real partition must be accepted");
+    resampler
+        .flush(&mut output)
+        .expect("first real flush must succeed");
+    assert!(
+        output.is_empty(),
+        "empty real input must not synthesize output"
+    );
+
+    let second_flush = resampler.flush(&mut output);
+    assert!(second_flush.is_err(), "second real flush must be rejected");
+
+    let process_after_flush = resampler.process(&[0.25], &mut output);
+    assert!(
+        process_after_flush.is_err(),
+        "real processing after flush must be rejected"
+    );
+}
+
+#[test]
+fn real_resampler_output_count_is_ceiled_not_truncated() {
+    // 1001 input frames at 44.1 kHz -> 48 kHz is 1089.52 output samples, so the
+    // exact duration must round up to 1090. Truncating would silently shorten
+    // the stream by one sample and is detectable only on a non-integral ratio.
+    const INPUT_RATE_HZ: u32 = 44_100;
+    const INPUT_FRAMES: usize = 1_001;
+    let result: anyhow::Result<_> = create_real_resampler(INPUT_RATE_HZ, OUTPUT_RATE_HZ);
+    let mut resampler = result.expect("44.1 kHz to 48 kHz must be a supported real rate pair");
+    let mut output = Vec::new();
+    let input = real_tone(INPUT_RATE_HZ, 1_000.0, INPUT_FRAMES);
+    resampler
+        .process(&input, &mut output)
+        .expect("real partition must be accepted");
+    resampler
+        .flush(&mut output)
+        .expect("real flush must succeed");
+
+    let expected = (INPUT_FRAMES * usize::try_from(OUTPUT_RATE_HZ).expect("rate fits usize"))
+        .div_ceil(usize::try_from(INPUT_RATE_HZ).expect("rate fits usize"));
+    assert_eq!(
+        expected, 1_090,
+        "test setup must exercise a non-integral ratio"
+    );
+    assert_eq!(
+        output.len(),
+        expected,
+        "real stream length must be the ceiling of the exact rational duration"
+    );
+}
+
+#[test]
+fn decimated_rate_overflow_is_a_typed_error() {
+    let result: anyhow::Result<_> = create_decimated_real_resampler(1_024_000, 48_000, 100_000);
+    let error = result
+        .err()
+        .expect("scaling 48 kHz by 100,000 must overflow the backend rate");
+    let typed = error.downcast_ref::<ResamplerCreationError>();
+    assert!(
+        typed.is_some_and(|candidate| matches!(
+            candidate,
+            ResamplerCreationError::DecimatedRateOverflow {
+                output_rate_hz: OUTPUT_RATE_HZ,
+                decimation_factor: 100_000
+            }
+        )),
+        "decimated rate overflow must be a typed ResamplerCreationError::DecimatedRateOverflow; got {error:?}"
+    );
+}
+
+#[test]
+fn decimated_real_resampler_reports_exact_source_duration() {
+    const RF_RATE_HZ: u32 = 1_024_000;
+    const DECIMATION_FACTOR: u32 = 8;
+    const SOURCE_FRAMES: usize = 1_024_000;
+    let result: anyhow::Result<_> =
+        create_decimated_real_resampler(RF_RATE_HZ, OUTPUT_RATE_HZ, DECIMATION_FACTOR);
+    let mut resampler = result.expect("decimated resampler must accept a required rate pair");
+    let mut output = Vec::new();
+
+    let decimation = usize::try_from(DECIMATION_FACTOR).expect("factor fits usize");
+    let mut remaining_decimated = SOURCE_FRAMES / decimation;
+    let pattern = [1000_usize, 4096, 777];
+    let mut index = 0;
+    while remaining_decimated > 0 {
+        let requested = pattern[index % pattern.len()];
+        index += 1;
+        let decimated = requested.min(remaining_decimated);
+        remaining_decimated -= decimated;
+        let input = vec![0.5_f32; decimated];
+        resampler
+            .process_with_source_frames(&input, decimated * decimation, &mut output)
+            .expect("decimated partition must be accepted");
+    }
+    resampler
+        .flush(&mut output)
+        .expect("decimated flush must succeed");
+
+    let expected = (SOURCE_FRAMES * usize::try_from(OUTPUT_RATE_HZ).expect("rate fits usize"))
+        .div_ceil(usize::try_from(RF_RATE_HZ).expect("rate fits usize"));
+    assert_eq!(
+        expected, 48_000,
+        "test setup must expect one second of output"
+    );
+    assert_eq!(
+        output.len(),
+        expected,
+        "decimated stream duration must follow the RF clock exactly"
+    );
+}
+
+#[test]
+fn real_resampler_partition_invariance() {
+    let input_rate_hz = 1_024_000;
+    let sample_count = 40_000;
+    let input = real_tone(input_rate_hz, 1_000.0, sample_count);
+    let reference = resample_real_partitions(input_rate_hz, &input, std::iter::once(sample_count));
+
+    for block_size in [1_usize, 257, 4096, 8192] {
+        let candidate = resample_real_partitions(
+            input_rate_hz,
+            &input,
+            fixed_partitions(sample_count, block_size),
+        );
+        assert_eq!(
+            candidate.len(),
+            reference.len(),
+            "block {block_size}: real output count changed by partition"
+        );
+        let rms = real_rms_difference(&reference, &candidate);
         assert!(
-            error <= 1,
-            "{input_rate_hz} Hz -> {OUTPUT_RATE_HZ} Hz produced {} samples; expected {expected} ±1",
-            output.len()
+            rms <= RMS_LIMIT,
+            "block {block_size}: real partition RMS {rms:.3e} exceeds {RMS_LIMIT:.1e}"
+        );
+    }
+
+    let random = seeded_partitions(sample_count, 0x9e37_79b9, 8192);
+    let candidate = resample_real_partitions(input_rate_hz, &input, random.iter().copied().cycle());
+    assert_eq!(candidate.len(), reference.len());
+    let rms = real_rms_difference(&reference, &candidate);
+    assert!(
+        rms <= RMS_LIMIT,
+        "random partitions: real RMS {rms:.3e} exceeds {RMS_LIMIT:.1e}"
+    );
+}
+
+#[test]
+fn zero_decimation_factor_is_a_typed_error() {
+    let result: anyhow::Result<_> = create_decimated_real_resampler(1_024_000, OUTPUT_RATE_HZ, 0);
+    let error = result
+        .err()
+        .expect("a zero decimation factor must be rejected before backend construction");
+    let typed = error.downcast_ref::<ResamplerCreationError>();
+    assert!(
+        typed.is_some_and(|candidate| matches!(
+            candidate,
+            ResamplerCreationError::ZeroDecimationFactor {
+                decimation_factor: 0
+            }
+        )),
+        "zero decimation must be a typed ResamplerCreationError::ZeroDecimationFactor; got {error:?}"
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 16, ..ProptestConfig::default() })]
+
+    #[test]
+    fn complex_resampler_output_length_and_shape_are_exact_for_arbitrary_partitions(
+        rate_index in 0usize..4,
+        total in 1usize..=200_000,
+        partitions in prop::collection::vec(1usize..=8192, 1..64),
+    ) {
+        let input_rate_hz = [2_048_000_u32, 1_024_000, 960_000, 44_100][rate_index];
+        let input = deterministic_multitone(input_rate_hz, total);
+        let expected = total
+            .saturating_mul(OUTPUT_RATE_HZ as usize)
+            .div_ceil(input_rate_hz as usize);
+
+        let reference = resample_partitions(input_rate_hz, &input, std::iter::once(total));
+        prop_assert_eq!(reference.samples.len(), expected);
+
+        let candidate =
+            resample_partitions(input_rate_hz, &input, partitions.iter().copied().cycle());
+        prop_assert_eq!(candidate.samples.len(), expected);
+        prop_assert_eq!(candidate.latency, reference.latency);
+
+        let i_rms = rms_difference(&reference.samples, &candidate.samples, |sample| sample.re);
+        let q_rms = rms_difference(&reference.samples, &candidate.samples, |sample| sample.im);
+        prop_assert!(
+            i_rms <= RMS_LIMIT && q_rms <= RMS_LIMIT,
+            "{} Hz -> {} Hz, {} partitions: RMS differs (I={:.3e}, Q={:.3e})",
+            input_rate_hz,
+            OUTPUT_RATE_HZ,
+            partitions.len(),
+            i_rms,
+            q_rms
         );
     }
 }

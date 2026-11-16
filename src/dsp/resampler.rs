@@ -91,6 +91,22 @@ pub enum ResamplerCreationError {
         /// Maximum accepted block size on either side.
         max_block_frames: usize,
     },
+    /// The decimation factor was zero, so no RF frame could produce a backend sample.
+    #[error("decimation factor must be non-zero to decimate an RF stream")]
+    ZeroDecimationFactor {
+        /// Requested decimation factor.
+        decimation_factor: u32,
+    },
+    /// Scaling the sink rate by the decimation factor overflowed `u32`.
+    #[error(
+        "decimated resampler cannot scale {output_rate_hz} Hz output by decimation factor {decimation_factor}"
+    )]
+    DecimatedRateOverflow {
+        /// Requested output sample rate.
+        output_rate_hz: u32,
+        /// Integer decimation factor applied before resampling.
+        decimation_factor: u32,
+    },
 }
 
 /// A stateful resampler for complex I/Q samples.
@@ -107,7 +123,17 @@ pub trait ComplexResampler {
 
     /// Returns residual latency in the samples appended by this adapter.
     ///
-    /// Backend startup delay is removed internally, so compensated output reports zero.
+    /// Backend startup delay is removed internally, so compensated output reports
+    /// zero. Removal is exact when the backend output block length
+    /// (`fft_size_out`) is even, because its startup delay is then an integer
+    /// number of output samples. When `fft_size_out` is odd the delay is
+    /// `fft_size_out / 2` truncated, leaving a residual time offset of exactly
+    /// 0.5 output samples. Parity depends on both rates, not the input rate
+    /// alone: 2,048,000 -> 48,000 and 1,024,000 -> 48,000 are exact (96 and 192
+    /// frames), 44,100 -> 48,000 is also exact (4480), while 2,048,000 ->
+    /// 44,100 and 960,000 -> 48,000 leave 0.5 samples (441 and 205). The
+    /// reported value is zero regardless: it describes this adapter's own
+    /// buffering, not the backend's residual offset.
     fn latency_output_samples(&self) -> usize;
 
     /// Stages and resamples an arbitrary input partition, appending results to `output`.
@@ -323,6 +349,9 @@ pub trait RealResampler {
     /// `source_frames` is the number of pre-decimation frames represented by
     /// this partition. It preserves exact stream duration when the backend
     /// operates on an integer-decimated signal.
+    ///
+    /// # Errors
+    /// Returns an error after flush, on length overflow, or on backend failure.
     fn process_with_source_frames(
         &mut self,
         input: &[f32],
@@ -350,35 +379,41 @@ pub fn create_real_resampler(
     input_rate_hz: u32,
     output_rate_hz: u32,
 ) -> Result<impl RealResampler> {
-    create_real_resampler_with_clock(
-        input_rate_hz,
-        output_rate_hz,
-        input_rate_hz,
-        output_rate_hz,
-    )
+    create_real_resampler_with_clock(input_rate_hz, output_rate_hz, input_rate_hz, output_rate_hz)
 }
 
 /// Create a real resampler for an integer-decimated RF stream.
 ///
 /// The backend consumes one sample per `decimation_factor` RF frames, while
 /// output duration follows the exact `rf_rate_hz` to `output_rate_hz` clock.
+///
+/// Drive the returned adapter with
+/// [`process_with_source_frames`](RealResampler::process_with_source_frames).
+/// Plain [`process`](RealResampler::process) reports the decimated buffer length
+/// as the source frame count, which advances the backend clock by that length
+/// instead of `decimation_factor` times it and therefore shortens the stream
+/// duration it reports at EOF.
+///
+/// # Errors
+/// Returns [`ResamplerCreationError::ZeroDecimationFactor`] when
+/// `decimation_factor` is zero, plus the same invalid or excessively large rate
+/// pair, allocation overflow, and backend construction errors as
+/// [`create_real_resampler`].
 pub fn create_decimated_real_resampler(
     rf_rate_hz: u32,
     output_rate_hz: u32,
     decimation_factor: u32,
 ) -> Result<impl RealResampler> {
     if decimation_factor == 0 {
-        return Err(anyhow!("decimation factor must be non-zero"));
+        return Err(ResamplerCreationError::ZeroDecimationFactor { decimation_factor }.into());
     }
-    let backend_output_rate = output_rate_hz
-        .checked_mul(decimation_factor)
-        .context("decimated resampler backend output rate overflow")?;
-    create_real_resampler_with_clock(
-        rf_rate_hz,
-        backend_output_rate,
-        rf_rate_hz,
-        output_rate_hz,
-    )
+    let backend_output_rate = output_rate_hz.checked_mul(decimation_factor).ok_or(
+        ResamplerCreationError::DecimatedRateOverflow {
+            output_rate_hz,
+            decimation_factor,
+        },
+    )?;
+    create_real_resampler_with_clock(rf_rate_hz, backend_output_rate, rf_rate_hz, output_rate_hz)
 }
 
 fn create_real_resampler_with_clock(

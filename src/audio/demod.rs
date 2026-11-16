@@ -230,11 +230,14 @@ impl FirFilter {
 // 1.3 Decimation
 // ============================================================================
 
-/// Decimate (downsample) IQ samples by taking every `factor`-th sample.
+/// Decimate IQ samples by taking every `factor`-th sample in isolated tests.
 ///
-/// IMPORTANT: Low-pass filter should be applied BEFORE decimation to prevent aliasing.
-#[must_use] 
-pub fn decimate(samples: &[IqSample], factor: usize) -> Vec<IqSample> {
+/// Runtime demodulation uses phase-continuous decimation in [`Demodulator`]; this
+/// stateless helper remains test-only so block-boundary phase resets cannot return
+/// to the audio path accidentally.
+#[cfg(test)]
+#[must_use]
+fn decimate(samples: &[IqSample], factor: usize) -> Vec<IqSample> {
     if factor == 0 {
         return Vec::new();
     }
@@ -498,6 +501,8 @@ pub struct Demodulator {
     dc_removal: DcRemoval,
     shift_phase: f64,
     decimation_factor: usize,
+    /// Position of the next input block in the continuous decimation cycle.
+    decimation_phase: usize,
     cursor_freq: f64,
     center_freq: f64,
     input_sample_rate: f64,
@@ -553,6 +558,7 @@ impl Demodulator {
             dc_removal: DcRemoval::new(DC_REMOVAL_ALPHA),
             shift_phase: 0.0,
             decimation_factor,
+            decimation_phase: 0,
             cursor_freq,
             center_freq,
             input_sample_rate,
@@ -589,8 +595,23 @@ impl Demodulator {
         // 2. Low-pass filter: keep only the channel
         let filtered = self.fir_filter.process(&shifted);
 
-        // 3. Decimate: reduce sample rate
-        let decimated = decimate(&filtered, self.decimation_factor);
+        // 3. Decimate as one continuous stream. Restarting at index zero for
+        // every capture block changes both the samples and their count when the
+        // block size is not a multiple of the factor.
+        let first = if self.decimation_phase == 0 {
+            0
+        } else {
+            self.decimation_factor - self.decimation_phase
+        };
+        let decimated = filtered
+            .iter()
+            .skip(first)
+            .step_by(self.decimation_factor)
+            .copied()
+            .collect::<Vec<_>>();
+        self.decimation_phase =
+            (self.decimation_phase + filtered.len() % self.decimation_factor)
+                % self.decimation_factor;
 
         // 4. Demodulate based on mode
         let audio = match self.mode {
@@ -632,6 +653,12 @@ impl Demodulator {
 
         // 8. DC removal
         self.dc_removal.process(&audio)
+    }
+
+    /// Align a newly-created demodulator to this stream's decimation time grid.
+    pub(crate) fn align_decimation_phase(&mut self, other: &Self) {
+        debug_assert_eq!(self.decimation_factor, other.decimation_factor);
+        self.decimation_phase = other.decimation_phase;
     }
 
     /// Update the cursor (tuning) frequency. Recalculates the shift.

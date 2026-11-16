@@ -7,6 +7,9 @@ use crate::capture::file::IqFileFormat;
 use crate::types::AppConfig;
 
 /// `TermSDR` — Terminal-based SDR application.
+// CLI flags are naturally boolean and each maps to one `clap` `--flag`; grouping
+// them into a sub-struct would change the flattened argument surface.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Parser, Debug)]
 #[command(name = "termsdr", version, about)]
 pub struct CliArgs {
@@ -77,6 +80,23 @@ pub struct CliArgs {
     /// Audio format for WebSocket streaming
     #[arg(long, default_value = "opus")]
     pub audio_format: String,
+
+    /// Write demodulated audio to a WAV file (mono 32-bit float)
+    ///
+    /// The path is taken verbatim: no directory is created and no suffix is
+    /// added, so an unwritable location is reported by the sink at startup
+    /// rather than hidden here.
+    #[arg(long, value_name = "path")]
+    pub wav_output: Option<String>,
+
+    /// Do not pace file replay in real time
+    ///
+    /// Only meaningful for `--file` replay: it processes the recording as fast
+    /// as the DSP can keep up with, so an offline render finishes deterministically
+    /// instead of taking the recording's wall-clock duration. Synthetic
+    /// (`--test`) and RTL-SDR sources are already self-paced and ignore it.
+    #[arg(long)]
+    pub offline: bool,
 }
 
 /// Parse a frequency string like "100M", "118.1M", "433920000" into Hz.
@@ -363,5 +383,110 @@ mod tests {
             freq.is_err(),
             "--file-center-frequency must accept plain Hz only, got accepted shorthand"
         );
+    }
+
+    // === WAV export CLI flags (plan Task 4) ===
+    //
+    // Frozen contract:
+    //
+    // ```text
+    // --wav-output <path>   -> CliArgs::wav_output: Option<String>
+    // --offline             -> CliArgs::offline: bool
+    // ```
+    //
+    // Decisions frozen here where the plan left a choice:
+    //
+    // * `--wav-output` takes the path verbatim as `Option<String>`. It is not
+    //   canonicalised or validated here: the sink is what reports an unopenable
+    //   path, and doing it at parse time would reject a path that only becomes
+    //   writable later (or one that is a fifo).
+    // * Both default to `None` / `false`, so every existing invocation is
+    //   unchanged and playback-only runs never touch a file.
+    // * `--offline` is a bare boolean flag (no value). It is independent of
+    //   `--wav-output`: it is legal on its own, and it is legal alongside a
+    //   live-playback request. `--offline` without `--wav-output` is accepted
+    //   by the parser even though it does nothing useful, because validating
+    //   that combination is the caller's job, not the flag parser's.
+    // * The plan's compatibility rule — tee only when live playback is also
+    //   explicitly requested — is a sink-selection decision in `main.rs`, so
+    //   these flags stay plain data here rather than encoding the rule.
+
+    #[test]
+    fn cli_wav_output_parses_path() {
+        let args = CliArgs::parse_from([
+            "termsdr",
+            "--test",
+            "--wav-output",
+            "/tmp/termsdr-capture.wav",
+        ]);
+        assert_eq!(
+            args.wav_output.as_deref(),
+            Some("/tmp/termsdr-capture.wav"),
+            "--wav-output must carry the path through unchanged"
+        );
+    }
+
+    #[test]
+    fn cli_wav_output_defaults_to_none() {
+        let args = CliArgs::parse_from(["termsdr", "--test"]);
+        assert!(
+            args.wav_output.is_none(),
+            "playback-only runs must not default to writing a file"
+        );
+    }
+
+    #[test]
+    fn cli_wav_output_requires_a_value() {
+        let result = CliArgs::try_parse_from(["termsdr", "--test", "--wav-output"]);
+        assert!(
+            result.is_err(),
+            "--wav-output takes a path; a bare flag must be rejected"
+        );
+    }
+
+    #[test]
+    fn cli_offline_flag_parses_as_bare_boolean() {
+        let args = CliArgs::parse_from(["termsdr", "--file", "capture.iq", "--offline"]);
+        assert!(args.offline, "--offline must set the boolean");
+    }
+
+    #[test]
+    fn cli_offline_defaults_to_false() {
+        let args = CliArgs::parse_from(["termsdr", "--test"]);
+        assert!(!args.offline, "--offline must default to false");
+    }
+
+    #[test]
+    fn cli_offline_rejects_a_value() {
+        let result = CliArgs::try_parse_from(["termsdr", "--test", "--offline=true"]);
+        assert!(
+            result.is_err(),
+            "--offline is a bare boolean flag, not a value option"
+        );
+    }
+
+    #[test]
+    fn cli_wav_output_and_offline_combine() {
+        let args = CliArgs::parse_from([
+            "termsdr",
+            "--file",
+            "capture.iq",
+            "--offline",
+            "--wav-output",
+            "out/am.wav",
+        ]);
+        assert!(args.offline);
+        assert_eq!(args.wav_output.as_deref(), Some("out/am.wav"));
+    }
+
+    #[test]
+    fn cli_wav_output_does_not_disturb_existing_defaults() {
+        let args = CliArgs::parse_from(["termsdr", "--test", "--wav-output", "out/am.wav"]);
+        let config = args.to_config().unwrap();
+        assert!((config.center_freq - 100_000_000.0).abs() < 1.0);
+        assert!((config.sample_rate - 2_048_000.0).abs() < 1.0);
+        assert_eq!(config.fft_size, 2048);
+        assert!(args.iq_format.is_none());
+        assert!(args.file_sample_rate.is_none());
     }
 }

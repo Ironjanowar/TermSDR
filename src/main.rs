@@ -8,14 +8,15 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use crossterm::event::{self, Event};
 
 use termsdr::audio::cpal_sink::CpalSink;
+use termsdr::audio::wav_sink::WavSink;
 use termsdr::audio::ws_sink::{WebSocketSink, WsAudioFormat};
-use termsdr::audio::{audio_thread, AudioControl, AudioSink, NullSink};
+use termsdr::audio::{audio_thread, AudioControl, AudioSink, NullSink, TeeSink};
 use termsdr::capture::file::FileSource;
 use termsdr::capture::rtlsdr::RtlSdrSource;
 use termsdr::capture::test_signal::TestSource;
@@ -175,6 +176,19 @@ fn run_pipeline(mut config: AppConfig, args: &CliArgs) -> Result<()> {
     // Shared averaging count
     let shared_averaging = Arc::new(AtomicUsize::new(4));
 
+    // `--offline` only changes pacing for a file source: a synthetic or RTL-SDR
+    // source is already paced by its own generator/hardware, so the flag would be
+    // meaningless there.
+    let offline_replay = args.offline && matches!(config.source, SourceType::File { .. });
+    if args.offline && !offline_replay {
+        tracing::warn!("Capture: --offline only affects file replay; ignoring it for this source");
+    }
+    let pacing = if offline_replay {
+        Pacing::Unpaced
+    } else {
+        Pacing::Realtime
+    };
+
     // Thread 1: Capture
     let running_capture = running.clone();
     let source_type = config.source.clone();
@@ -182,7 +196,20 @@ fn run_pipeline(mut config: AppConfig, args: &CliArgs) -> Result<()> {
     let capture_handle = thread::Builder::new()
         .name("capture".into())
         .spawn(move || {
-            capture_thread(source_type, file_source, sample_rate, center_freq, fft_size, gain, ppm, iq_tx_dsp, iq_tx_audio, running_capture, shared_freq_capture);
+            capture_loop(
+                source_type,
+                file_source,
+                sample_rate,
+                center_freq,
+                fft_size,
+                gain,
+                ppm,
+                iq_tx_dsp,
+                iq_tx_audio,
+                running_capture,
+                shared_freq_capture,
+                pacing,
+            );
         })?;
 
     // Thread 2: DSP
@@ -225,26 +252,30 @@ fn run_pipeline(mut config: AppConfig, args: &CliArgs) -> Result<()> {
     };
     let format_atomic_server = format_atomic.clone();
 
-    let audio_handle = thread::Builder::new()
-        .name("audio".into())
-        .spawn(move || {
-            let sink: Box<dyn AudioSink> = if is_headless {
-                if let Some(tx) = ws_audio_tx {
-                    Box::new(WebSocketSink::new(tx, format_atomic))
-                } else {
-                    Box::new(NullSink::new(AUDIO_OUTPUT_SAMPLE_RATE))
-                }
-            } else {
-                match CpalSink::new(None) {
-                    Ok(s) => Box::new(s),
-                    Err(e) => {
-                        tracing::warn!("Audio: no output device ({e}), audio disabled");
-                        Box::new(NullSink::new(AUDIO_OUTPUT_SAMPLE_RATE))
-                    }
-                }
-            };
-            audio_thread(&iq_rx_audio, &audio_ctrl_rx, sink, center_freq, cursor_freq, channel_bw, sample_rate);
-        })?;
+    // The sink is built here rather than inside the thread so that an unwritable
+    // `--wav-output` path is a startup error instead of a warning the caller has to
+    // find in the log after an apparently successful run.
+    let sink = select_audio_sink(
+        args.wav_output.as_deref(),
+        offline_replay,
+        is_headless,
+        ws_audio_tx,
+        format_atomic,
+    )?;
+
+    let audio_handle = thread::Builder::new().name("audio".into()).spawn(move || {
+        // `audio_thread` finalizes the sink (patching a WAV header, for instance)
+        // on its own shutdown path, so the recording is complete once this joins.
+        audio_thread(
+            &iq_rx_audio,
+            &audio_ctrl_rx,
+            sink,
+            center_freq,
+            cursor_freq,
+            channel_bw,
+            sample_rate,
+        );
+    })?;
 
     // Thread 3: TUI or WS Server (main thread)
     let audio_ctrl_tx_server = audio_ctrl_tx.clone();
@@ -269,18 +300,123 @@ fn run_pipeline(mut config: AppConfig, args: &CliArgs) -> Result<()> {
         tui_thread(config, fft_rx, running.clone(), audio_ctrl_tx.clone(), shared_center_freq, shared_averaging)
     };
 
-    // Signal shutdown
+    // Offline EOF is an orderly channel close: the capture sender disappears
+    // and audio drains every queued IQ block. Live operation retains explicit
+    // low-latency shutdown.
     running.store(false, Ordering::SeqCst);
-    let _ = audio_ctrl_tx.send(AudioControl::Shutdown);
+    if !offline_replay {
+        let _ = audio_ctrl_tx.send(AudioControl::Shutdown);
+    }
 
     // Wait for threads to join
-    let _ = capture_handle.join();
-    let _ = dsp_handle.join();
-    let _ = audio_handle.join();
+    capture_handle.join().map_err(|panic| {
+        anyhow::anyhow!("capture thread panicked: {}", panic_message(&panic))
+    })?;
+    dsp_handle
+        .join()
+        .map_err(|panic| anyhow::anyhow!("DSP thread panicked: {}", panic_message(&panic)))?;
+    audio_handle
+        .join()
+        .map_err(|panic| anyhow::anyhow!("audio thread panicked: {}", panic_message(&panic)))?;
 
     result
 }
 
+fn panic_message(payload: &Box<dyn std::any::Any + Send + 'static>) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(ToString::to_string))
+        .unwrap_or_else(|| "non-string panic payload".to_owned())
+}
+
+/// Build the sink that carries live playback for this run.
+///
+/// Headless runs stream to WebSocket clients (or record nothing when no audio
+/// channel exists); an interactive run plays through the system device. A missing
+/// output device degrades to [`NullSink`] so the pipeline still runs.
+fn live_sink(
+    is_headless: bool,
+    ws_audio_tx: Option<Sender<Vec<u8>>>,
+    format_atomic: std::sync::Arc<std::sync::atomic::AtomicU8>,
+) -> Box<dyn AudioSink> {
+    if is_headless {
+        if let Some(tx) = ws_audio_tx {
+            Box::new(WebSocketSink::new(tx, format_atomic))
+        } else {
+            Box::new(NullSink::new(AUDIO_OUTPUT_SAMPLE_RATE))
+        }
+    } else {
+        match CpalSink::new(None) {
+            Ok(sink) => Box::new(sink),
+            Err(e) => {
+                tracing::warn!("Audio: no output device ({e}), audio disabled");
+                Box::new(NullSink::new(AUDIO_OUTPUT_SAMPLE_RATE))
+            }
+        }
+    }
+}
+
+/// Choose the audio sink for this run, optionally recording to a WAV file.
+///
+/// * No `--wav-output`: the live sink is the only sink, exactly as before.
+/// * `--wav-output` with `--offline`: the [`WavSink`] is the sole sink, so an
+///   offline render is deterministic — no playback device, no dropped frames,
+///   nothing but the samples the demodulator produced. The file uses
+///   [`AUDIO_OUTPUT_SAMPLE_RATE`], the rate the demodulator is built from when no
+///   live sink imposes another.
+/// * `--wav-output` without `--offline`: a [`TeeSink`] sends the same samples to
+///   playback and to the file. Live playback is what the user asked for by
+///   running a live pipeline, so the recording must not silence it. The file
+///   declares the live device's rate, because that is the rate the demodulator
+///   actually ran at.
+///
+/// # Errors
+/// Returns an error if the WAV file cannot be created.
+fn select_audio_sink(
+    wav_output: Option<&str>,
+    offline: bool,
+    is_headless: bool,
+    ws_audio_tx: Option<Sender<Vec<u8>>>,
+    format_atomic: std::sync::Arc<std::sync::atomic::AtomicU8>,
+) -> Result<Box<dyn AudioSink>> {
+    let Some(path) = wav_output else {
+        return Ok(live_sink(is_headless, ws_audio_tx, format_atomic));
+    };
+
+    if offline {
+        let sink = WavSink::new(path, AUDIO_OUTPUT_SAMPLE_RATE)
+            .with_context(|| format!("failed to open WAV output {path}"))?;
+        tracing::info!(
+            "Audio: recording to {path} at {AUDIO_OUTPUT_SAMPLE_RATE} Hz as the only sink (no playback)"
+        );
+        return Ok(Box::new(sink));
+    }
+
+    let primary = live_sink(is_headless, ws_audio_tx, format_atomic);
+    let sample_rate = primary.sample_rate();
+    let secondary = WavSink::new(path, sample_rate)
+        .with_context(|| format!("failed to open WAV output {path}"))?;
+    tracing::info!("Audio: recording to {path} at {sample_rate} Hz alongside playback");
+    Ok(Box::new(TeeSink::new(primary, Box::new(secondary))))
+}
+
+/// Whether the capture loop paces itself to wall-clock time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pacing {
+    /// Sleep between blocks so a replayed recording takes its own duration.
+    Realtime,
+    /// Read blocks as fast as the DSP drains them, so an offline render finishes
+    /// deterministically instead of in real time.
+    Unpaced,
+}
+
+/// Test-only entry point for the frozen capture-thread tests.
+///
+/// The tests drive the real loop through the eleven-argument signature, so this
+/// pins real-time pacing for them; production goes through [`capture_loop`],
+/// which additionally selects the pacing.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)] // thread entry point takes ownership
 fn capture_thread(
     source_type: SourceType,
@@ -294,6 +430,41 @@ fn capture_thread(
     tx_audio: Sender<Vec<IqSample>>,
     running: Arc<AtomicBool>,
     shared_center_freq: Option<Arc<AtomicU64>>,
+) {
+    capture_loop(
+        source_type,
+        file_source,
+        sample_rate,
+        center_freq,
+        fft_size,
+        gain,
+        ppm,
+        tx_dsp,
+        tx_audio,
+        running,
+        shared_center_freq,
+        Pacing::Realtime,
+    );
+}
+
+/// Capture thread: read IQ blocks from the source and forward them to DSP and audio.
+///
+/// `pacing` selects whether the loop sleeps to hold real time; `Pacing::Unpaced`
+/// is what `--offline` file replay uses.
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)] // thread entry point takes ownership
+fn capture_loop(
+    source_type: SourceType,
+    file_source: Option<FileSource>,
+    sample_rate: f64,
+    center_freq: f64,
+    fft_size: usize,
+    gain: Option<f32>,
+    ppm: i32,
+    tx_dsp: Sender<Vec<IqSample>>,
+    tx_audio: Sender<Vec<IqSample>>,
+    running: Arc<AtomicBool>,
+    shared_center_freq: Option<Arc<AtomicU64>>,
+    pacing: Pacing,
 ) {
     let mut source: Box<dyn Source> = match source_type {
         SourceType::Test { signals } => {
@@ -362,10 +533,24 @@ fn capture_thread(
                 // Only the samples actually produced are valid; `buffer[count..]` still
                 // holds the previous block and must never reach DSP or audio.
                 let block = buffer[..count].to_vec();
-                // Send to DSP (non-blocking)
+                // Send to DSP (non-blocking): a stale spectrum frame is harmless.
                 let _ = tx_dsp.try_send(block.clone());
-                // Send to Audio (non-blocking, tolerate drops)
-                let _ = tx_audio.try_send(block);
+                if pacing == Pacing::Unpaced {
+                    // Unpaced replay is a render, not a live view: the audio block must
+                    // not be skipped just because the DSP is behind, or `--wav-output`
+                    // would record a fraction of the file. Backpressure is
+                    // intentional; disconnect still terminates promptly.
+                    if tx_audio.send(block).is_err() {
+                        // The audio worker owns sink/resampler errors. Stop the rest of
+                        // the pipeline so the main thread can join it and propagate the
+                        // failure instead of leaving the server or TUI waiting forever.
+                        running.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                } else {
+                    // Send to Audio (non-blocking, tolerate drops)
+                    let _ = tx_audio.try_send(block);
+                }
             }
             Err(e) => {
                 tracing::error!("Capture error: {e}");
@@ -377,11 +562,14 @@ fn capture_thread(
             }
         }
 
-        // Pace based on sample rate to avoid flooding
-        let elapsed = start.elapsed();
-        if elapsed < block_duration {
-            if let Some(remaining) = block_duration.checked_sub(elapsed) {
-                thread::sleep(remaining);
+        // Pace based on sample rate to avoid flooding. Unpaced replay skips the
+        // wait entirely, which is the whole point of `--offline`.
+        if pacing == Pacing::Realtime {
+            let elapsed = start.elapsed();
+            if elapsed < block_duration {
+                if let Some(remaining) = block_duration.checked_sub(elapsed) {
+                    thread::sleep(remaining);
+                }
             }
         }
     }
@@ -509,6 +697,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
 
     /// Number of FFT bins used by these tests: small, so each block is a handful of
     /// samples and the paced loop finishes in microseconds.
@@ -699,6 +888,199 @@ mod tests {
         assert!(
             !running.load(Ordering::SeqCst),
             "the trailing EOF must stop the pipeline"
+        );
+    }
+
+    #[test]
+    fn non_file_offline_is_filtered_before_live_sink_selection() {
+        let dir = TempDir::new("offline-non-file");
+        let without_offline = dir.path.join("without.wav");
+        let with_offline = dir.path.join("with.wav");
+
+        let select = |path: &std::path::Path, offline: bool| {
+            let (tx, rx) = bounded(4);
+            let format = Arc::new(std::sync::atomic::AtomicU8::new(
+                WsAudioFormat::PcmRaw as u8,
+            ));
+            let mut sink = select_audio_sink(
+                Some(path.to_str().unwrap()),
+                offline,
+                true,
+                Some(tx),
+                format,
+            )
+            .unwrap();
+            sink.write(&[0.25, -0.5]).unwrap();
+            sink.finish().unwrap();
+            !rx.is_empty()
+        };
+
+        let source = SourceType::Test { signals: vec![] };
+        let control_offline_replay = false && matches!(source, SourceType::File { .. });
+        let raw_offline = true;
+        let offline_replay = raw_offline && matches!(source, SourceType::File { .. });
+
+        // run_pipeline computes `offline_replay = args.offline &&
+        // matches!(source, File)` before passing that filtered value to the sink helper.
+        assert!(!offline_replay, "non-file --offline must be filtered out");
+        assert!(
+            select(&without_offline, control_offline_replay),
+            "control run must retain live WebSocket output"
+        );
+        assert!(
+            select(&with_offline, offline_replay),
+            "--offline is ignored for --test/non-file sources, so it must select the same live+WAV sink as the control run"
+        );
+    }
+
+    #[test]
+    fn unpaced_file_replay_bypasses_sleep_and_delivers_every_audio_block() {
+        let dir = TempDir::new("unpaced-all-audio");
+        let samples: Vec<(u8, u8)> = (0..12)
+            .map(|index| (index * 7, 255 - index * 7))
+            .collect();
+        let path = dir.write("twelve.cu8", &cu8_bytes(&samples));
+        let source = FileSource::new(
+            &path,
+            Some(termsdr::capture::file::IqFileFormat::Cu8),
+            Some(40.0),
+            Some(TEST_CENTER_FREQ),
+        )
+        .unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let (tx_dsp, _rx_dsp) = bounded(1);
+        let (tx_audio, rx_audio) = bounded(1);
+        let consumer = std::thread::spawn(move || {
+            let mut blocks = Vec::new();
+            while let Ok(block) = rx_audio.recv() {
+                blocks.push(block);
+            }
+            blocks
+        });
+
+        let started = Instant::now();
+        capture_loop(
+            SourceType::File { path: path.clone() },
+            Some(source),
+            40.0,
+            TEST_CENTER_FREQ,
+            TEST_FFT_SIZE,
+            None,
+            0,
+            tx_dsp,
+            tx_audio,
+            running,
+            None,
+            Pacing::Unpaced,
+        );
+        let elapsed = started.elapsed();
+        let blocks = consumer.join().unwrap();
+
+        assert_eq!(blocks.len(), 3, "all three file blocks must reach audio");
+        assert_eq!(blocks.iter().map(Vec::len).sum::<usize>(), 12);
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "unpaced replay took {elapsed:?}; real-time pacing would sleep about 300 ms"
+        );
+    }
+
+    #[test]
+    fn unpaced_file_replay_never_drops_when_audio_is_slow_for_over_500ms() {
+        let dir = TempDir::new("unpaced-slow-audio");
+        let samples: Vec<(u8, u8)> = (0..12)
+            .map(|index| (index * 7, 255 - index * 7))
+            .collect();
+        let path = dir.write("twelve-slow.cu8", &cu8_bytes(&samples));
+        let source = FileSource::new(
+            &path,
+            Some(termsdr::capture::file::IqFileFormat::Cu8),
+            Some(TEST_SAMPLE_RATE),
+            Some(TEST_CENTER_FREQ),
+        )
+        .unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let (tx_dsp, _rx_dsp) = bounded(1);
+        let (tx_audio, rx_audio) = bounded(1);
+        let consumer = std::thread::spawn(move || {
+            // Exceed the production send timeout while keeping the regression
+            // bounded. Offline rendering must apply backpressure, not drop.
+            std::thread::sleep(Duration::from_millis(650));
+            rx_audio.into_iter().collect::<Vec<_>>()
+        });
+
+        let started = Instant::now();
+        capture_loop(
+            SourceType::File { path: path.clone() },
+            Some(source),
+            TEST_SAMPLE_RATE,
+            TEST_CENTER_FREQ,
+            TEST_FFT_SIZE,
+            None,
+            0,
+            tx_dsp,
+            tx_audio,
+            running,
+            None,
+            Pacing::Unpaced,
+        );
+        let elapsed = started.elapsed();
+        let blocks = consumer.join().unwrap();
+
+        assert_eq!(
+            blocks.len(),
+            3,
+            "offline replay dropped a source block while waiting for a slow audio consumer"
+        );
+        assert_eq!(
+            blocks.iter().map(Vec::len).sum::<usize>(),
+            samples.len(),
+            "every source sample must reach audio during offline replay"
+        );
+        assert!(elapsed < Duration::from_secs(2), "test exceeded its bounded runtime: {elapsed:?}");
+    }
+
+    /// If the audio worker exits after a WAV/resampler failure, its disconnected
+    /// receiver must stop the whole offline pipeline rather than only the capture loop.
+    #[test]
+    fn unpaced_audio_disconnect_stops_the_pipeline() {
+        let dir = TempDir::new("unpaced-audio-disconnect");
+        let path = dir.write(
+            "audio-disconnect.cu8",
+            &cu8_bytes(&[(0, 255), (64, 192), (128, 128), (255, 0)]),
+        );
+        let source = open_source(&path);
+        let running = Arc::new(AtomicBool::new(true));
+        let (tx_dsp, _rx_dsp) = bounded(1);
+        let (tx_audio, rx_audio) = bounded(1);
+        drop(rx_audio);
+
+        let capture_running = running.clone();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let capture = std::thread::spawn(move || {
+            capture_loop(
+                SourceType::File { path },
+                Some(source),
+                TEST_SAMPLE_RATE,
+                TEST_CENTER_FREQ,
+                TEST_FFT_SIZE,
+                None,
+                0,
+                tx_dsp,
+                tx_audio,
+                capture_running,
+                None,
+                Pacing::Unpaced,
+            );
+            finished_tx.send(()).expect("report capture-loop return");
+        });
+
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("unpaced capture loop must return when the audio receiver disconnects");
+        capture.join().expect("capture thread must not panic");
+        assert!(
+            !running.load(Ordering::SeqCst),
+            "an offline audio disconnect must clear `running` so the server/TUI returns and run_pipeline can join the failed audio worker"
         );
     }
 }

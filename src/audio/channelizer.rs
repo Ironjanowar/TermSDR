@@ -149,6 +149,10 @@ pub(crate) struct AmChannelizer {
     nco_phase_rad: f64,
     /// Exact stateful complex resampler from `input_rate_hz` to `output_rate_hz`.
     resampler: Box<dyn ComplexResampler>,
+    /// RF frames accepted so far, used to derive the exact delivered duration at end of stream.
+    frames_in: u64,
+    /// Channelized frames emitted so far, in output samples.
+    frames_out: u64,
     /// Complex channel filter, designed at `output_rate_hz`.
     channel_fir: ComplexFir,
     /// Total delay of the delivered stream, in output samples: resampler residual buffering, the
@@ -391,6 +395,8 @@ impl AmChannelizer {
             edges,
             nco_phase_rad: 0.0,
             resampler,
+            frames_in: 0,
+            frames_out: 0,
             channel_fir,
             latency_output_samples,
             priming_shift_samples,
@@ -445,8 +451,48 @@ impl AmChannelizer {
             .context("channel resampler failed")?;
 
         let iq = self.channel_fir.process(&self.resampled);
+        #[allow(clippy::cast_possible_truncation)] // frame counters stay far below 2^53
+        let delivered = iq.len() as u64;
+        self.frames_in += input.len() as u64;
+        self.frames_out += delivered;
         let power_dbfs = channel_power_dbfs(&iq);
         Ok(ChannelizedBlock { iq, power_dbfs })
+    }
+
+    /// Flushes the resampler tail so the stream's last frames are not lost at end of input.
+    ///
+    /// The rational resampler buffers up to one output interval of input. Without this call the
+    /// final partial interval never reaches the channel filter, so a stream whose RF-to-sink ratio
+    /// leaves a remainder ends short of its exact duration. Call it once, after the last input
+    /// block, and discard the chain afterwards.
+    ///
+    /// The tail is trimmed to the exact rational duration: flushing can deliver a frame or two more
+    /// than `ceil(frames_in * output_rate / input_rate) - frames_out`, and a stream must not exceed
+    /// its own duration just because its filter history was longer than the remainder.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the resampler rejects the flush.
+    pub fn finish(&mut self) -> Result<ChannelizedBlock> {
+        self.resampled.clear();
+        self.resampler
+            .flush(&mut self.resampled)
+            .context("channel resampler flush failed")?;
+        let mut tail = self.channel_fir.process(&self.resampled);
+
+        let expected_total =
+            Self::exact_output_frames(self.frames_in, self.input_rate_hz, self.output_rate_hz);
+        let remaining = expected_total.saturating_sub(self.frames_out);
+        #[allow(clippy::cast_possible_truncation)] // remaining is bounded by the flush length
+        let keep = remaining.min(tail.len() as u64) as usize;
+        tail.truncate(keep);
+        self.frames_out += keep as u64;
+
+        let power_dbfs = channel_power_dbfs(&tail);
+        Ok(ChannelizedBlock {
+            iq: tail,
+            power_dbfs,
+        })
     }
 
     /// Retunes the channel without resetting any DSP state.
@@ -527,6 +573,27 @@ impl AmChannelizer {
     #[must_use]
     pub fn channel_fir_group_delay_for_test(&self) -> usize {
         self.channel_fir.group_delay_samples()
+    }
+
+    /// Exact number of output frames `frames_in` RF frames represent at these clocks.
+    ///
+    /// Rounded up, so a stream never reports less than the duration it accepted, and computed in
+    /// `u128` so no intermediate product overflows for any receiver rate the CLI accepts.
+    fn exact_output_frames(frames_in: u64, input_rate_hz: f64, output_rate_hz: f64) -> u64 {
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
+        let numerator = u128::from(frames_in) * (output_rate_hz.round() as u128);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let denominator = input_rate_hz.round() as u128;
+        if denominator == 0 {
+            return 0;
+        }
+        #[allow(clippy::cast_possible_truncation)] // the count fits the stream length
+        let frames = numerator.div_ceil(denominator) as u64;
+        frames
     }
 
     /// Total delay of the delivered stream, in **output** samples.
@@ -1240,6 +1307,47 @@ mod tests {
             changed_output.power_dbfs, reference_output.power_dbfs,
             "bit-identical channelized IQ must report bit-identical power"
         );
+    }
+
+    #[test]
+    fn finishing_a_chain_delivers_the_exact_rational_duration() {
+        // 960 kHz and 1.2 MHz are receiver rates the CLI accepts, and both leave a remainder when
+        // divided into 48 kHz. The resampler holds that last partial interval until it is flushed.
+        for input_rate_hz in [960_000.0_f64, 1_024_000.0, 1_200_000.0, 2_048_000.0] {
+            let seconds = 2.0_f64;
+            let total = (input_rate_hz * seconds) as usize;
+            let expected = ((total as f64) * OUTPUT_RATE_HZ / input_rate_hz).round() as usize;
+            let mut channelizer = AmChannelizer::new(
+                CENTER_FREQ_HZ,
+                CENTER_FREQ_HZ,
+                input_rate_hz,
+                OUTPUT_RATE_HZ,
+                AmRfProfile::Khz8,
+                VoiceProfile::Standard,
+            )
+            .expect("receiver rate must construct a channelizer");
+            let mut produced = 0_usize;
+            let mut index = 0_usize;
+            while index < total {
+                let count = (total - index).min(BLOCK_SAMPLES);
+                let block = tone_block(input_rate_hz, index, count, &[(1_500.0, 0.5)]);
+                produced += channelizer
+                    .process(&block)
+                    .expect("finite input must process")
+                    .iq
+                    .len();
+                index += count;
+            }
+            let tail = channelizer
+                .finish()
+                .expect("flushing the chain must succeed");
+            produced += tail.iq.len();
+            assert_eq!(
+                produced, expected,
+                "{input_rate_hz} Hz for {seconds} s must deliver exactly {expected} frames at \
+                 {OUTPUT_RATE_HZ} Hz, but produced {produced} without the resampler tail"
+            );
+        }
     }
 
     #[test]

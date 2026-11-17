@@ -12,9 +12,10 @@
 //! → SoftLimiter
 //! ```
 //!
-//! It is intentionally not wired into `audio::pump_audio` yet. Legacy AM/FM/NFM routing remains
-//! untouched until the later integration slice. All frequencies and rates are hertz, powers and
-//! gains are decibels, and [`AmDemodulator::latency_samples`] is expressed at the output rate.
+//! It is wired into `audio::pump_audio` for `DemodMode::AM` only; legacy AM/FM/NFM routing stays
+//! untouched, and a stream that mixes AM with another mode falls back to the legacy demodulator.
+//! All frequencies and rates are hertz, powers and gains are decibels, and
+//! [`AmDemodulator::latency_samples`] is expressed at the output rate.
 //!
 //! # Streaming contract
 //!
@@ -50,7 +51,7 @@ use crate::{
     not(test),
     expect(
         dead_code,
-        reason = "standalone Task 10A API is wired into the audio pump in Task 10B"
+        reason = "diagnostic fields are reported to callers that do not yet log them"
     )
 )]
 pub(crate) struct AmAudioBlock {
@@ -79,26 +80,12 @@ pub(crate) struct AmAudioBlock {
 /// The odd symmetric impulse response has deterministic delay `(taps_len - 1) / 2`, emits exactly
 /// one output for every input, and retains its circular history across arbitrary partitions.
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "standalone Task 10A stage is consumed through AmDemodulator in Task 10B"
-    )
-)]
 struct VoiceBandpass {
     taps: Vec<f32>,
     history: Vec<f32>,
     cursor: usize,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "standalone Task 10A stage is consumed through AmDemodulator in Task 10B"
-    )
-)]
 impl VoiceBandpass {
     const STOPBAND_DB: f64 = 60.0;
     const LOWER_TRANSITION_HZ: f64 = 200.0;
@@ -202,6 +189,13 @@ impl VoiceBandpass {
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "stage delay only feeds the end-to-end latency report"
+        )
+    )]
     fn latency_samples(&self) -> usize {
         (self.taps.len() - 1) / 2
     }
@@ -224,26 +218,12 @@ impl VoiceBandpass {
 
 /// Stateful first-order DC blocker for the AM envelope.
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "standalone Task 10A stage is consumed through AmDemodulator in Task 10B"
-    )
-)]
 struct DcBlocker {
     alpha: f32,
     previous_input: f32,
     previous_output: f32,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "standalone Task 10A stage is consumed through AmDemodulator in Task 10B"
-    )
-)]
 impl DcBlocker {
     fn new(sample_rate_hz: f64) -> Result<Self> {
         if !sample_rate_hz.is_finite() || sample_rate_hz <= 0.0 {
@@ -273,13 +253,6 @@ impl DcBlocker {
 
 /// Stateful standalone AM demodulator for one tuned channel.
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "standalone Task 10A API is wired into the audio pump in Task 10B"
-    )
-)]
 pub(crate) struct AmDemodulator {
     channelizer: AmChannelizer,
     squelch: SquelchState,
@@ -291,13 +264,6 @@ pub(crate) struct AmDemodulator {
     output_rate_hz: f64,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "standalone Task 10A API is wired into the audio pump in Task 10B"
-    )
-)]
 impl AmDemodulator {
     /// Build one AM chain tuned from `center_hz` to `channel_hz`.
     ///
@@ -496,10 +462,50 @@ impl AmDemodulator {
         Ok(())
     }
 
+    /// Flushes the chain's resampler tail after the last input block.
+    ///
+    /// A stream must end on its exact RF-clock duration. The channelizer's resampler buffers a
+    /// partial interval, so without this call a rate whose ratio leaves a remainder ends short.
+    /// The returned block is the final audio to write; call this once and then discard the chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the channelizer cannot flush.
+    pub fn finish(&mut self) -> Result<AmAudioBlock> {
+        let channelized = self.channelizer.finish()?;
+        if channelized.iq.is_empty() {
+            return Ok(self.block(Vec::new(), channelized.power_dbfs));
+        }
+        let envelope: Vec<f32> = channelized.iq.iter().map(|sample| sample.norm()).collect();
+        let dc_removed = self.dc_blocker.process(&envelope);
+        let filtered = self.voice_filter.process(&dc_removed);
+        let open = self.squelch.is_open();
+        self.agc.set_squelch_open(open);
+        let gained = self.agc.process(&filtered)?;
+        let samples = self.limiter.process(&gained);
+        Ok(self.block(samples, channelized.power_dbfs))
+    }
+
+    /// The profile currently in effect.
+    ///
+    /// Callers build a replacement profile from this one so a single control changes only its own
+    /// field, leaving the RF bandwidth, voice shape, squelch, and prebuffer otherwise intact.
+    #[must_use]
+    pub fn profile(&self) -> &AmAudioProfile {
+        &self.profile
+    }
+
     /// Total deterministic pipeline latency, in output-rate samples.
     ///
     /// Callers discard at least this many leading samples before spectral or timing measurements.
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "latency is consumed by callers that discard lead-in samples"
+        )
+    )]
     pub fn latency_samples(&self) -> usize {
         self.channelizer
             .latency_samples()

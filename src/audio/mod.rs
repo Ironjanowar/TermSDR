@@ -3,22 +3,29 @@
 pub(crate) mod agc;
 pub(crate) mod am;
 pub(crate) mod channelizer;
+pub mod cpal_sink;
 pub(crate) mod demod;
 pub(crate) mod limiter;
 pub mod profile;
 pub(crate) mod squelch;
 #[allow(dead_code)]
 pub(crate) mod test_signal;
-pub mod cpal_sink;
 pub mod wav_sink;
 pub mod ws_sink;
 
-use crate::types::IqSample;
 use crate::dsp::resampler::{create_decimated_real_resampler, RealResampler};
-use demod::{Demodulator, DemodMode};
+use crate::types::IqSample;
+use am::AmDemodulator;
+use demod::{DemodMode, Demodulator};
+use profile::{AmAudioProfile, AmRfProfile, SquelchMode, VoiceProfile, DEFAULT_PREBUFFER_MS};
 
 /// dB floor value for silence/zero-power audio.
 const AUDIO_DB_FLOOR: f32 = -200.0;
+
+/// Lowest channel bandwidth, in hertz, that maps onto an AM RF profile.
+const AM_RF_MIN_BW_HZ: f64 = 6_000.0;
+/// Highest channel bandwidth, in hertz, that maps onto an AM RF profile.
+const AM_RF_MAX_BW_HZ: f64 = 12_000.0;
 
 // ============================================================================
 // Audio Sink Abstraction
@@ -57,7 +64,7 @@ pub struct NullSink {
 }
 
 impl NullSink {
-    #[must_use] 
+    #[must_use]
     pub fn new(sample_rate: u32) -> Self {
         Self {
             samples: Vec::new(),
@@ -140,25 +147,657 @@ pub enum AudioControl {
     SetCursorFreq(f64),
     SetCenterFreq(f64),
     SetChannelBw(f64),
-    SetVolume(u8),            // 0-100
-    SetSquelch(Option<f32>),  // None = disabled, Some(dB) = threshold
+    SetVolume(u8),           // 0-100
+    SetSquelch(Option<f32>), // None = disabled, Some(dB) = threshold
     Mute(bool),
-    AddVfo { id: usize, freq: f64, channel_bw: f64, mode: DemodMode },
+    AddVfo {
+        id: usize,
+        freq: f64,
+        channel_bw: f64,
+        mode: DemodMode,
+    },
     RemoveVfo(usize),
-    SetDemodMode(DemodMode),               // for cursor (id=0)
-    SetVfoDemodMode { id: usize, mode: DemodMode },  // for specific VFO
+    SetDemodMode(DemodMode), // for cursor (id=0)
+    SetVfoDemodMode {
+        id: usize,
+        mode: DemodMode,
+    }, // for specific VFO
     SetAgcEnabled(bool),
-    SetAgcAttack(f64),   // ms
-    SetAgcDecay(f64),    // ms
+    SetAgcAttack(f64), // ms
+    SetAgcDecay(f64),  // ms
     SetAgcTarget(f32),
-    SetAgcMaxGain(f32),  // dB
+    SetAgcMaxGain(f32), // dB
     SetBandpassEnabled(bool),
-    SetBandpassLowCut(f64),   // Hz
-    SetBandpassHighCut(f64),  // Hz
+    SetBandpassLowCut(f64),  // Hz
+    SetBandpassHighCut(f64), // Hz
     Shutdown,
 }
 
+use std::borrow::Cow;
 use std::collections::HashMap;
+
+// ============================================================================
+// Audio Chains
+// ============================================================================
+
+/// Clocks shared by every chain of one audio stream, in hertz.
+#[derive(Debug, Clone, Copy)]
+struct ChainContext {
+    /// RF clock of the incoming I/Q stream.
+    input_sample_rate: f64,
+    /// Sink clock every chain must ultimately produce.
+    output_sample_rate: f64,
+}
+
+/// Per-channel request retained so one chain can be rebuilt when the stream's path changes.
+#[derive(Debug, Clone, Copy)]
+struct ChainSpec {
+    /// RF center of the incoming stream, in hertz.
+    center_freq: f64,
+    /// Absolute frequency this chain receives, in hertz.
+    cursor_freq: f64,
+    /// Requested channel bandwidth, in hertz.
+    channel_bw: f64,
+    /// Requested demodulation mode. A cursor that has never received a mode control stays on
+    /// [`DemodMode::AM`], the legacy constructor's default.
+    mode: DemodMode,
+    /// Whether the AM chain was explicitly requested, as opposed to the legacy AM default.
+    ///
+    /// Only an explicit request selects the aviation AM chain: a stream that received no mode
+    /// control keeps the legacy demodulator it has always used.
+    am_requested: bool,
+}
+
+impl ChainSpec {
+    /// Builds the request for one channel at `mode`.
+    fn new(center_freq: f64, cursor_freq: f64, channel_bw: f64, mode: DemodMode) -> Self {
+        Self {
+            center_freq,
+            cursor_freq,
+            channel_bw,
+            mode,
+            am_requested: mode == DemodMode::AM,
+        }
+    }
+
+    /// Builds the request for a stream that has not chosen a mode yet.
+    ///
+    /// This is the legacy AM default the pump has always started from; it keeps the legacy
+    /// demodulator until a mode control arrives.
+    fn legacy_default(center_freq: f64, cursor_freq: f64, channel_bw: f64) -> Self {
+        Self {
+            center_freq,
+            cursor_freq,
+            channel_bw,
+            mode: DemodMode::AM,
+            am_requested: false,
+        }
+    }
+}
+
+/// One demodulation chain of the audio pipeline.
+///
+/// A [`AudioChain::Legacy`] chain emits audio at its decimated RF rate, which the shared resampler
+/// converts to the sink rate exactly as it always has. An [`AudioChain::Am`] chain owns its own
+/// channelizer and already emits the sink rate, so an all-AM stream bypasses that resampler.
+///
+/// The legacy variant is stored inline because the frozen pipeline contract names it as
+/// `Legacy(Demodulator)`. There is one chain per live channel, so the variant size difference costs
+/// a few hundred bytes per VFO rather than per sample.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the pipeline contract pins Legacy(Demodulator); one instance exists per channel"
+)]
+pub(crate) enum AudioChain {
+    /// Legacy demodulator serving AM envelope, FM, and NFM.
+    Legacy(Demodulator),
+    /// Aviation AM chain: channelizer, channel-power squelch, voice filter, AGC, limiter.
+    Am(Box<AmDemodulator>),
+}
+
+impl AudioChain {
+    /// Builds the chain `spec` asks for.
+    ///
+    /// An explicitly requested [`DemodMode::AM`] selects the aviation AM chain and everything else
+    /// the legacy [`Demodulator`] exactly as before. An AM chain that cannot be designed for these
+    /// clocks falls back to the legacy path with a warning, because a rejected profile must not
+    /// stop a stream the legacy path still accepts.
+    fn build(context: &ChainContext, spec: &ChainSpec, squelch: SquelchMode) -> Self {
+        if spec.am_requested && spec.mode == DemodMode::AM {
+            if let Some(chain) = Self::design_am(context, spec, squelch) {
+                return chain;
+            }
+        }
+        Self::legacy(context, spec)
+    }
+
+    /// Builds the legacy demodulator for `spec`, bypassing any AM request.
+    ///
+    /// The pump's mixed-path fallback needs this: every chain of a mixed stream must run the
+    /// legacy demodulator even though some of them asked for AM.
+    fn legacy(context: &ChainContext, spec: &ChainSpec) -> Self {
+        // The pump's cursor chain has always been built with `new_am` for AM, so the legacy AM
+        // case keeps that exact constructor.
+        if spec.mode == DemodMode::AM {
+            return Self::Legacy(Demodulator::new_am(
+                spec.center_freq,
+                spec.cursor_freq,
+                spec.channel_bw,
+                context.input_sample_rate,
+                context.output_sample_rate,
+            ));
+        }
+        Self::Legacy(Demodulator::new(
+            spec.center_freq,
+            spec.cursor_freq,
+            spec.channel_bw,
+            context.input_sample_rate,
+            context.output_sample_rate,
+            spec.mode,
+        ))
+    }
+
+    /// Designs the aviation AM chain, or reports why it cannot serve this stream.
+    fn design_am(context: &ChainContext, spec: &ChainSpec, squelch: SquelchMode) -> Option<Self> {
+        let profile = AmAudioProfile {
+            rf: am_rf_profile_for_channel_bw(spec.channel_bw),
+            voice: VoiceProfile::default(),
+            squelch,
+            prebuffer_ms: DEFAULT_PREBUFFER_MS,
+        };
+        match AmDemodulator::new(
+            spec.center_freq,
+            spec.cursor_freq,
+            context.input_sample_rate,
+            context.output_sample_rate,
+            profile,
+        ) {
+            Ok(chain) => Some(Self::Am(Box::new(chain))),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    channel_bw = spec.channel_bw,
+                    "AM chain rejected this stream; using the legacy demodulator instead"
+                );
+                None
+            }
+        }
+    }
+
+    /// Processes one RF-rate block into audio plus the weight it contributes to a mix.
+    ///
+    /// The weight is the same pre-AGC notion the legacy path reports: the block's pre-AGC RMS for
+    /// a legacy chain, and the block's pre-demodulation channel power for an AM chain. Weights only
+    /// matter when more than one chain is live.
+    ///
+    /// # Errors
+    /// Returns an error when an AM chain rejects its input.
+    fn process(&mut self, iq_block: &[IqSample]) -> anyhow::Result<(Vec<f32>, f32)> {
+        use anyhow::Context as _;
+
+        match self {
+            Self::Legacy(demod) => Ok((demod.process(iq_block), demod.pre_agc_rms())),
+            Self::Am(chain) => {
+                let block = chain
+                    .process(iq_block)
+                    .context("AM chain processing failed")?;
+                let weight = am_mixing_weight(&block);
+                Ok((block.samples, weight))
+            }
+        }
+    }
+
+    /// Flushes this chain's residual tail at end of stream.
+    ///
+    /// A legacy chain's tail belongs to the shared resampler, which the pump flushes itself, so
+    /// only an AM chain flushes here.
+    ///
+    /// # Errors
+    /// Returns an error when the AM chain cannot flush.
+    fn finish(&mut self) -> anyhow::Result<Vec<f32>> {
+        use anyhow::Context as _;
+
+        match self {
+            Self::Legacy(_) => Ok(Vec::new()),
+            Self::Am(chain) => Ok(chain
+                .finish()
+                .context("AM chain tail flush failed")?
+                .samples),
+        }
+    }
+
+    /// Whether this chain already emits the sink rate without help.
+    fn is_am(&self) -> bool {
+        matches!(self, Self::Am(_))
+    }
+
+    /// Decimation factor of a legacy chain, or `None` for a sink-rate AM chain.
+    fn decimation_factor(&self) -> Option<usize> {
+        match self {
+            Self::Legacy(demod) => Some(demod.decimation_factor()),
+            Self::Am(_) => None,
+        }
+    }
+}
+
+/// Mixing weight of one AM block: its linear pre-demodulation channel power.
+///
+/// A closed squelch weighs nothing, since a gated chain contributes silence rather than a share of
+/// the mix.
+#[allow(clippy::cast_possible_truncation)] // channel power is a bounded f32 diagnostic
+fn am_mixing_weight(block: &am::AmAudioBlock) -> f32 {
+    if !block.squelch_open {
+        return 0.0;
+    }
+    let weight = 10.0_f32.powf(block.channel_power_dbfs / 10.0);
+    if weight.is_finite() {
+        weight
+    } else {
+        0.0
+    }
+}
+
+/// Maps a requested channel bandwidth, in hertz, onto the nearest supported AM RF profile.
+///
+/// The request is clamped to `[AM_RF_MIN_BW_HZ, AM_RF_MAX_BW_HZ]` first, so an out-of-range or
+/// negative value selects the narrowest supported profile instead of failing. The result is always
+/// one of the four profiles, and a non-finite request selects the narrowest, so this never panics.
+fn am_rf_profile_for_channel_bw(channel_bw: f64) -> AmRfProfile {
+    const CHOICES: [AmRfProfile; 4] = [
+        AmRfProfile::Khz6,
+        AmRfProfile::Khz8,
+        AmRfProfile::Khz10,
+        AmRfProfile::Khz12,
+    ];
+
+    let clamped = if channel_bw.is_finite() {
+        channel_bw.clamp(AM_RF_MIN_BW_HZ, AM_RF_MAX_BW_HZ)
+    } else {
+        AM_RF_MIN_BW_HZ
+    };
+
+    let mut best = CHOICES[0];
+    let mut best_distance = f64::from(best.bandwidth_hz()) - clamped;
+    for choice in CHOICES {
+        let distance = (f64::from(choice.bandwidth_hz()) - clamped).abs();
+        if distance < best_distance.abs() {
+            best = choice;
+            best_distance = distance;
+        }
+    }
+    best
+}
+
+/// One live chain plus what is needed to rebuild it when the stream's path changes.
+struct ChainSlot {
+    /// Demodulation stage currently serving this channel.
+    chain: AudioChain,
+    /// Tuning, bandwidth, and mode requested for this channel.
+    spec: ChainSpec,
+    /// Clocks every rebuild must reuse.
+    context: ChainContext,
+}
+
+impl ChainSlot {
+    /// Builds a chain from `context` and `spec`, remembering both for later rebuilds.
+    fn new(context: &ChainContext, spec: ChainSpec, squelch: SquelchMode) -> Self {
+        Self {
+            chain: AudioChain::build(context, &spec, squelch),
+            spec,
+            context: *context,
+        }
+    }
+
+    /// Applies a tuning change in place, so oscillator, filter, AGC, and squelch history survive.
+    fn retune(&mut self, center_freq: f64, cursor_freq: f64) {
+        self.spec.center_freq = center_freq;
+        self.spec.cursor_freq = cursor_freq;
+        match &mut self.chain {
+            AudioChain::Legacy(demod) => {
+                demod.set_center_freq(center_freq);
+                demod.set_cursor_freq(cursor_freq);
+            }
+            AudioChain::Am(chain) => retune_am(chain, center_freq, cursor_freq),
+        }
+    }
+
+    /// Rebuilds this chain only when its kind differs from the path the stream must use.
+    ///
+    /// Converting to legacy ignores any AM request, because that is what the mixed-path fallback
+    /// asks for.
+    fn conform_to(&mut self, want_am: bool, squelch: SquelchMode) {
+        if self.chain.is_am() == want_am {
+            return;
+        }
+        self.chain = if want_am {
+            AudioChain::build(&self.context, &self.spec, squelch)
+        } else {
+            AudioChain::legacy(&self.context, &self.spec)
+        };
+    }
+    /// Flushes this slot's chain tail at end of stream.
+    ///
+    /// # Errors
+    /// Returns an error when the AM chain cannot flush.
+    fn finish(&mut self) -> anyhow::Result<Vec<f32>> {
+        self.chain.finish()
+    }
+}
+
+/// Retunes an AM chain, reporting a rejection instead of failing the stream.
+///
+/// A tuning control has no error path in the audio thread, and [`AmDemodulator::retune`] keeps the
+/// previous tuning when it rejects a request.
+fn retune_am(chain: &mut AmDemodulator, center_freq: f64, cursor_freq: f64) {
+    if let Err(error) = chain.retune(center_freq, cursor_freq) {
+        tracing::warn!(%error, "AM chain retune rejected; keeping previous tuning");
+    }
+}
+
+/// Applies `channel_bw` to an AM chain as the nearest supported RF profile.
+///
+/// Voice shape, squelch, and prebuffer come from the profile already in effect; only the RF
+/// bandwidth changes, and [`AmDemodulator::set_profile`] keeps AGC and squelch history.
+fn apply_am_channel_bw(chain: &mut AmDemodulator, channel_bw: f64) {
+    let profile = AmAudioProfile {
+        rf: am_rf_profile_for_channel_bw(channel_bw),
+        ..chain.profile().clone()
+    };
+    if let Err(error) = chain.set_profile(profile) {
+        tracing::warn!(%error, "AM profile change rejected; keeping previous profile");
+    }
+}
+
+/// Applies the pipeline's squelch selection to an AM chain.
+///
+/// `Some(db)` is a fixed threshold and `None` is unconditionally open, the same meaning
+/// [`AudioControl::SetSquelch`] carries for the legacy audio-level gate.
+fn apply_am_squelch(chain: &mut AmDemodulator, squelch: Option<f32>) {
+    let mode = am_squelch_mode(squelch);
+    if chain.profile().squelch == mode {
+        return;
+    }
+    let profile = AmAudioProfile {
+        squelch: mode,
+        ..chain.profile().clone()
+    };
+    if let Err(error) = chain.set_profile(profile) {
+        tracing::warn!(%error, "AM squelch change rejected; keeping previous squelch");
+    }
+}
+
+/// Translates the pipeline's squelch selection into an AM squelch mode.
+fn am_squelch_mode(squelch: Option<f32>) -> SquelchMode {
+    match squelch {
+        Some(threshold_dbfs) => SquelchMode::Manual { threshold_dbfs },
+        None => SquelchMode::Open,
+    }
+}
+
+/// Applies the AGC and bandpass controls that every legacy chain shares in place.
+fn apply_legacy_shared_control(demod: &mut Demodulator, ctrl: &AudioControl) {
+    match *ctrl {
+        AudioControl::SetAgcEnabled(enabled) => demod.set_agc_enabled(enabled),
+        AudioControl::SetAgcAttack(ms) => demod.set_agc_attack(ms),
+        AudioControl::SetAgcDecay(ms) => demod.set_agc_decay(ms),
+        AudioControl::SetAgcTarget(level) => demod.set_agc_target(level),
+        AudioControl::SetAgcMaxGain(db) => demod.set_agc_max_gain(db),
+        AudioControl::SetBandpassEnabled(enabled) => demod.set_bandpass_enabled(enabled),
+        AudioControl::SetBandpassLowCut(hz) => demod.set_bandpass_low_cut(hz),
+        AudioControl::SetBandpassHighCut(hz) => demod.set_bandpass_high_cut(hz),
+        _ => {}
+    }
+}
+
+/// Chain operations [`apply_control`] needs from whichever chain type it drives.
+///
+/// The control kernel stays generic so one implementation serves both the AM-aware [`ChainSlot`]
+/// the pump owns and a bare legacy [`Demodulator`], whose in-place semantics are unchanged.
+trait ChainTarget: Sized {
+    /// Builds the chain `spec` selects, honoring the pipeline's `squelch` selection.
+    fn build(context: &ChainContext, spec: &ChainSpec, squelch: Option<f32>) -> Self;
+
+    /// Aligns a newly created chain to `other`'s decimation grid where that grid exists.
+    fn align_decimation_phase(&mut self, other: &Self);
+
+    /// Applies a cursor-frequency change, in hertz.
+    fn set_cursor_freq(&mut self, freq: f64);
+
+    /// Applies an RF center-frequency change, in hertz.
+    fn set_center_freq(&mut self, freq: f64);
+
+    /// Applies a channel-bandwidth change, in hertz.
+    fn set_channel_bw(&mut self, bw: f64);
+
+    /// Applies a demodulation-mode change.
+    fn set_mode(&mut self, mode: DemodMode);
+
+    /// Applies the pipeline's squelch selection.
+    fn set_squelch(&mut self, squelch: Option<f32>);
+
+    /// Applies the AGC and bandpass controls every chain shares.
+    fn apply_shared(&mut self, ctrl: &AudioControl);
+}
+
+impl ChainTarget for Demodulator {
+    fn build(context: &ChainContext, spec: &ChainSpec, _squelch: Option<f32>) -> Self {
+        match AudioChain::legacy(context, spec) {
+            AudioChain::Legacy(demod) => demod,
+            AudioChain::Am(_) => {
+                unreachable!("the legacy constructor never builds an AM chain")
+            }
+        }
+    }
+
+    fn align_decimation_phase(&mut self, other: &Self) {
+        Demodulator::align_decimation_phase(self, other);
+    }
+
+    fn set_cursor_freq(&mut self, freq: f64) {
+        Demodulator::set_cursor_freq(self, freq);
+    }
+
+    fn set_center_freq(&mut self, freq: f64) {
+        Demodulator::set_center_freq(self, freq);
+    }
+
+    fn set_channel_bw(&mut self, bw: f64) {
+        Demodulator::set_channel_bw(self, bw);
+    }
+
+    fn set_mode(&mut self, mode: DemodMode) {
+        Demodulator::set_mode(self, mode);
+    }
+
+    /// Legacy squelch is an audio-level gate in the pump, so a chain has nothing to configure.
+    fn set_squelch(&mut self, _squelch: Option<f32>) {}
+
+    fn apply_shared(&mut self, ctrl: &AudioControl) {
+        apply_legacy_shared_control(self, ctrl);
+    }
+}
+
+impl ChainTarget for ChainSlot {
+    fn build(context: &ChainContext, spec: &ChainSpec, squelch: Option<f32>) -> Self {
+        Self::new(context, *spec, am_squelch_mode(squelch))
+    }
+
+    fn align_decimation_phase(&mut self, other: &Self) {
+        if let (AudioChain::Legacy(chain), AudioChain::Legacy(reference)) =
+            (&mut self.chain, &other.chain)
+        {
+            chain.align_decimation_phase(reference);
+        }
+    }
+
+    fn set_cursor_freq(&mut self, freq: f64) {
+        self.retune(self.spec.center_freq, freq);
+    }
+
+    fn set_center_freq(&mut self, freq: f64) {
+        self.retune(freq, self.spec.cursor_freq);
+    }
+
+    fn set_channel_bw(&mut self, bw: f64) {
+        self.spec.channel_bw = bw;
+        match &mut self.chain {
+            AudioChain::Legacy(demod) => demod.set_channel_bw(bw),
+            AudioChain::Am(chain) => apply_am_channel_bw(chain, bw),
+        }
+    }
+
+    fn set_mode(&mut self, mode: DemodMode) {
+        self.spec.mode = mode;
+        self.spec.am_requested = mode == DemodMode::AM;
+        // A legacy chain changes mode in place, exactly as before. A chain-kind change is applied
+        // by the pump's uniform-path rebuild once the whole control batch is in.
+        if let AudioChain::Legacy(demod) = &mut self.chain {
+            demod.set_mode(mode);
+        }
+    }
+
+    fn set_squelch(&mut self, squelch: Option<f32>) {
+        if let AudioChain::Am(chain) = &mut self.chain {
+            apply_am_squelch(chain, squelch);
+        }
+    }
+
+    fn apply_shared(&mut self, ctrl: &AudioControl) {
+        if let AudioChain::Legacy(demod) = &mut self.chain {
+            apply_legacy_shared_control(demod, ctrl);
+        }
+    }
+}
+
+/// Re-establishes the stream's uniform-path invariant after a chain changed.
+///
+/// Every live chain must be the same kind: a mixed AM/legacy stream uses the legacy demodulator
+/// for all channels, so any AM chain is rebuilt as legacy at that moment. When every chain asks for
+/// AM, the opposite conversion happens; if such a rebuild cannot be designed the stream falls back
+/// to legacy rather than mixing two output clocks.
+fn conform_chains(
+    cursor: &mut ChainSlot,
+    vfo_chains: &mut HashMap<usize, ChainSlot>,
+    squelch: Option<f32>,
+) {
+    let mode = am_squelch_mode(squelch);
+    let all_am_requested = cursor.spec.am_requested
+        && cursor.spec.mode == DemodMode::AM
+        && vfo_chains
+            .values()
+            .all(|slot| slot.spec.am_requested && slot.spec.mode == DemodMode::AM);
+
+    if all_am_requested {
+        cursor.conform_to(true, mode);
+        for slot in vfo_chains.values_mut() {
+            slot.conform_to(true, mode);
+        }
+        if chains_are_all_am(cursor, vfo_chains) {
+            return;
+        }
+    }
+
+    cursor.conform_to(false, mode);
+    for slot in vfo_chains.values_mut() {
+        slot.conform_to(false, mode);
+    }
+}
+
+/// Whether every live chain already emits the sink rate, so the shared resampler is bypassed.
+fn chains_are_all_am(cursor: &ChainSlot, vfo_chains: &HashMap<usize, ChainSlot>) -> bool {
+    cursor.chain.is_am() && vfo_chains.values().all(|slot| slot.chain.is_am())
+}
+
+/// Decimation factor of any live legacy chain, used to design the shared resampler on demand.
+fn legacy_decimation_factor(
+    cursor: &ChainSlot,
+    vfo_chains: &HashMap<usize, ChainSlot>,
+) -> Option<usize> {
+    cursor.chain.decimation_factor().or_else(|| {
+        vfo_chains
+            .values()
+            .find_map(|slot| slot.chain.decimation_factor())
+    })
+}
+
+/// Shared RF-clock resampler that only legacy chains need.
+enum SharedResampler {
+    /// No legacy output has been produced yet, so nothing has been designed.
+    Pending,
+    /// The RF clock already equals the legacy backend clock, so no conversion happens.
+    NotRequired,
+    /// Exact RF-clock conversion from the decimated legacy rate to the sink rate.
+    Active(Box<dyn RealResampler>),
+}
+
+impl SharedResampler {
+    /// Designs the conversion for `decimation`, or records that none is needed.
+    ///
+    /// # Errors
+    /// Returns an error when the decimation factor does not fit `u32`, the backend rate overflows,
+    /// or the resampler cannot be designed for this clock pair.
+    fn design(
+        rf_sample_rate: u32,
+        sink_sample_rate: u32,
+        decimation: usize,
+    ) -> anyhow::Result<Self> {
+        use anyhow::Context as _;
+
+        let decimation_factor =
+            u32::try_from(decimation).context("audio decimation factor does not fit u32")?;
+        let backend_output_rate = sink_sample_rate
+            .checked_mul(decimation_factor)
+            .context("audio resampler rate overflow")?;
+        if rf_sample_rate == backend_output_rate {
+            return Ok(Self::NotRequired);
+        }
+        let resampler =
+            create_decimated_real_resampler(rf_sample_rate, sink_sample_rate, decimation_factor)
+                .context("failed to create exact RF-clock audio resampler")?;
+        Ok(Self::Active(Box::new(resampler)))
+    }
+}
+
+/// Converts one block of mixed legacy audio to the sink rate.
+///
+/// Designs the shared resampler on the first legacy block, so an all-AM stream never constructs
+/// it, and then feeds it the exact RF frame count of this partition.
+///
+/// # Errors
+/// Returns an error when no legacy chain reported a decimation factor, the resampler cannot be
+/// designed for this clock pair, or backend processing fails.
+#[allow(clippy::too_many_arguments)] // one call site; each argument is a distinct clock or buffer
+fn to_sink_rate<'a>(
+    resampler: &mut SharedResampler,
+    cursor_chain: &ChainSlot,
+    vfo_chains: &HashMap<usize, ChainSlot>,
+    mixed: &'a [f32],
+    source_frames: usize,
+    rf_sample_rate: u32,
+    sink_sample_rate: u32,
+    staged: &'a mut Vec<f32>,
+) -> anyhow::Result<Cow<'a, [f32]>> {
+    use anyhow::Context as _;
+
+    if matches!(resampler, SharedResampler::Pending) {
+        let decimation = legacy_decimation_factor(cursor_chain, vfo_chains)
+            .context("legacy audio chain reported no decimation factor")?;
+        *resampler = SharedResampler::design(rf_sample_rate, sink_sample_rate, decimation)?;
+    }
+    match resampler {
+        SharedResampler::Active(shared_resampler) => {
+            staged.clear();
+            shared_resampler
+                .process_with_source_frames(mixed, source_frames, staged)
+                .context("shared audio resampler processing failed")?;
+            Ok(Cow::Borrowed(staged.as_slice()))
+        }
+        SharedResampler::NotRequired => Ok(Cow::Borrowed(mixed)),
+        SharedResampler::Pending => {
+            anyhow::bail!("shared audio resampler was not designed for a legacy stream")
+        }
+    }
+}
 
 // ============================================================================
 // Audio Thread
@@ -167,10 +806,10 @@ use std::collections::HashMap;
 /// Apply a control message to the audio thread state.
 /// Returns `true` if the thread should shut down.
 #[allow(clippy::too_many_arguments)] // audio thread state is tightly coupled
-fn apply_control(
+fn apply_control<C: ChainTarget>(
     ctrl: &AudioControl,
-    cursor_demod: &mut Demodulator,
-    vfo_demods: &mut HashMap<usize, Demodulator>,
+    cursor_chain: &mut C,
+    vfo_chains: &mut HashMap<usize, C>,
     volume: &mut f32,
     squelch: &mut Option<f32>,
     muted: &mut bool,
@@ -178,88 +817,63 @@ fn apply_control(
     input_sample_rate: f64,
     output_sample_rate: f64,
 ) -> bool {
+    let context = ChainContext {
+        input_sample_rate,
+        output_sample_rate,
+    };
+
     match *ctrl {
-        AudioControl::SetCursorFreq(f) => cursor_demod.set_cursor_freq(f),
+        AudioControl::SetCursorFreq(f) => cursor_chain.set_cursor_freq(f),
         AudioControl::SetCenterFreq(f) => {
             *center_freq = f;
-            cursor_demod.set_center_freq(f);
-            for demod in vfo_demods.values_mut() {
-                demod.set_center_freq(f);
+            cursor_chain.set_center_freq(f);
+            for chain in vfo_chains.values_mut() {
+                chain.set_center_freq(f);
             }
         }
-        AudioControl::SetChannelBw(bw) => cursor_demod.set_channel_bw(bw),
+        AudioControl::SetChannelBw(bw) => cursor_chain.set_channel_bw(bw),
         AudioControl::SetVolume(v) => *volume = f32::from(v.min(100)) / 100.0,
-        AudioControl::SetSquelch(ref s) => *squelch = *s,
+        AudioControl::SetSquelch(ref s) => {
+            *squelch = *s;
+            cursor_chain.set_squelch(*s);
+            for chain in vfo_chains.values_mut() {
+                chain.set_squelch(*s);
+            }
+        }
         AudioControl::Mute(m) => *muted = m,
-        AudioControl::AddVfo { id, freq, channel_bw, mode } => {
-            let mut demod = Demodulator::new(
-                *center_freq,
-                freq,
-                channel_bw,
-                input_sample_rate,
-                output_sample_rate,
-                mode,
-            );
-            demod.align_decimation_phase(cursor_demod);
-            vfo_demods.insert(id, demod);
+        AudioControl::AddVfo {
+            id,
+            freq,
+            channel_bw,
+            mode,
+        } => {
+            let spec = ChainSpec::new(*center_freq, freq, channel_bw, mode);
+            let mut chain = C::build(&context, &spec, *squelch);
+            chain.align_decimation_phase(cursor_chain);
+            vfo_chains.insert(id, chain);
         }
         AudioControl::RemoveVfo(id) => {
-            vfo_demods.remove(&id);
+            vfo_chains.remove(&id);
         }
         AudioControl::SetDemodMode(mode) => {
-            cursor_demod.set_mode(mode);
+            cursor_chain.set_mode(mode);
         }
         AudioControl::SetVfoDemodMode { id, mode } => {
-            if let Some(demod) = vfo_demods.get_mut(&id) {
-                demod.set_mode(mode);
+            if let Some(chain) = vfo_chains.get_mut(&id) {
+                chain.set_mode(mode);
             }
         }
-        AudioControl::SetAgcEnabled(enabled) => {
-            cursor_demod.set_agc_enabled(enabled);
-            for demod in vfo_demods.values_mut() {
-                demod.set_agc_enabled(enabled);
-            }
-        }
-        AudioControl::SetAgcAttack(ms) => {
-            cursor_demod.set_agc_attack(ms);
-            for demod in vfo_demods.values_mut() {
-                demod.set_agc_attack(ms);
-            }
-        }
-        AudioControl::SetAgcDecay(ms) => {
-            cursor_demod.set_agc_decay(ms);
-            for demod in vfo_demods.values_mut() {
-                demod.set_agc_decay(ms);
-            }
-        }
-        AudioControl::SetAgcTarget(level) => {
-            cursor_demod.set_agc_target(level);
-            for demod in vfo_demods.values_mut() {
-                demod.set_agc_target(level);
-            }
-        }
-        AudioControl::SetAgcMaxGain(db) => {
-            cursor_demod.set_agc_max_gain(db);
-            for demod in vfo_demods.values_mut() {
-                demod.set_agc_max_gain(db);
-            }
-        }
-        AudioControl::SetBandpassEnabled(enabled) => {
-            cursor_demod.set_bandpass_enabled(enabled);
-            for demod in vfo_demods.values_mut() {
-                demod.set_bandpass_enabled(enabled);
-            }
-        }
-        AudioControl::SetBandpassLowCut(hz) => {
-            cursor_demod.set_bandpass_low_cut(hz);
-            for demod in vfo_demods.values_mut() {
-                demod.set_bandpass_low_cut(hz);
-            }
-        }
-        AudioControl::SetBandpassHighCut(hz) => {
-            cursor_demod.set_bandpass_high_cut(hz);
-            for demod in vfo_demods.values_mut() {
-                demod.set_bandpass_high_cut(hz);
+        AudioControl::SetAgcEnabled(_)
+        | AudioControl::SetAgcAttack(_)
+        | AudioControl::SetAgcDecay(_)
+        | AudioControl::SetAgcTarget(_)
+        | AudioControl::SetAgcMaxGain(_)
+        | AudioControl::SetBandpassEnabled(_)
+        | AudioControl::SetBandpassLowCut(_)
+        | AudioControl::SetBandpassHighCut(_) => {
+            cursor_chain.apply_shared(ctrl);
+            for chain in vfo_chains.values_mut() {
+                chain.apply_shared(ctrl);
             }
         }
         AudioControl::Shutdown => return true,
@@ -270,28 +884,24 @@ fn apply_control(
 /// Demodulate IQ samples, mix outputs, and apply volume and squelch.
 fn demod_and_mix(
     iq_block: &[IqSample],
-    cursor_demod: &mut Demodulator,
-    vfo_demods: &mut HashMap<usize, Demodulator>,
+    cursor_chain: &mut ChainSlot,
+    vfo_chains: &mut HashMap<usize, ChainSlot>,
     muted: bool,
     volume: f32,
     squelch: Option<f32>,
-) -> Vec<f32> {
-    // Collect outputs from all active demodulators with their pre-AGC levels
+) -> anyhow::Result<Vec<f32>> {
+    // Collect outputs from all active chains with their pre-AGC levels
     let mut outputs: Vec<(Vec<f32>, f32)> = Vec::new();
 
     if !muted {
-        let audio = cursor_demod.process(iq_block);
-        let rms = cursor_demod.pre_agc_rms();
-        outputs.push((audio, rms));
+        outputs.push(cursor_chain.chain.process(iq_block)?);
     }
 
-    for demod in vfo_demods.values_mut() {
-        let audio = demod.process(iq_block);
-        let rms = demod.pre_agc_rms();
-        outputs.push((audio, rms));
+    for slot in vfo_chains.values_mut() {
+        outputs.push(slot.chain.process(iq_block)?);
     }
 
-    let mut audio = mix_outputs(outputs, cursor_demod, iq_block);
+    let mut audio = mix_outputs(outputs, &mut cursor_chain.chain, iq_block)?;
 
     // Apply volume
     for s in &mut audio {
@@ -302,21 +912,25 @@ fn demod_and_mix(
     if check_squelch(&audio, squelch) {
         audio.fill(0.0);
     }
-    audio
+    Ok(audio)
 }
 
 /// Mix demodulator outputs using power-weighted mixing.
 fn mix_outputs(
     outputs: Vec<(Vec<f32>, f32)>,
-    cursor_demod: &mut Demodulator,
+    cursor_chain: &mut AudioChain,
     iq_block: &[IqSample],
-) -> Vec<f32> {
+) -> anyhow::Result<Vec<f32>> {
     let num_active = outputs.len();
     if num_active == 0 {
-        let silent = cursor_demod.process(iq_block);
-        vec![0.0f32; silent.len()]
+        let (silent, _weight) = cursor_chain.process(iq_block)?;
+        Ok(vec![0.0f32; silent.len()])
     } else if num_active == 1 {
-        outputs.into_iter().next().expect("invariant: num_active == 1").0
+        Ok(outputs
+            .into_iter()
+            .next()
+            .expect("invariant: num_active == 1")
+            .0)
     } else {
         let max_len = outputs.iter().map(|o| o.0.len()).max().unwrap_or(0);
         let mut mixed = vec![0.0f32; max_len];
@@ -341,7 +955,7 @@ fn mix_outputs(
                 *s /= divisor;
             }
         }
-        mixed
+        Ok(mixed)
     }
 }
 
@@ -429,14 +1043,6 @@ fn pump_audio(
     }
 
     let output_sample_rate = f64::from(sink_sample_rate);
-    let mut cursor_demod = Demodulator::new_am(
-        center_freq,
-        cursor_freq,
-        channel_bw,
-        input_sample_rate,
-        output_sample_rate,
-    );
-
     let rounded_input_rate = input_sample_rate.round();
     if (rounded_input_rate - input_sample_rate).abs() > f64::EPSILON
         || rounded_input_rate > f64::from(u32::MAX)
@@ -445,26 +1051,20 @@ fn pump_audio(
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let rf_sample_rate = rounded_input_rate as u32;
-    let decimation_factor = u32::try_from(cursor_demod.decimation_factor())
-        .context("audio decimation factor does not fit u32")?;
-    let backend_output_rate = sink_sample_rate
-        .checked_mul(decimation_factor)
-        .context("audio resampler rate overflow")?;
 
-    let mut resampler = if rf_sample_rate == backend_output_rate {
-        None
-    } else {
-        Some(
-            create_decimated_real_resampler(
-                rf_sample_rate,
-                sink_sample_rate,
-                decimation_factor,
-            )
-            .context("failed to create exact RF-clock audio resampler")?,
-        )
+    let context = ChainContext {
+        input_sample_rate,
+        output_sample_rate,
     };
+    // The pump is entered with no mode or squelch selection of its own, so the cursor starts on the
+    // legacy AM default it has always used. Only an explicit mode control selects the AM chain.
+    let cursor_spec = ChainSpec::legacy_default(center_freq, cursor_freq, channel_bw);
+    let mut cursor_chain = ChainSlot::new(&context, cursor_spec, SquelchMode::Open);
+    // The shared resampler is designed on the first legacy output, so an all-AM stream never
+    // constructs or feeds it.
+    let mut resampler = SharedResampler::Pending;
     let mut resampled = Vec::new();
-    let mut vfo_demods: HashMap<usize, Demodulator> = HashMap::new();
+    let mut vfo_chains: HashMap<usize, ChainSlot> = HashMap::new();
     let mut volume: f32 = 1.0;
     let mut muted = false;
     let mut squelch: Option<f32> = None;
@@ -477,17 +1077,19 @@ fn pump_audio(
             loop {
                 match control_rx.try_recv() {
                     Ok(ctrl) => {
-                        if apply_control(
+                        let shutdown = apply_control(
                             &ctrl,
-                            &mut cursor_demod,
-                            &mut vfo_demods,
+                            &mut cursor_chain,
+                            &mut vfo_chains,
                             &mut volume,
                             &mut squelch,
                             &mut muted,
                             &mut center_freq,
                             input_sample_rate,
                             output_sample_rate,
-                        ) {
+                        );
+                        conform_chains(&mut cursor_chain, &mut vfo_chains, squelch);
+                        if shutdown {
                             shutdown_requested = true;
                             break;
                         }
@@ -501,7 +1103,10 @@ fn pump_audio(
         let iq_block = if shutdown_requested {
             match iq_rx.try_recv() {
                 Ok(block) => block,
-                Err(crossbeam_channel::TryRecvError::Empty | crossbeam_channel::TryRecvError::Disconnected) => {
+                Err(
+                    crossbeam_channel::TryRecvError::Empty
+                    | crossbeam_channel::TryRecvError::Disconnected,
+                ) => {
                     break 'audio;
                 }
             }
@@ -517,7 +1122,9 @@ fn pump_audio(
                 recv(control_rx) -> msg => {
                     match msg {
                         Ok(ctrl) => {
-                            if apply_control(&ctrl, &mut cursor_demod, &mut vfo_demods, &mut volume, &mut squelch, &mut muted, &mut center_freq, input_sample_rate, output_sample_rate) {
+                            let shutdown = apply_control(&ctrl, &mut cursor_chain, &mut vfo_chains, &mut volume, &mut squelch, &mut muted, &mut center_freq, input_sample_rate, output_sample_rate);
+                            conform_chains(&mut cursor_chain, &mut vfo_chains, squelch);
+                            if shutdown {
                                 shutdown_requested = true;
                             }
                             continue 'audio;
@@ -530,33 +1137,55 @@ fn pump_audio(
 
         let mixed = demod_and_mix(
             &iq_block,
-            &mut cursor_demod,
-            &mut vfo_demods,
+            &mut cursor_chain,
+            &mut vfo_chains,
             muted,
             volume,
             squelch,
-        );
-        let samples = if let Some(shared_resampler) = resampler.as_mut() {
-            resampled.clear();
-            shared_resampler
-                .process_with_source_frames(&mixed, iq_block.len(), &mut resampled)
-                .context("shared audio resampler processing failed")?;
-            &resampled
+        )
+        .context("audio demodulation failed")?;
+        let samples = if chains_are_all_am(&cursor_chain, &vfo_chains) {
+            // Every chain already emits the sink rate, so the shared resampler is bypassed.
+            Cow::Borrowed(mixed.as_slice())
         } else {
-            &mixed
+            to_sink_rate(
+                &mut resampler,
+                &cursor_chain,
+                &vfo_chains,
+                &mixed,
+                iq_block.len(),
+                rf_sample_rate,
+                sink_sample_rate,
+                &mut resampled,
+            )?
         };
         if !samples.is_empty() {
-            sink.write(samples).context("audio sink write failed")?;
+            sink.write(&samples).context("audio sink write failed")?;
         }
     }
 
-    if let Some(shared_resampler) = resampler.as_mut() {
+    if let SharedResampler::Active(shared_resampler) = &mut resampler {
         resampled.clear();
         shared_resampler
             .flush(&mut resampled)
             .context("failed to flush shared audio resampler")?;
         if !resampled.is_empty() {
-            sink.write(&resampled).context("final audio sink write failed")?;
+            sink.write(&resampled)
+                .context("final audio sink write failed")?;
+        }
+    }
+
+    // Every AM chain owns its own resampler, so the end of the stream must flush those tails too.
+    // The shared resampler above is inactive while every chain is AM, so this cannot double-write.
+    if chains_are_all_am(&cursor_chain, &vfo_chains) {
+        let mut chains = std::iter::once(&mut cursor_chain).chain(vfo_chains.values_mut());
+        for chain in chains.by_ref() {
+            let tail = chain
+                .finish()
+                .context("failed to flush AM chain tail at end of stream")?;
+            if !tail.is_empty() {
+                sink.write(&tail).context("final AM tail write failed")?;
+            }
         }
     }
     Ok(())
@@ -569,6 +1198,7 @@ fn pump_audio(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::profile::{AmAudioProfile, AmRfProfile, SquelchMode, VoiceProfile};
     use crate::audio::test_signal::generate_am_signal;
     use crate::audio::wav_sink::WavSink;
     use crossbeam_channel::{bounded, unbounded};
@@ -578,7 +1208,12 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
-    fn make_test_iq(cursor_freq: f64, center_freq: f64, sample_rate: f64, num: usize) -> Vec<IqSample> {
+    fn make_test_iq(
+        cursor_freq: f64,
+        center_freq: f64,
+        sample_rate: f64,
+        num: usize,
+    ) -> Vec<IqSample> {
         generate_am_signal(cursor_freq, 1000.0, 0.8, sample_rate, center_freq, num)
     }
 
@@ -657,8 +1292,8 @@ mod tests {
 
     fn estimate_tone_hz(samples: &[f32], sample_rate_hz: u32) -> f64 {
         let settled = &samples[samples.len() / 4..];
-        let mean = settled.iter().map(|&sample| f64::from(sample)).sum::<f64>()
-            / settled.len() as f64;
+        let mean =
+            settled.iter().map(|&sample| f64::from(sample)).sum::<f64>() / settled.len() as f64;
         let mut best = (0.0, f64::NEG_INFINITY);
         for frequency_hz in 950..=1050 {
             let angular_step = 2.0 * PI * f64::from(frequency_hz) / f64::from(sample_rate_hz);
@@ -789,9 +1424,12 @@ mod tests {
                 })
                 .sum::<f64>()
                 / aligned as f64;
-            let rms = rms
-                .sqrt();
-            assert!(rms <= 1.0e-5, "partition case {} RMS {rms:.3e} exceeds 1e-5", index + 1);
+            let rms = rms.sqrt();
+            assert!(
+                rms <= 1.0e-5,
+                "partition case {} RMS {rms:.3e} exceeds 1e-5",
+                index + 1
+            );
         }
     }
 
@@ -1112,10 +1750,15 @@ mod tests {
                 self.recorded.lock().unwrap().extend_from_slice(samples);
                 Ok(())
             }
-            fn sample_rate(&self) -> u32 { self.sr }
+            fn sample_rate(&self) -> u32 {
+                self.sr
+            }
         }
 
-        let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
+        let sink = Box::new(SharedSink {
+            recorded: recorded2,
+            sr: 48000,
+        });
 
         let handle = std::thread::spawn(move || {
             audio_thread(&iq_rx, &ctrl_rx, sink, center, cursor, bw, sample_rate);
@@ -1152,19 +1795,27 @@ mod tests {
             let recorded = Arc::new(Mutex::new(Vec::<f32>::new()));
             let recorded2 = recorded.clone();
 
-            struct SharedSink { recorded: Arc<Mutex<Vec<f32>>>, sr: u32 }
+            struct SharedSink {
+                recorded: Arc<Mutex<Vec<f32>>>,
+                sr: u32,
+            }
             impl AudioSink for SharedSink {
                 fn write(&mut self, samples: &[f32]) -> anyhow::Result<()> {
                     self.recorded.lock().unwrap().extend_from_slice(samples);
                     Ok(())
                 }
-                fn sample_rate(&self) -> u32 { self.sr }
+                fn sample_rate(&self) -> u32 {
+                    self.sr
+                }
             }
 
             // Set volume before sending data
             ctrl_tx.send(AudioControl::SetVolume(vol)).unwrap();
 
-            let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
+            let sink = Box::new(SharedSink {
+                recorded: recorded2,
+                sr: 48000,
+            });
             let handle = std::thread::spawn(move || {
                 audio_thread(&iq_rx, &ctrl_rx, sink, center, cursor, bw, sample_rate);
             });
@@ -1176,7 +1827,10 @@ mod tests {
             handle.join().unwrap();
 
             let samples = recorded.lock().unwrap();
-            let rms: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>()
+            let rms: f64 = samples
+                .iter()
+                .map(|&s| (s as f64) * (s as f64))
+                .sum::<f64>()
                 / samples.len().max(1) as f64;
             results.push(rms.sqrt());
         }
@@ -1203,20 +1857,36 @@ mod tests {
         let recorded = Arc::new(Mutex::new(Vec::<f32>::new()));
         let recorded2 = recorded.clone();
 
-        struct SharedSink { recorded: Arc<Mutex<Vec<f32>>>, sr: u32 }
+        struct SharedSink {
+            recorded: Arc<Mutex<Vec<f32>>>,
+            sr: u32,
+        }
         impl AudioSink for SharedSink {
             fn write(&mut self, samples: &[f32]) -> anyhow::Result<()> {
                 self.recorded.lock().unwrap().extend_from_slice(samples);
                 Ok(())
             }
-            fn sample_rate(&self) -> u32 { self.sr }
+            fn sample_rate(&self) -> u32 {
+                self.sr
+            }
         }
 
         ctrl_tx.send(AudioControl::Mute(true)).unwrap();
 
-        let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
+        let sink = Box::new(SharedSink {
+            recorded: recorded2,
+            sr: 48000,
+        });
         let handle = std::thread::spawn(move || {
-            audio_thread(&iq_rx, &ctrl_rx, sink, center, cursor, 25_000.0, sample_rate);
+            audio_thread(
+                &iq_rx,
+                &ctrl_rx,
+                sink,
+                center,
+                cursor,
+                25_000.0,
+                sample_rate,
+            );
         });
 
         let iq = make_test_iq(cursor, center, sample_rate, 8192);
@@ -1227,7 +1897,10 @@ mod tests {
 
         let samples = recorded.lock().unwrap();
         assert!(!samples.is_empty(), "Should still write silence when muted");
-        assert!(samples.iter().all(|&s| s == 0.0), "All samples should be zero when muted");
+        assert!(
+            samples.iter().all(|&s| s == 0.0),
+            "All samples should be zero when muted"
+        );
     }
 
     #[test]
@@ -1243,21 +1916,37 @@ mod tests {
         let recorded = Arc::new(Mutex::new(Vec::<f32>::new()));
         let recorded2 = recorded.clone();
 
-        struct SharedSink { recorded: Arc<Mutex<Vec<f32>>>, sr: u32 }
+        struct SharedSink {
+            recorded: Arc<Mutex<Vec<f32>>>,
+            sr: u32,
+        }
         impl AudioSink for SharedSink {
             fn write(&mut self, samples: &[f32]) -> anyhow::Result<()> {
                 self.recorded.lock().unwrap().extend_from_slice(samples);
                 Ok(())
             }
-            fn sample_rate(&self) -> u32 { self.sr }
+            fn sample_rate(&self) -> u32 {
+                self.sr
+            }
         }
 
         // Set squelch high enough to silence the weak signal
         ctrl_tx.send(AudioControl::SetSquelch(Some(0.0))).unwrap();
 
-        let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
+        let sink = Box::new(SharedSink {
+            recorded: recorded2,
+            sr: 48000,
+        });
         let handle = std::thread::spawn(move || {
-            audio_thread(&iq_rx, &ctrl_rx, sink, center, cursor, 25_000.0, sample_rate);
+            audio_thread(
+                &iq_rx,
+                &ctrl_rx,
+                sink,
+                center,
+                cursor,
+                25_000.0,
+                sample_rate,
+            );
         });
 
         // Signal at 100.1MHz but cursor at 100.5MHz → out of band, very weak
@@ -1269,7 +1958,10 @@ mod tests {
 
         let samples = recorded.lock().unwrap();
         assert!(!samples.is_empty());
-        assert!(samples.iter().all(|&s| s == 0.0), "Squelch should silence weak signal");
+        assert!(
+            samples.iter().all(|&s| s == 0.0),
+            "Squelch should silence weak signal"
+        );
     }
 
     #[test]
@@ -1284,18 +1976,34 @@ mod tests {
         let recorded = Arc::new(Mutex::new(Vec::<f32>::new()));
         let recorded2 = recorded.clone();
 
-        struct SharedSink { recorded: Arc<Mutex<Vec<f32>>>, sr: u32 }
+        struct SharedSink {
+            recorded: Arc<Mutex<Vec<f32>>>,
+            sr: u32,
+        }
         impl AudioSink for SharedSink {
             fn write(&mut self, samples: &[f32]) -> anyhow::Result<()> {
                 self.recorded.lock().unwrap().extend_from_slice(samples);
                 Ok(())
             }
-            fn sample_rate(&self) -> u32 { self.sr }
+            fn sample_rate(&self) -> u32 {
+                self.sr
+            }
         }
 
-        let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
+        let sink = Box::new(SharedSink {
+            recorded: recorded2,
+            sr: 48000,
+        });
         let handle = std::thread::spawn(move || {
-            audio_thread(&iq_rx, &ctrl_rx, sink, center, 100.1e6, 25_000.0, sample_rate);
+            audio_thread(
+                &iq_rx,
+                &ctrl_rx,
+                sink,
+                center,
+                100.1e6,
+                25_000.0,
+                sample_rate,
+            );
         });
 
         // Send first block
@@ -1360,21 +2068,44 @@ mod tests {
         let recorded = Arc::new(Mutex::new(Vec::<f32>::new()));
         let recorded2 = recorded.clone();
 
-        struct SharedSink { recorded: Arc<Mutex<Vec<f32>>>, sr: u32 }
+        struct SharedSink {
+            recorded: Arc<Mutex<Vec<f32>>>,
+            sr: u32,
+        }
         impl AudioSink for SharedSink {
             fn write(&mut self, samples: &[f32]) -> anyhow::Result<()> {
                 self.recorded.lock().unwrap().extend_from_slice(samples);
                 Ok(())
             }
-            fn sample_rate(&self) -> u32 { self.sr }
+            fn sample_rate(&self) -> u32 {
+                self.sr
+            }
         }
 
         // Add a VFO
-        ctrl_tx.send(AudioControl::AddVfo { id: 1, freq: 100.2e6, channel_bw: 25_000.0, mode: DemodMode::AM }).unwrap();
+        ctrl_tx
+            .send(AudioControl::AddVfo {
+                id: 1,
+                freq: 100.2e6,
+                channel_bw: 25_000.0,
+                mode: DemodMode::AM,
+            })
+            .unwrap();
 
-        let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
+        let sink = Box::new(SharedSink {
+            recorded: recorded2,
+            sr: 48000,
+        });
         let handle = std::thread::spawn(move || {
-            audio_thread(&iq_rx, &ctrl_rx, sink, center, cursor, 25_000.0, sample_rate);
+            audio_thread(
+                &iq_rx,
+                &ctrl_rx,
+                sink,
+                center,
+                cursor,
+                25_000.0,
+                sample_rate,
+            );
         });
 
         let iq = make_test_iq(cursor, center, sample_rate, 8192);
@@ -1384,7 +2115,10 @@ mod tests {
         handle.join().unwrap();
 
         let samples = recorded.lock().unwrap();
-        assert!(!samples.is_empty(), "Should produce mixed audio from cursor + VFO");
+        assert!(
+            !samples.is_empty(),
+            "Should produce mixed audio from cursor + VFO"
+        );
     }
 
     #[test]
@@ -1400,22 +2134,45 @@ mod tests {
         let recorded = Arc::new(Mutex::new(Vec::<f32>::new()));
         let recorded2 = recorded.clone();
 
-        struct SharedSink { recorded: Arc<Mutex<Vec<f32>>>, sr: u32 }
+        struct SharedSink {
+            recorded: Arc<Mutex<Vec<f32>>>,
+            sr: u32,
+        }
         impl AudioSink for SharedSink {
             fn write(&mut self, samples: &[f32]) -> anyhow::Result<()> {
                 self.recorded.lock().unwrap().extend_from_slice(samples);
                 Ok(())
             }
-            fn sample_rate(&self) -> u32 { self.sr }
+            fn sample_rate(&self) -> u32 {
+                self.sr
+            }
         }
 
         // Mute cursor, add VFO at signal frequency
         ctrl_tx.send(AudioControl::Mute(true)).unwrap();
-        ctrl_tx.send(AudioControl::AddVfo { id: 1, freq: cursor, channel_bw: 25_000.0, mode: DemodMode::AM }).unwrap();
+        ctrl_tx
+            .send(AudioControl::AddVfo {
+                id: 1,
+                freq: cursor,
+                channel_bw: 25_000.0,
+                mode: DemodMode::AM,
+            })
+            .unwrap();
 
-        let sink = Box::new(SharedSink { recorded: recorded2, sr: 48000 });
+        let sink = Box::new(SharedSink {
+            recorded: recorded2,
+            sr: 48000,
+        });
         let handle = std::thread::spawn(move || {
-            audio_thread(&iq_rx, &ctrl_rx, sink, center, cursor, 25_000.0, sample_rate);
+            audio_thread(
+                &iq_rx,
+                &ctrl_rx,
+                sink,
+                center,
+                cursor,
+                25_000.0,
+                sample_rate,
+            );
         });
 
         let iq = make_test_iq(cursor, center, sample_rate, 8192);
@@ -1436,7 +2193,14 @@ mod tests {
         let (_iq_tx, iq_rx) = bounded(4);
         let (ctrl_tx, ctrl_rx) = unbounded();
 
-        ctrl_tx.send(AudioControl::AddVfo { id: 1, freq: 100.1e6, channel_bw: 25_000.0, mode: DemodMode::AM }).unwrap();
+        ctrl_tx
+            .send(AudioControl::AddVfo {
+                id: 1,
+                freq: 100.1e6,
+                channel_bw: 25_000.0,
+                mode: DemodMode::AM,
+            })
+            .unwrap();
         ctrl_tx.send(AudioControl::RemoveVfo(1)).unwrap();
 
         let sink = Box::new(NullSink::new(48000));
@@ -1654,5 +2418,729 @@ mod tests {
         assert_eq!(boxed.sample_rate(), 48_000);
         assert_eq!(primary_buf.lock().unwrap().len(), 2);
         assert_eq!(secondary_buf.lock().unwrap().len(), 2);
+    }
+
+    // ========================================================================
+    // Task 10B — AM pipeline wiring with legacy FM/NFM preserved
+    // ========================================================================
+    //
+    // Frozen contract (Task 10B). Nothing below decides anything beyond this:
+    //
+    // ```text
+    // pub(crate) enum AudioChain {
+    //     Legacy(Demodulator),
+    //     Am(Box<AmDemodulator>),
+    // }
+    // ```
+    //
+    // * `AudioChain` owns both the cursor chain and every VFO chain.
+    // * Selection: `DemodMode::AM` builds `AudioChain::Am` from
+    //   `AmAudioProfile::default()`-equivalent (Khz8 / Standard / Auto 6 dB / 100 ms) with the
+    //   request's center and cursor; every other mode builds `AudioChain::Legacy` exactly as
+    //   today.
+    // * `AmDemodulator` already emits the sink rate, so `pump_audio` bypasses the shared
+    //   RF-clock resampler when every active chain is `Am`. If any active chain is `Legacy`,
+    //   the legacy path and shared resampler stay exactly as today and no AM chain is mixed
+    //   into it: a mixed AM/FM stream uses the legacy demodulator for all chains.
+    // * `SetCursorFreq` → `retune`, `SetCenterFreq` → `retune`, `SetChannelBw` → `set_profile`
+    //   with the nearest supported `AmRfProfile`, `SetDemodMode`/`AddVfo`/`RemoveVfo` rebuild
+    //   only the chain that changed.
+    // * `SetChannelBw` mapping, pinned literally: 8_000 → Khz8, 25_000 → Khz12, and both an
+    //   out-of-range 3_000 and a non-positive value clamp to Khz6 (the ends of the literal
+    //   6/8/10/12 kHz set).
+    // * `SetSquelch(Some(db))` reaches an AM chain as `SquelchMode::Manual { threshold_dbfs:
+    //   db }` and `SetSquelch(None)` as `SquelchMode::Open`; legacy squelch behavior is
+    //   unchanged.
+    //
+    // The numbers frozen in these tests were captured from the current implementation and the
+    // standalone chain: the legacy AM path rejects the 8.33 kHz adjacent carrier by −20.4 dB
+    // while the AM chain rejects it by +63.5 dB, so AM selectivity is the discriminator that
+    // only the wired chain can satisfy.
+
+    /// RF clock every Task 10B fixture runs at, in hertz.
+    const T10B_RF_HZ: f64 = 2_048_000.0;
+    /// Sink rate every Task 10B fixture runs at, in hertz.
+    const T10B_SINK_HZ: u32 = 48_000;
+    /// RF frames in one 0.25 s Task 10B fixture.
+    const T10B_FRAMES_250MS: usize = 512_000;
+    /// Audio samples one 0.25 s Task 10B fixture must deliver at 48 kHz.
+    const T10B_SAMPLES_250MS: usize = 12_000;
+    /// Capture-sized IQ partition the audio thread actually receives, in frames.
+    const T10B_PARTITION: usize = 2_048;
+    /// Reported latency of the default AM chain at 2.048 MHz → 48 kHz, in output samples.
+    const T10B_AM_LATENCY: usize = 634;
+    /// Adjacent carrier offset used by every selectivity fixture, in hertz.
+    const T10B_ADJACENT_HZ: f64 = 8_330.0;
+
+    /// Sink that records audio and injects queued controls at a chosen write index.
+    ///
+    /// Injection is synchronous inside [`AudioSink::write`], so the pump's next loop-top
+    /// control drain has already seen the control before it processes the next IQ block. That
+    /// keeps mid-stream control timing deterministic without sleeps.
+    struct InjectingSink {
+        recorded: std::sync::Arc<std::sync::Mutex<Vec<f32>>>,
+        control_tx: crossbeam_channel::Sender<AudioControl>,
+        plan: Vec<(usize, AudioControl)>,
+        writes: usize,
+    }
+
+    impl AudioSink for InjectingSink {
+        fn write(&mut self, samples: &[f32]) -> anyhow::Result<()> {
+            self.recorded.lock().unwrap().extend_from_slice(samples);
+            for (index, control) in &self.plan {
+                if *index == self.writes {
+                    self.control_tx.send(control.clone()).unwrap();
+                }
+            }
+            self.writes += 1;
+            Ok(())
+        }
+
+        fn sample_rate(&self) -> u32 {
+            T10B_SINK_HZ
+        }
+    }
+
+    /// Runs IQ through the real pump, with `initial` controls drained before the first block and
+    /// `plan` controls injected after the given sink write.
+    #[allow(clippy::needless_pass_by_value)] // the plan is owned so injection timing is explicit
+    fn run_pipeline(
+        mode: DemodMode,
+        channel_bw: f64,
+        iq: &[IqSample],
+        squelch: Option<f32>,
+        plan: Vec<(usize, AudioControl)>,
+    ) -> Vec<f32> {
+        let (iq_tx, iq_rx) = unbounded();
+        let (control_tx, control_rx) = unbounded();
+        control_tx.send(AudioControl::SetDemodMode(mode)).unwrap();
+        control_tx.send(AudioControl::SetSquelch(squelch)).unwrap();
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = InjectingSink {
+            recorded: recorded.clone(),
+            control_tx: control_tx.clone(),
+            plan,
+            writes: 0,
+        };
+        for chunk in iq.chunks(T10B_PARTITION) {
+            iq_tx.send(chunk.to_vec()).unwrap();
+        }
+        drop(iq_tx);
+        let mut sink: Box<dyn AudioSink> = Box::new(sink);
+        pump_audio(
+            &iq_rx,
+            &control_rx,
+            &mut *sink,
+            100_000_000.0,
+            100_000_000.0,
+            channel_bw,
+            T10B_RF_HZ,
+        )
+        .expect("finite Task 10B fixture must pump without error");
+        drop(control_tx);
+        drop(control_rx);
+        let samples = recorded.lock().unwrap().clone();
+        samples
+    }
+
+    /// Builds the standalone reference AM chain the pipeline must reproduce.
+    fn am_reference_chain(rf: AmRfProfile) -> crate::audio::am::AmDemodulator {
+        crate::audio::am::AmDemodulator::new(
+            100_000_000.0,
+            100_000_000.0,
+            T10B_RF_HZ,
+            f64::from(T10B_SINK_HZ),
+            AmAudioProfile {
+                rf,
+                voice: VoiceProfile::Standard,
+                squelch: SquelchMode::Open,
+                prebuffer_ms: 100,
+            },
+        )
+        .expect("literal default-profile AM chain must construct")
+    }
+
+    /// Drives a reference chain with the same partition and the same block-boundary controls.
+    fn drive_reference(
+        chain: &mut crate::audio::am::AmDemodulator,
+        iq: &[IqSample],
+        plan: &[(usize, AudioControl)],
+    ) -> Vec<f32> {
+        let mut output = Vec::new();
+        for (block, chunk) in iq.chunks(T10B_PARTITION).enumerate() {
+            for (index, control) in plan {
+                if *index == block {
+                    match control {
+                        AudioControl::SetCursorFreq(freq) => chain
+                            .retune(100_000_000.0, *freq)
+                            .expect("reference retune must accept a finite frequency"),
+                        other => panic!("reference chain cannot mirror {other:?}"),
+                    }
+                }
+            }
+            output.extend(
+                chain
+                    .process(chunk)
+                    .expect("finite reference input must process")
+                    .samples,
+            );
+        }
+        output
+    }
+
+    /// 0.25 s of AM: a desired carrier at the center plus an adjacent AM carrier.
+    #[allow(clippy::cast_possible_truncation)] // fixture amplitudes are bounded well below 1.0
+    fn t10b_two_carrier(adjacent_hz: f64) -> Vec<IqSample> {
+        use std::f64::consts::TAU;
+        (0..T10B_FRAMES_250MS)
+            .map(|index| {
+                #[allow(clippy::cast_precision_loss)]
+                let time = index as f64 / T10B_RF_HZ;
+                let desired = 0.20 * (1.0 + 0.65 * (TAU * 1_000.0 * time).sin());
+                let adjacent = 0.70 * (1.0 + 0.85 * (TAU * 2_000.0 * time).sin());
+                let phase = TAU * adjacent_hz * time;
+                IqSample::new(
+                    (desired + adjacent * phase.cos()) as f32,
+                    (adjacent * phase.sin()) as f32,
+                )
+            })
+            .collect()
+    }
+
+    /// 0.25 s of a single 1 kHz AM carrier at the center frequency.
+    fn t10b_single_carrier() -> Vec<IqSample> {
+        generate_am_signal(
+            100_000_000.0,
+            1_000.0,
+            0.70,
+            T10B_RF_HZ,
+            100_000_000.0,
+            T10B_FRAMES_250MS,
+        )
+    }
+
+    /// Deterministic noise-only IQ, band-limited to the channel by the chain itself.
+    #[allow(clippy::cast_precision_loss)] // 24-bit fixture mantissa is exact in f32
+    fn t10b_noise(amplitude: f32) -> Vec<IqSample> {
+        let mut state = 0x9e37_79b9_u32;
+        (0..T10B_FRAMES_250MS)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let real = (state >> 9) as f32 / 8_388_607.0 - 1.0;
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let imaginary = (state >> 9) as f32 / 8_388_607.0 - 1.0;
+                IqSample::new(real * amplitude, imaginary * amplitude)
+            })
+            .collect()
+    }
+
+    /// Single-bin amplitude of `samples` at `frequency_hz`, in linear full scale.
+    fn t10b_tone_amplitude(samples: &[f32], frequency_hz: f64) -> f64 {
+        use std::f64::consts::TAU;
+        let mut real = 0.0_f64;
+        let mut imaginary = 0.0_f64;
+        for (index, sample) in samples.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let phase = TAU * frequency_hz * index as f64 / f64::from(T10B_SINK_HZ);
+            real += f64::from(*sample) * phase.cos();
+            imaginary -= f64::from(*sample) * phase.sin();
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let scale = 2.0 / samples.len() as f64;
+        scale * real.hypot(imaginary)
+    }
+
+    /// Desired-over-adjacent-modulation ratio in decibels for the two-carrier fixture.
+    fn t10b_adjacent_rejection(samples: &[f32]) -> f64 {
+        assert!(
+            samples.len() > 4_800,
+            "selectivity needs a settled measurement window, got {} samples",
+            samples.len()
+        );
+        let wanted = t10b_tone_amplitude(samples, 1_000.0);
+        let leaked = t10b_tone_amplitude(samples, 2_000.0);
+        20.0 * (wanted / leaked.max(1e-12)).log10()
+    }
+
+    #[allow(clippy::cast_precision_loss)] // sample counts here are far below 2^52
+    fn t10b_rms(samples: &[f32]) -> f64 {
+        assert!(!samples.is_empty(), "RMS needs a non-empty fixture");
+        (samples
+            .iter()
+            .map(|sample| f64::from(*sample) * f64::from(*sample))
+            .sum::<f64>()
+            / samples.len() as f64)
+            .sqrt()
+    }
+
+    fn t10b_assert_all_points_identical(actual: &[f32], expected: &[f32], context: &str) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{context}: sample count {} versus {}",
+            actual.len(),
+            expected.len()
+        );
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "{context}: sample {index} differs ({actual} versus {expected})"
+            );
+        }
+    }
+
+    #[test]
+    fn am_mode_uses_the_new_chain_and_bypasses_the_shared_resampler() {
+        // 0.25 s of 2.048 MS/s input must arrive as exactly 12,000 sink samples. The AM chain
+        // already emits the sink rate, so any second resampling stage either changes that count
+        // or adds a fractional-clock error of its own; both are visible here.
+        let single = t10b_single_carrier();
+        for partition in [T10B_PARTITION, 4_096] {
+            let input: Vec<IqSample> = single.chunks(partition).flatten().copied().collect();
+            let samples = run_pipeline(DemodMode::AM, 8_000.0, &input, None, Vec::new());
+            assert_eq!(
+                samples.len(),
+                T10B_SAMPLES_250MS,
+                "AM through the pump must deliver exactly 0.25 s at 48 kHz for {partition}-frame partitions"
+            );
+            assert!(
+                samples.iter().all(|sample| sample.is_finite()),
+                "AM through the pump must stay finite"
+            );
+        }
+
+        // The 1 kHz tone must survive at the sink rate, measured only after the reported latency.
+        let samples = run_pipeline(DemodMode::AM, 8_000.0, &single, None, Vec::new());
+        let settled = &samples[T10B_AM_LATENCY + 4_800..];
+        let measured_hz = estimate_tone_hz(settled, T10B_SINK_HZ);
+        assert!(
+            (measured_hz - 1_000.0).abs() <= 1.0,
+            "AM chain must recover 1 kHz within 1 Hz after discarding {T10B_AM_LATENCY} latency samples, measured {measured_hz} Hz"
+        );
+
+        // Selectivity is the proof that the new chain, not the legacy envelope path, served the
+        // stream: the legacy path rejects this 8.33 kHz adjacent carrier by only −20.4 dB.
+        let adjacent = t10b_two_carrier(T10B_ADJACENT_HZ);
+        let samples = run_pipeline(DemodMode::AM, 8_000.0, &adjacent, None, Vec::new());
+        assert_eq!(
+            samples.len(),
+            T10B_SAMPLES_250MS,
+            "the selectivity fixture must retain the exact RF-clock duration"
+        );
+        let settled = &samples[T10B_AM_LATENCY + 4_800..];
+        let rejection_db = t10b_adjacent_rejection(settled);
+        assert!(
+            rejection_db >= 40.0,
+            "AM mode must run the wired AmDemodulator (>= 40 dB adjacent rejection); measured {rejection_db:.2} dB, which is the legacy envelope path"
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )] // fixture counts and rates are tiny positive literals
+    fn am_clock_is_exact_at_every_receiver_rate() {
+        // 2.048 MHz divides into 48 kHz evenly enough that a missing end-of-stream flush hides in
+        // the rounding. 960 kHz and 1.2 MHz are rates the CLI accepts and both leave a remainder,
+        // so they expose a stream that ends short of its own duration.
+        for input_rate_hz in [960_000.0_f64, 1_024_000.0, 1_200_000.0, 2_048_000.0] {
+            let seconds = 0.25_f64;
+            let frames = (input_rate_hz * seconds) as usize;
+            let expected =
+                ((frames as f64) * f64::from(T10B_SINK_HZ) / input_rate_hz).round() as usize;
+            let iq: Vec<IqSample> = (0..frames)
+                .map(|index| {
+                    let time = index as f64 / input_rate_hz;
+                    let envelope = 1.0 + 0.70 * (std::f64::consts::TAU * 1_000.0 * time).sin();
+                    IqSample::new(envelope as f32, 0.0)
+                })
+                .collect();
+
+            let (iq_tx, iq_rx) = unbounded();
+            let (control_tx, control_rx) = unbounded();
+            control_tx
+                .send(AudioControl::SetDemodMode(DemodMode::AM))
+                .unwrap();
+            let mut sink = NullSink::new(T10B_SINK_HZ);
+            for chunk in iq.chunks(2_048) {
+                iq_tx.send(chunk.to_vec()).unwrap();
+            }
+            drop(iq_tx);
+            pump_audio(
+                &iq_rx,
+                &control_rx,
+                &mut sink,
+                100_000_000.0,
+                100_000_000.0,
+                8_000.0,
+                input_rate_hz,
+            )
+            .expect("finite AM input must pump without error");
+
+            let recorded = sink.samples.len();
+            assert_eq!(
+                recorded, expected,
+                "{input_rate_hz} Hz of AM must deliver exactly {expected} sink samples for \
+                 {seconds} s, but delivered {recorded}"
+            );
+        }
+    }
+
+    #[test]
+    fn fm_and_nfm_paths_are_unchanged() {
+        use crate::audio::test_signal::generate_fm_signal;
+
+        // Captured from the current implementation for this exact fixture (same controls, same
+        // partition, same 0.25 s of input): the legacy path emits 12,000 samples and these levels.
+        // An AM chain leaking into FM/NFM would emit squelch-closed zeros or AM levels instead.
+        const CASES: [(DemodMode, f64, f64, f64, f64); 2] = [
+            (
+                DemodMode::FM,
+                200_000.0,
+                75_000.0,
+                0.279_358_327,
+                4.857_953_548,
+            ),
+            (
+                DemodMode::NFM,
+                25_000.0,
+                5_000.0,
+                0.313_574_390,
+                4.358_976_841,
+            ),
+        ];
+
+        for (mode, channel_bw, deviation_hz, expected_rms, expected_peak) in CASES {
+            let iq = generate_fm_signal(
+                100_000_000.0,
+                1_000.0,
+                deviation_hz,
+                T10B_RF_HZ,
+                100_000_000.0,
+                T10B_FRAMES_250MS,
+            );
+            let samples = run_pipeline(mode, channel_bw, &iq, None, Vec::new());
+            assert_eq!(
+                samples.len(),
+                T10B_SAMPLES_250MS,
+                "{mode:?} must keep the legacy RF-clock duration"
+            );
+            assert!(
+                samples.iter().all(|sample| sample.is_finite()),
+                "{mode:?} audio must stay finite"
+            );
+            let rms = t10b_rms(&samples);
+            assert!(
+                (rms - expected_rms).abs() <= 1.0e-4,
+                "{mode:?} RMS changed from {expected_rms} to {rms}; the AM branch must not touch FM/NFM"
+            );
+            let peak = samples
+                .iter()
+                .fold(0.0_f32, |max, sample| max.max(sample.abs()));
+            assert!(
+                (f64::from(peak) - expected_peak).abs() <= 1.0e-3,
+                "{mode:?} peak changed from {expected_peak} to {peak}; the AM branch must not touch FM/NFM"
+            );
+        }
+    }
+
+    #[test]
+    fn am_squelch_closed_emits_exact_zeros_through_the_pump() {
+        // Noise whose channel power reads −42.99 dBFS: below a −35 dBFS manual threshold, above
+        // −60 dBFS. The chain's own gate, not the legacy audio-RMS squelch, must decide this.
+        let noise = t10b_noise(1.0e-2);
+
+        let closed = run_pipeline(DemodMode::AM, 8_000.0, &noise, Some(-35.0), Vec::new());
+        assert_eq!(
+            closed.len(),
+            T10B_SAMPLES_250MS,
+            "a closed squelch must still keep the exact output clock"
+        );
+        assert!(
+            closed
+                .iter()
+                .all(|sample| sample.to_bits() == 0.0_f32.to_bits()),
+            "a closed AM squelch must emit positive-zero bits for every sample, not denormals, silence-shaped AGC output, or negative zero"
+        );
+
+        let open = run_pipeline(DemodMode::AM, 8_000.0, &noise, Some(-60.0), Vec::new());
+        assert_eq!(
+            open.len(),
+            T10B_SAMPLES_250MS,
+            "an open squelch must keep the same output clock"
+        );
+        assert!(
+            open.iter().any(|sample| sample.to_bits() != 0.0_f32.to_bits()),
+            "the same noise above a −60 dBFS threshold must pass audio, so the zeros above come from the threshold and not from a permanently muted chain"
+        );
+        assert!(
+            open.iter().all(|sample| sample.is_finite()),
+            "open-squelch AM audio must stay finite"
+        );
+    }
+
+    #[test]
+    fn am_control_retune_and_profile_change_preserve_streaming_state() {
+        let single = t10b_single_carrier();
+        let untouched = run_pipeline(DemodMode::AM, 8_000.0, &single, None, Vec::new());
+
+        // (a) A same-frequency retune must be a bit-exact no-op: no NCO, filter, squelch, AGC, or
+        // resampler reset. Any rebuild shows up as a transient against the untouched stream.
+        let retuned = run_pipeline(
+            DemodMode::AM,
+            8_000.0,
+            &single,
+            None,
+            vec![(40, AudioControl::SetCursorFreq(100_000_000.0))],
+        );
+        t10b_assert_all_points_identical(&retuned, &untouched, "same-frequency AM retune");
+
+        // (b) The post-control continuation must match an independently driven chain retuned at
+        // the same block boundary, which pins that the control reaches the chain in order and
+        // preserves AGC/squelch/filter history rather than restarting it.
+        let mut reference = am_reference_chain(AmRfProfile::Khz8);
+        let reference_latency_before = reference.latency_samples();
+        let reference_audio = drive_reference(
+            &mut reference,
+            &single,
+            &[(40, AudioControl::SetCursorFreq(100_000_000.0))],
+        );
+        assert_eq!(
+            reference.latency_samples(),
+            reference_latency_before,
+            "a retune must not change the AM chain's reported latency"
+        );
+        // 40 sink writes at 2,048 RF frames each is 81,920 RF frames, i.e. 1,920 output samples,
+        // so the settled comparison window starts well past the control point.
+        let settled_start = 3_000;
+        #[allow(clippy::cast_precision_loss)] // sample count is far below 2^52
+        let difference_rms = retuned[settled_start..]
+            .iter()
+            .zip(&reference_audio[settled_start..])
+            .map(|(left, right)| {
+                let delta = f64::from(*left) - f64::from(*right);
+                delta * delta
+            })
+            .sum::<f64>()
+            / (retuned.len() - settled_start) as f64;
+        assert!(
+            difference_rms.sqrt() <= 1.0e-4,
+            "the pump's retuned AM continuation must match a reference chain retuned at the same block (RMS {:.3e} exceeds 1e-4)",
+            difference_rms.sqrt()
+        );
+
+        // (c) A channel-bandwidth change must translate to the nearest supported RF profile:
+        // 25,000 Hz → Khz12, and both an out-of-range 3,000 Hz and a non-positive value → Khz6.
+        // A 5 kHz adjacent carrier modulated at 2 kHz separates them: Khz12 leaks ~0.256 of the
+        // 2 kHz component, Khz8 ~0.065, Khz6 ~0.035, and the legacy 25 kHz path leaks far more.
+        let adjacent = t10b_two_carrier(5_000.0);
+        let wide = run_pipeline(
+            DemodMode::AM,
+            8_000.0,
+            &adjacent,
+            None,
+            vec![(40, AudioControl::SetChannelBw(25_000.0))],
+        );
+        assert_eq!(
+            wide.len(),
+            T10B_SAMPLES_250MS,
+            "a bandwidth change must not disturb the output clock"
+        );
+        let wide_leak = t10b_tone_amplitude(&wide[T10B_AM_LATENCY + 4_800..], 2_000.0);
+        assert!(
+            wide_leak > 0.15,
+            "SetChannelBw(25_000) must map literally to AmRfProfile::Khz12 (2 kHz leak ~0.256); measured {wide_leak:.4}"
+        );
+
+        for out_of_range in [3_000.0_f64, 0.0, -1.0] {
+            let narrow = run_pipeline(
+                DemodMode::AM,
+                8_000.0,
+                &adjacent,
+                None,
+                vec![(40, AudioControl::SetChannelBw(out_of_range))],
+            );
+            assert_eq!(
+                narrow.len(),
+                T10B_SAMPLES_250MS,
+                "SetChannelBw({out_of_range}) must not panic or disturb the clock"
+            );
+            assert!(
+                narrow.iter().all(|sample| sample.is_finite()),
+                "SetChannelBw({out_of_range}) must leave finite audio"
+            );
+            let narrow_leak = t10b_tone_amplitude(&narrow[T10B_AM_LATENCY + 4_800..], 2_000.0);
+            assert!(
+                narrow_leak < 0.06,
+                "SetChannelBw({out_of_range}) must clamp to AmRfProfile::Khz6 (2 kHz leak ~0.035); measured {narrow_leak:.4}"
+            );
+        }
+    }
+
+    #[test]
+    fn adding_and_removing_am_vfos_keeps_cursor_state() {
+        let single = t10b_single_carrier();
+        let untouched = run_pipeline(DemodMode::AM, 8_000.0, &single, None, Vec::new());
+
+        let churned = run_pipeline(
+            DemodMode::AM,
+            8_000.0,
+            &single,
+            None,
+            vec![
+                (
+                    40,
+                    AudioControl::AddVfo {
+                        id: 7,
+                        freq: 100_500_000.0,
+                        channel_bw: 8_000.0,
+                        mode: DemodMode::AM,
+                    },
+                ),
+                (41, AudioControl::RemoveVfo(7)),
+            ],
+        );
+
+        // The cursor chain must be untouched by VFO churn: same clock, same bits. A rebuild, a
+        // shared-resampler flush, or an AM/Legacy flip shows up as a transient here.
+        t10b_assert_all_points_identical(&churned, &untouched, "AM VFO add/remove");
+        assert_eq!(
+            churned.len(),
+            T10B_SAMPLES_250MS,
+            "adding and removing an AM VFO must not change the RF-clock duration"
+        );
+
+        // A VFO that survives must not disturb the cursor either, and must stay finite.
+        let with_vfo = run_pipeline(
+            DemodMode::AM,
+            8_000.0,
+            &single,
+            None,
+            vec![(
+                40,
+                AudioControl::AddVfo {
+                    id: 8,
+                    freq: 100_020_000.0,
+                    channel_bw: 8_000.0,
+                    mode: DemodMode::AM,
+                },
+            )],
+        );
+        assert_eq!(
+            with_vfo.len(),
+            T10B_SAMPLES_250MS,
+            "a live AM VFO must keep the RF-clock duration"
+        );
+        assert!(
+            with_vfo.iter().all(|sample| sample.is_finite()),
+            "mixing an AM VFO must stay finite"
+        );
+
+        // The added VFO must itself be an AM chain: with the cursor muted and the VFO tuned to
+        // the desired channel, the surviving audio must show AM selectivity. The legacy envelope
+        // VFO measures −18.6 dB here, the wired chain ~63 dB.
+        let adjacent = t10b_two_carrier(T10B_ADJACENT_HZ);
+        let vfo_only = run_pipeline(
+            DemodMode::AM,
+            8_000.0,
+            &adjacent,
+            None,
+            vec![
+                (0, AudioControl::Mute(true)),
+                (
+                    0,
+                    AudioControl::AddVfo {
+                        id: 9,
+                        freq: 100_000_000.0,
+                        channel_bw: 8_000.0,
+                        mode: DemodMode::AM,
+                    },
+                ),
+            ],
+        );
+        assert_eq!(
+            vfo_only.len(),
+            T10B_SAMPLES_250MS,
+            "a muted cursor with an AM VFO must keep the RF-clock duration"
+        );
+        let vfo_rejection_db = t10b_adjacent_rejection(&vfo_only[T10B_AM_LATENCY..]);
+        assert!(
+            vfo_rejection_db >= 40.0,
+            "an AM VFO must run the wired AmDemodulator (>= 40 dB adjacent rejection); measured {vfo_rejection_db:.2} dB, which is the legacy envelope path"
+        );
+    }
+
+    #[test]
+    fn mixed_am_and_fm_falls_back_to_the_legacy_path_without_panicking() {
+        // Documented fallback: a mixed AM/FM stream uses the legacy demodulator for every chain,
+        // so no AM-specific telemetry or effective-cutoff accessor is available on this path and
+        // none is required by it.
+        let adjacent = t10b_two_carrier(T10B_ADJACENT_HZ);
+
+        let cursor_fm_am_vfo = run_pipeline(
+            DemodMode::FM,
+            200_000.0,
+            &adjacent,
+            None,
+            vec![(
+                0,
+                AudioControl::AddVfo {
+                    id: 1,
+                    freq: 100_000_000.0,
+                    channel_bw: 8_000.0,
+                    mode: DemodMode::AM,
+                },
+            )],
+        );
+        assert_eq!(
+            cursor_fm_am_vfo.len(),
+            T10B_SAMPLES_250MS,
+            "a mixed FM cursor with an AM VFO must still deliver the exact RF-clock duration"
+        );
+        assert!(
+            cursor_fm_am_vfo.iter().all(|sample| sample.is_finite()),
+            "a mixed FM cursor with an AM VFO must not emit NaN or infinity"
+        );
+
+        let cursor_am_fm_vfo = run_pipeline(
+            DemodMode::AM,
+            8_000.0,
+            &adjacent,
+            None,
+            vec![(
+                0,
+                AudioControl::AddVfo {
+                    id: 2,
+                    freq: 100_000_000.0,
+                    channel_bw: 200_000.0,
+                    mode: DemodMode::FM,
+                },
+            )],
+        );
+        assert_eq!(
+            cursor_am_fm_vfo.len(),
+            T10B_SAMPLES_250MS,
+            "an AM cursor with an FM VFO must still deliver the exact RF-clock duration"
+        );
+        assert!(
+            cursor_am_fm_vfo.iter().all(|sample| sample.is_finite()),
+            "an AM cursor with an FM VFO must not emit NaN or infinity"
+        );
+
+        // Legacy fallback evidence: the AM VFO must NOT contribute AM-chain selectivity, because
+        // the mixed stream runs the legacy envelope path throughout.
+        for (name, samples) in [
+            ("FM cursor + AM VFO", &cursor_fm_am_vfo),
+            ("AM cursor + FM VFO", &cursor_am_fm_vfo),
+        ] {
+            let rejection_db = t10b_adjacent_rejection(&samples[T10B_AM_LATENCY..]);
+            assert!(
+                rejection_db < 0.0,
+                "{name} must fall back to the legacy path (< 0 dB adjacent rejection); measured {rejection_db:.2} dB, which means an AM chain was mixed into a legacy stream"
+            );
+        }
     }
 }

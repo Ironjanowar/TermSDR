@@ -836,7 +836,7 @@ DOMINIO DEL TIEMPO                    DOMINIO DE LA FRECUENCIA
             <ul style="margin: 0.5rem 0 0 1.5rem;">
                 <li><strong>Volumen:</strong> <kbd>v</kbd>/<kbd>V</kbd> sube/baja en pasos de 5 (rango 0–100), o <code>/volume 80</code></li>
                 <li><strong>Squelch:</strong> <code>/squelch -60</code> para activar umbral, <code>/squelch</code> para desactivar</li>
-                <li><strong>Mute:</strong> <kbd>Space</kbd> desactiva el cursor y silencia el audio del cursor principal</li>
+                <li><strong>Mute:</strong> <kbd>Space</kbd> silencia/reactiva solo el audio del cursor principal</li>
                 <li><strong>VFOs:</strong> Los VFOs pinneados se demodemulan simultáneamente y se mezclan en mono</li>
             </ul>
         </div>
@@ -1045,18 +1045,19 @@ Resultado: nunca se bloquea la captura, la pantalla muestra
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
             <div>
                 <h3 style="margin-top: 0;">Navegación</h3>
-                <div class="keybind"><kbd>←</kbd> / <kbd>→</kbd> <span>Mover cursor / Sintonización fina (±25 kHz)</span></div><br>
-                <div class="keybind"><kbd>PgUp</kbd> / <kbd>PgDn</kbd> <span>Sintonización gruesa (±1 MHz)</span></div><br>
+                <div class="keybind"><kbd>←</kbd> / <kbd>→</kbd> <span>Mover cursor ±1 kHz</span></div><br>
+                <div class="keybind"><kbd>Shift</kbd> + <kbd>←</kbd> / <kbd>→</kbd> <span>Mover cursor ±100 kHz</span></div><br>
+                <div class="keybind"><kbd>PgUp</kbd> / <kbd>PgDn</kbd> <span>Mover cursor ±1 MHz</span></div><br>
                 <div class="keybind"><kbd>f</kbd> <span>Saltar a frecuencia (modal de entrada)</span></div><br>
                 <div class="keybind"><kbd>+</kbd> / <kbd>-</kbd> <span>Zoom ancho de banda</span></div><br>
-                <div class="keybind"><kbd>c</kbd> <span>Centrar cursor en pantalla</span></div>
+                <div class="keybind"><kbd>c</kbd> <span>Centrar vista en cursor</span></div>
             </div>
             <div>
                 <h3 style="margin-top: 0;">Control</h3>
                 <div class="keybind"><kbd>↑</kbd> / <kbd>↓</kbd> <span>Ajustar ganancia RF</span></div><br>
                 <div class="keybind"><kbd>b</kbd> <span>Configurar ancho de banda (modal)</span></div><br>
                 <div class="keybind"><kbd>w</kbd> / <kbd>W</kbd> <span>Ampliar / reducir ancho de canal (×2 / ÷2)</span></div><br>
-                <div class="keybind"><kbd>Space</kbd> <span>Toggle cursor activo/inactivo + mute</span></div><br>
+                <div class="keybind"><kbd>Space</kbd> <span>Silenciar/reactivar solo el audio del cursor</span></div><br>
                 <div class="keybind"><kbd>/</kbd> <span>Abrir <strong>command palette</strong></span></div><br>
                 <div class="keybind"><kbd>?</kbd> <span>Mostrar ayuda</span></div><br>
                 <div class="keybind"><kbd>q</kbd> / <kbd>Esc</kbd> <span>Salir</span></div>
@@ -1115,7 +1116,7 @@ Resultado: nunca se bloquea la captura, la pantalla muestra
                     </tr>
                     <tr style="border-bottom: 1px solid var(--border);">
                         <td style="padding: 0.4rem 0.5rem;"><code>center</code></td>
-                        <td style="padding: 0.4rem 0.5rem;">Centrar cursor en pantalla</td>
+                        <td style="padding: 0.4rem 0.5rem;">Centrar vista en cursor</td>
                         <td style="padding: 0.4rem 0.5rem;">—</td>
                         <td style="padding: 0.4rem 0.5rem;"><kbd>c</kbd></td>
                     </tr>
@@ -1151,21 +1152,21 @@ Resultado: nunca se bloquea la captura, la pantalla muestra
                     </tr>
                     <tr style="border-bottom: 1px solid var(--border);">
                         <td style="padding: 0.4rem 0.5rem;"><code>toggle-cursor</code></td>
-                        <td style="padding: 0.4rem 0.5rem;">Activar/desactivar cursor</td>
+                        <td style="padding: 0.4rem 0.5rem;">Silenciar/reactivar solo el audio del cursor</td>
                         <td style="padding: 0.4rem 0.5rem;">—</td>
                         <td style="padding: 0.4rem 0.5rem;"><kbd>Space</kbd></td>
                     </tr>
                     <tr style="border-bottom: 1px solid var(--border);">
                         <td style="padding: 0.4rem 0.5rem;"><code>tune+</code> / <code>tune-</code></td>
-                        <td style="padding: 0.4rem 0.5rem;">Sintonizar ±25 kHz</td>
+                        <td style="padding: 0.4rem 0.5rem;">Mover cursor ±1 kHz</td>
                         <td style="padding: 0.4rem 0.5rem;">—</td>
                         <td style="padding: 0.4rem 0.5rem;"><kbd>←</kbd> / <kbd>→</kbd></td>
                     </tr>
                     <tr style="border-bottom: 1px solid var(--border);">
                         <td style="padding: 0.4rem 0.5rem;"><code>tune-coarse+</code> / <code>tune-coarse-</code></td>
-                        <td style="padding: 0.4rem 0.5rem;">Sintonizar ±1 MHz</td>
+                        <td style="padding: 0.4rem 0.5rem;">Mover cursor ±100 kHz</td>
                         <td style="padding: 0.4rem 0.5rem;">—</td>
-                        <td style="padding: 0.4rem 0.5rem;"><kbd>PgUp</kbd> / <kbd>PgDn</kbd></td>
+                        <td style="padding: 0.4rem 0.5rem;"><kbd>Shift</kbd> + <kbd>←</kbd> / <kbd>→</kbd></td>
                     </tr>
                     <tr style="border-bottom: 1px solid var(--border);">
                         <td style="padding: 0.4rem 0.5rem;"><code>output</code></td>
@@ -1303,8 +1304,8 @@ Resultado: nunca se bloquea la captura, la pantalla muestra
             <tr><td>3</td><td>Scope v0.1</td><td>Espectro + Waterfall + controles freq/BW</td></tr>
             <tr><td>4</td><td>Layout</td><td>Stacked vertical (espectro arriba, waterfall abajo)</td></tr>
             <tr><td>5</td><td>Colores waterfall</td><td>Viridis (configurable en futuro)</td></tr>
-            <tr><td>6</td><td>Navegación frecuencia</td><td>Multi-step: flechas (fino) + PgUp/PgDn (grueso) + modal (f)</td></tr>
-            <tr><td>7</td><td>Cursor/marcadores</td><td>Cursor con toggle (espacio), marcadores para futuro audio</td></tr>
+            <tr><td>6</td><td>Navegación frecuencia</td><td>Flechas ±1 kHz, Shift+flechas ±100 kHz, <kbd>c</kbd> centra la vista y modal <kbd>f</kbd> salta a frecuencia</td></tr>
+            <tr><td>7</td><td>Cursor/marcadores</td><td>Cursor siempre navegable; <kbd>Space</kbd> silencia/reactiva solo su audio</td></tr>
             <tr><td>8</td><td>Configuración</td><td>CLI args + JSON config. CubicSDR XML como import futuro</td></tr>
             <tr><td>9</td><td>Sin hardware</td><td>Señal test sintética + replay archivos IQ</td></tr>
             <tr><td>10</td><td>Formato config</td><td>JSON nativo</td></tr>
@@ -1325,7 +1326,7 @@ Resultado: nunca se bloquea la captura, la pantalla muestra
                 <li>Waterfall con paleta Viridis</li>
                 <li>Selección de frecuencia (flechas + salto directo)</li>
                 <li>Configuración de ancho de banda</li>
-                <li>Cursor visual con toggle</li>
+                <li>Cursor visual siempre navegable con mute de audio independiente</li>
                 <li>Modo test (señal sintética)</li>
                 <li>Replay de archivos IQ</li>
                 <li>CLI args con defaults sensatos</li>

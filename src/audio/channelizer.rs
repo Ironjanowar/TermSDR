@@ -470,7 +470,12 @@ impl AmChannelizer {
         self.channel_hz = channel_hz;
     }
 
-    /// Replaces the RF and voice profiles, redesigning only the channel filter.
+    /// Replaces the RF and voice profiles, redesigning the channel filter only when its response
+    /// changes.
+    ///
+    /// Several profile pairs derive the same pass and stop edges (for example every `Khz6` voice
+    /// selection). In that case the live filter, its history, and the reported latency are kept,
+    /// and only the profile metadata and effective voice cutoff are refreshed.
     ///
     /// The NCO phase, the resampler, and the reported output rate are untouched. The effective
     /// voice high cutoff follows [`AmRfProfile::effective_edges_hz`] and is reported by

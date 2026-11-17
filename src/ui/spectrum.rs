@@ -20,8 +20,6 @@ pub struct SpectrumWidget<'a> {
     max_db: f32,
     /// Cursor position (0.0–1.0), None if cursor hidden entirely.
     cursor_pos: Option<f32>,
-    /// Whether cursor is active (solid) or inactive (dashed).
-    cursor_active: bool,
     /// Frequency at cursor.
     cursor_freq: f64,
     /// dB value at cursor.
@@ -48,7 +46,6 @@ impl<'a> SpectrumWidget<'a> {
             min_db,
             max_db,
             cursor_pos: None,
-            cursor_active: true,
             cursor_freq: 0.0,
             cursor_db: None,
             channel_bw: None,
@@ -61,9 +58,8 @@ impl<'a> SpectrumWidget<'a> {
     }
 
     #[must_use] 
-    pub fn with_cursor(mut self, pos: Option<f32>, active: bool, freq: f64, db: Option<f32>) -> Self {
-        self.cursor_pos = pos;
-        self.cursor_active = active;
+    pub fn with_cursor(mut self, pos: Option<f32>, freq: f64, db: Option<f32>) -> Self {
+        self.cursor_pos = pos.filter(|pos| pos.is_finite() && (0.0..=1.0).contains(pos));
         self.cursor_freq = freq;
         self.cursor_db = db;
         self
@@ -198,21 +194,12 @@ impl Widget for SpectrumWidget<'_> {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // intentional truncation; value is non-negative here
             let cursor_x = chart_x + (cursor_pos * f32::from(chart_width - 1)) as u16;
             if cursor_x >= chart_x && cursor_x < chart_x + chart_width {
-                // Vertical line through spectrum
-                // Solid line when active, dashed when inactive
-                let (active, dash_char) = if self.cursor_active { (true, "│") } else { (false, "┆") };
-                let cursor_color = if active { Color::Yellow } else { Color::Rgb(180, 180, 60) };
+                // Vertical line through spectrum: always solid, cursor info is
+                // always shown (Space only affects audio mute, not presentation).
                 for row in 0..chart_height {
                     let y = chart_y_start + row;
                     if y < area.y + area.height - 1 {
-                        if active {
-                            buf.set_string(cursor_x, y, dash_char, Style::default().fg(cursor_color));
-                        } else {
-                            // Dashed: show every other row
-                            if row % 2 == 0 {
-                                buf.set_string(cursor_x, y, "┆", Style::default().fg(cursor_color));
-                            }
-                        }
+                        buf.set_string(cursor_x, y, "│", Style::default().fg(Color::Yellow));
                     }
                 }
 
@@ -233,17 +220,10 @@ impl Widget for SpectrumWidget<'_> {
                 };
                 let label_y = area.y;
                 if label_y < area.y + area.height {
-                    let label_style = if active {
-                        Style::default().fg(Color::Black).bg(Color::Yellow)
-                    } else {
-                        Style::default().fg(Color::Rgb(180, 180, 60)).bg(Color::Rgb(40, 40, 40))
-                    };
-                    buf.set_string(
-                        label_x,
-                        label_y,
-                        &label,
-                        label_style,
-                    );
+                    // Cursor label is always highlighted: presentation never
+                    // depends on audio mute state.
+                    let label_style = Style::default().fg(Color::Black).bg(Color::Yellow);
+                    buf.set_string(label_x, label_y, &label, label_style);
                 }
             }
         }
@@ -592,6 +572,14 @@ mod tests {
     }
 
     #[test]
+    fn offscreen_cursor_is_discarded_before_rendering() {
+        for pos in [-0.1, 1.1, f32::NAN] {
+            let widget = SpectrumWidget::new(None, -80.0, 0.0).with_cursor(Some(pos), 100e6, None);
+            assert_eq!(widget.cursor_pos, None);
+        }
+    }
+
+    #[test]
     fn smoke_render_no_data() {
         let backend = ratatui::backend::TestBackend::new(80, 20);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -613,7 +601,7 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal.draw(|f| {
             let widget = SpectrumWidget::new(Some(&fft), -80.0, 0.0)
-                .with_cursor(Some(0.5), true, 100e6, Some(-50.0))
+                .with_cursor(Some(0.5), 100e6, Some(-50.0))
                 .with_bandwidth(Some(25_000.0), 100e6, 2.048e6)
                 .with_squelch(Some(-60.0))
                 .with_scan(true);

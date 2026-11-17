@@ -21,8 +21,6 @@ pub struct WaterfallWidget<'a> {
     max_db: f32,
     /// Cursor position (0.0–1.0), None if hidden.
     cursor_pos: Option<f32>,
-    /// Whether cursor is active (solid) or inactive (dashed).
-    cursor_active: bool,
     /// Channel bandwidth in Hz.
     channel_bw: Option<f64>,
     /// Cursor frequency in Hz.
@@ -43,7 +41,6 @@ impl<'a> WaterfallWidget<'a> {
             min_db,
             max_db,
             cursor_pos: None,
-            cursor_active: true,
             channel_bw: None,
             cursor_freq: 0.0,
             center_freq: 0.0,
@@ -53,9 +50,8 @@ impl<'a> WaterfallWidget<'a> {
     }
 
     #[must_use] 
-    pub fn with_cursor(mut self, pos: Option<f32>, active: bool) -> Self {
-        self.cursor_pos = pos;
-        self.cursor_active = active;
+    pub fn with_cursor(mut self, pos: Option<f32>) -> Self {
+        self.cursor_pos = pos.filter(|pos| pos.is_finite() && (0.0..=1.0).contains(pos));
         self
     }
 
@@ -126,26 +122,15 @@ impl Widget for WaterfallWidget<'_> {
             let cursor_x = area.x + (cursor_pos * (width - 1) as f32) as u16;
             if cursor_x >= area.x && cursor_x < area.x + area.width {
                 use ratatui::style::Color;
-                let cursor_color = if self.cursor_active {
-                    Color::Yellow
-                } else {
-                    Color::Rgb(180, 180, 60)
-                };
+                // Cursor line is always solid yellow: presentation never depends
+                // on audio mute state.
                 for row in 0..height {
                     #[allow(clippy::cast_possible_truncation)] // intentional truncation
                     let y = area.y + row as u16;
                     if y >= area.y + area.height {
                         break;
                     }
-                    if self.cursor_active {
-                        // Solid line
-                        buf.set_string(cursor_x, y, "│", Style::default().fg(cursor_color));
-                    } else {
-                        // Dashed: every other row
-                        if row % 2 == 0 {
-                            buf.set_string(cursor_x, y, "┆", Style::default().fg(cursor_color));
-                        }
-                    }
+                    buf.set_string(cursor_x, y, "│", Style::default().fg(Color::Yellow));
                 }
             }
         }
@@ -302,6 +287,15 @@ mod tests {
     }
 
     #[test]
+    fn offscreen_cursor_is_discarded_before_rendering() {
+        let history = vec![vec![-50.0; 64]];
+        for pos in [-0.1, 1.1, f32::NAN] {
+            let widget = WaterfallWidget::new(&history, -80.0, 0.0).with_cursor(Some(pos));
+            assert_eq!(widget.cursor_pos, None);
+        }
+    }
+
+    #[test]
     fn smoke_render_empty() {
         let backend = ratatui::backend::TestBackend::new(80, 20);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -319,7 +313,7 @@ mod tests {
         let history: Vec<Vec<f32>> = (0..10).map(|_| vec![-50.0; 64]).collect();
         terminal.draw(|f| {
             let widget = WaterfallWidget::new(&history, -80.0, 0.0)
-                .with_cursor(Some(0.5), true)
+                .with_cursor(Some(0.5))
                 .with_bandwidth(Some(25_000.0), 100e6, 100e6, 2.048e6);
             f.render_widget(widget, f.area());
         }).unwrap();

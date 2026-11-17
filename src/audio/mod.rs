@@ -230,7 +230,7 @@ impl ChainSpec {
             cursor_freq,
             channel_bw,
             mode: DemodMode::AM,
-            am_requested: false,
+            am_requested: true,
         }
     }
 }

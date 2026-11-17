@@ -1,6 +1,6 @@
 //! CLI argument parsing and configuration loading.
 
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use clap::Parser;
 
 use crate::capture::file::IqFileFormat;
@@ -105,15 +105,17 @@ pub struct CliArgs {
 /// Returns an error if the string cannot be parsed as a valid frequency.
 pub(crate) fn parse_frequency(s: &str) -> Result<f64> {
     let s = s.trim();
-    if let Some(prefix) = s.strip_suffix('M') {
-        Ok(prefix.parse::<f64>()? * 1_000_000.0)
+    let frequency = if let Some(prefix) = s.strip_suffix('M') {
+        prefix.parse::<f64>()? * 1_000_000.0
     } else if let Some(prefix) = s.strip_suffix('k') {
-        Ok(prefix.parse::<f64>()? * 1_000.0)
+        prefix.parse::<f64>()? * 1_000.0
     } else if let Some(prefix) = s.strip_suffix('G') {
-        Ok(prefix.parse::<f64>()? * 1_000_000_000.0)
+        prefix.parse::<f64>()? * 1_000_000_000.0
     } else {
-        Ok(s.parse::<f64>()?)
-    }
+        s.parse::<f64>()?
+    };
+    ensure!(frequency.is_finite(), "frequency must be finite");
+    Ok(frequency)
 }
 
 impl CliArgs {
@@ -218,6 +220,30 @@ mod tests {
         assert!(parse_frequency("abc").is_err());
         assert!(parse_frequency("12.3.4M").is_err());
         assert!(parse_frequency("M100").is_err());
+    }
+
+    #[test]
+    fn parse_frequency_rejects_every_non_finite_float_spelling() {
+        for input in [
+            "NaN",
+            "nan",
+            "NAN",
+            "inf",
+            "+inf",
+            "-inf",
+            "infinity",
+            "+infinity",
+            "-infinity",
+            "Infinity",
+            "INFINITY",
+            "1e309",
+            "1e303G",
+        ] {
+            assert!(
+                parse_frequency(input).is_err(),
+                "expected {input:?} to be rejected"
+            );
+        }
     }
 
     #[test]

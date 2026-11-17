@@ -39,8 +39,7 @@ impl CommandRegistry {
             Command { name: "bookmark-add", description: "Save current freq as bookmark", accepts_param: true, requires_param: true, hotkey: "-" },
             Command { name: "bookmark-remove", description: "Remove user bookmark by name", accepts_param: true, requires_param: true, hotkey: "-" },
             Command { name: "bookmarks", description: "Open bookmarks browser", accepts_param: false, requires_param: false, hotkey: "-" },
-            Command { name: "center", description: "Center cursor on screen", accepts_param: false, requires_param: false, hotkey: "c" },
-            Command { name: "center-on-cursor", description: "Center bandwidth on cursor (retune)", accepts_param: false, requires_param: false, hotkey: "C" },
+            Command { name: "center", description: "Center view on cursor", accepts_param: false, requires_param: false, hotkey: "c" },
             Command { name: "channelbw", description: "Set channel bandwidth", accepts_param: true, requires_param: false, hotkey: "w/W" },
             Command { name: "demod", description: "Set demodulation mode (am/fm/nfm)", accepts_param: true, requires_param: false, hotkey: "d" },
             Command { name: "frequency", description: "Jump to frequency", accepts_param: true, requires_param: true, hotkey: "f" },
@@ -52,11 +51,11 @@ impl CommandRegistry {
             Command { name: "scan", description: "Toggle auto-scan (peak hunting)", accepts_param: false, requires_param: false, hotkey: "s" },
             Command { name: "scan-interval", description: "Set scan interval (ms)", accepts_param: true, requires_param: true, hotkey: "-" },
             Command { name: "squelch", description: "Set squelch threshold (dB)", accepts_param: true, requires_param: false, hotkey: "-" },
-            Command { name: "toggle-cursor", description: "Toggle cursor on/off", accepts_param: false, requires_param: false, hotkey: "Space" },
-            Command { name: "tune+", description: "Tune up 25 kHz", accepts_param: false, requires_param: false, hotkey: "←" },
-            Command { name: "tune-", description: "Tune down 25 kHz", accepts_param: false, requires_param: false, hotkey: "→" },
-            Command { name: "tune-coarse+", description: "Tune up 1 MHz", accepts_param: false, requires_param: false, hotkey: "PgUp" },
-            Command { name: "tune-coarse-", description: "Tune down 1 MHz", accepts_param: false, requires_param: false, hotkey: "PgDn" },
+            Command { name: "toggle-cursor", description: "Mute/unmute cursor audio", accepts_param: false, requires_param: false, hotkey: "Space" },
+            Command { name: "tune+", description: "Move cursor up 1 kHz", accepts_param: false, requires_param: false, hotkey: "→" },
+            Command { name: "tune-", description: "Move cursor down 1 kHz", accepts_param: false, requires_param: false, hotkey: "←" },
+            Command { name: "tune-coarse+", description: "Move cursor up 100 kHz", accepts_param: false, requires_param: false, hotkey: "Shift+→" },
+            Command { name: "tune-coarse-", description: "Move cursor down 100 kHz", accepts_param: false, requires_param: false, hotkey: "Shift+←" },
             Command { name: "vfo-add", description: "Add VFO at frequency", accepts_param: true, requires_param: true, hotkey: "m" },
             Command { name: "vfo-clear", description: "Remove all VFOs", accepts_param: false, requires_param: false, hotkey: "-" },
             Command { name: "vfo-remove", description: "Remove VFO by ID", accepts_param: true, requires_param: true, hotkey: "x" },
@@ -249,8 +248,7 @@ impl CommandPalette {
                 Ok(CommandAction::RemoveBookmark(p.to_string()))
             }
             "bookmarks" => Ok(CommandAction::ShowBookmarks),
-            "center" => Ok(CommandAction::CenterCursor),
-            "center-on-cursor" => Ok(CommandAction::CenterOnCursor),
+            "center" => Ok(CommandAction::CenterViewOnCursor),
             "channelbw" => {
                 if let Some(p) = param {
                     parse_frequency(p)
@@ -353,8 +351,7 @@ pub enum CommandAction {
     SetBandwidth(f64),
     SetChannelBw(f64),
     WidenChannelBw,
-    CenterCursor,
-    CenterOnCursor,
+    CenterViewOnCursor,
     GainUp,
     GainDown,
     ShowHelp,
@@ -390,7 +387,7 @@ mod tests {
     #[test]
     fn test_registry_has_all_commands() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.all().len(), 30);
+        assert_eq!(reg.all().len(), 29);
     }
 
     #[test]
@@ -405,7 +402,60 @@ mod tests {
     #[test]
     fn test_registry_filter_empty_returns_all() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.filter("").len(), 30);
+        assert_eq!(reg.filter("").len(), 29);
+    }
+
+    #[test]
+    fn registry_has_one_center_view_command_with_lowercase_hotkey() {
+        let reg = CommandRegistry::new();
+        let center_commands: Vec<_> = reg
+            .all()
+            .iter()
+            .filter(|command| command.name.contains("center"))
+            .collect();
+
+        assert_eq!(center_commands.len(), 1);
+        assert_eq!(center_commands[0].name, "center");
+        assert_eq!(center_commands[0].description, "Center view on cursor");
+        assert_eq!(center_commands[0].hotkey, "c");
+        assert!(reg.all().iter().all(|command| command.name != "center-on-cursor"));
+    }
+
+    #[test]
+    fn registry_command_descriptions_never_claim_center_or_page_tuning() {
+        let reg = CommandRegistry::new();
+
+        for command in reg.all() {
+            let description = command.description.to_lowercase();
+            let name = command.name;
+            assert!(
+                !name.contains("page") && !name.contains("pgup") && !name.contains("pgdn"),
+                "registry must not expose a page-key alias for '{name}'"
+            );
+            assert!(
+                !(description.contains("1 mhz") || description.contains("1mhz")),
+                "'{name}' must not advertise a 1 MHz step"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_tune_commands_describe_cursor_steps_and_arrow_hotkeys() {
+        let reg = CommandRegistry::new();
+        let expected = [
+            ("tune+", "Move cursor up 1 kHz", "→"),
+            ("tune-", "Move cursor down 1 kHz", "←"),
+            ("tune-coarse+", "Move cursor up 100 kHz", "Shift+→"),
+            ("tune-coarse-", "Move cursor down 100 kHz", "Shift+←"),
+        ];
+
+        for (name, description, hotkey) in expected {
+            let command = reg.all().iter().find(|command| command.name == name).unwrap();
+            assert_eq!(command.description, description);
+            assert_eq!(command.hotkey, hotkey);
+            assert!(!command.description.contains("25 kHz"));
+            assert!(!command.hotkey.contains("Pg"));
+        }
     }
 
     #[test]
@@ -527,7 +577,7 @@ mod tests {
         for _ in 0..100 {
             palette.select_down();
         }
-        assert_eq!(palette.selected, 29); // 30 commands, index 29
+        assert_eq!(palette.selected, 28); // 29 commands, index 28
     }
 
     #[test]
@@ -599,7 +649,14 @@ mod tests {
     fn test_execute_center() {
         let mut palette = CommandPalette::new();
         palette.input = "center".to_string();
-        assert_eq!(palette.execute(), Ok(CommandAction::CenterCursor));
+        assert_eq!(palette.execute(), Ok(CommandAction::CenterViewOnCursor));
+    }
+
+    #[test]
+    fn test_execute_center_on_cursor_is_unknown() {
+        let mut palette = CommandPalette::new();
+        palette.input = "center-on-cursor".to_string();
+        assert_eq!(palette.execute(), Err("Unknown command".to_string()));
     }
 
     #[test]

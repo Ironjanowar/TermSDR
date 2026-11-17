@@ -146,6 +146,11 @@ impl AudioSink for TeeSink {
 pub enum AudioControl {
     SetCursorFreq(f64),
     SetCenterFreq(f64),
+    /// Atomically update the RF center and cursor-chain tuning.
+    SetTuning {
+        center_freq: f64,
+        cursor_freq: f64,
+    },
     SetChannelBw(f64),
     SetVolume(u8),           // 0-100
     SetSquelch(Option<f32>), // None = disabled, Some(dB) = threshold
@@ -566,6 +571,9 @@ trait ChainTarget: Sized {
     /// Applies an RF center-frequency change, in hertz.
     fn set_center_freq(&mut self, freq: f64);
 
+    /// Applies RF center and cursor frequencies as one tuning operation.
+    fn set_tuning(&mut self, center_freq: f64, cursor_freq: f64);
+
     /// Applies a channel-bandwidth change, in hertz.
     fn set_channel_bw(&mut self, bw: f64);
 
@@ -599,6 +607,11 @@ impl ChainTarget for Demodulator {
 
     fn set_center_freq(&mut self, freq: f64) {
         Demodulator::set_center_freq(self, freq);
+    }
+
+    fn set_tuning(&mut self, center_freq: f64, cursor_freq: f64) {
+        Demodulator::set_center_freq(self, center_freq);
+        Demodulator::set_cursor_freq(self, cursor_freq);
     }
 
     fn set_channel_bw(&mut self, bw: f64) {
@@ -636,6 +649,10 @@ impl ChainTarget for ChainSlot {
 
     fn set_center_freq(&mut self, freq: f64) {
         self.retune(freq, self.spec.cursor_freq);
+    }
+
+    fn set_tuning(&mut self, center_freq: f64, cursor_freq: f64) {
+        self.retune(center_freq, cursor_freq);
     }
 
     fn set_channel_bw(&mut self, bw: f64) {
@@ -829,6 +846,16 @@ fn apply_control<C: ChainTarget>(
             cursor_chain.set_center_freq(f);
             for chain in vfo_chains.values_mut() {
                 chain.set_center_freq(f);
+            }
+        }
+        AudioControl::SetTuning {
+            center_freq: new_center_freq,
+            cursor_freq,
+        } => {
+            *center_freq = new_center_freq;
+            cursor_chain.set_tuning(new_center_freq, cursor_freq);
+            for chain in vfo_chains.values_mut() {
+                chain.set_center_freq(new_center_freq);
             }
         }
         AudioControl::SetChannelBw(bw) => cursor_chain.set_channel_bw(bw),
@@ -1592,6 +1619,62 @@ mod tests {
             expected,
             "Shutdown must drain all IQ blocks accepted before the command"
         );
+    }
+
+    #[test]
+    fn combined_tuning_control_updates_center_cursor_and_vfo_geometry_together() {
+        let input_rate_hz = 1_024_000.0;
+        let output_rate_hz = 48_000.0;
+        let original_center = 100_000_000.0;
+        let context = ChainContext {
+            input_sample_rate: input_rate_hz,
+            output_sample_rate: output_rate_hz,
+        };
+        let cursor_spec = ChainSpec::legacy_default(
+            original_center,
+            original_center + 10_000.0,
+            25_000.0,
+        );
+        let mut cursor = ChainSlot::new(&context, cursor_spec, SquelchMode::Open);
+        let mut vfos = HashMap::new();
+        vfos.insert(
+            1,
+            ChainSlot::new(
+                &context,
+                ChainSpec::new(
+                    original_center,
+                    original_center + 20_000.0,
+                    25_000.0,
+                    DemodMode::AM,
+                ),
+                SquelchMode::Open,
+            ),
+        );
+        let mut volume = 1.0;
+        let mut squelch = None;
+        let mut muted = false;
+        let mut center = original_center;
+
+        apply_control(
+            &AudioControl::SetTuning {
+                center_freq: 101_000_000.0,
+                cursor_freq: 101_025_000.0,
+            },
+            &mut cursor,
+            &mut vfos,
+            &mut volume,
+            &mut squelch,
+            &mut muted,
+            &mut center,
+            input_rate_hz,
+            output_rate_hz,
+        );
+
+        assert_eq!(center, 101_000_000.0);
+        assert_eq!(cursor.spec.center_freq, 101_000_000.0);
+        assert_eq!(cursor.spec.cursor_freq, 101_025_000.0);
+        assert_eq!(vfos[&1].spec.center_freq, 101_000_000.0);
+        assert_eq!(vfos[&1].spec.cursor_freq, original_center + 20_000.0);
     }
 
     #[test]

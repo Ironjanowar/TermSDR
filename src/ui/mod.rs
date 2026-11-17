@@ -2,6 +2,7 @@
 
 pub(crate) mod colors;
 pub(crate) mod command_palette;
+pub(crate) mod frequency_control;
 pub(crate) mod settings_modal;
 pub(crate) mod spectrum;
 pub(crate) mod status_bar;
@@ -37,11 +38,8 @@ use spectrum::SpectrumWidget;
 use status_bar::{DisplaySource, StatusBarWidget};
 use waterfall::WaterfallWidget;
 
-/// Fine tuning step in Hz (25 kHz, one NFM channel).
-const TUNE_STEP_FINE: f64 = 25_000.0;
-
-/// Coarse tuning step in Hz (1 MHz).
-const TUNE_STEP_COARSE: f64 = 1_000_000.0;
+/// `PageUp`/`PageDown` cursor movement step in Hz (1 MHz).
+const PAGE_CURSOR_STEP_HZ: f64 = 1_000_000.0;
 
 /// Zoom-in bandwidth multiplier (reduce by 20%).
 const ZOOM_IN_FACTOR: f64 = 0.8;
@@ -140,8 +138,8 @@ pub struct App {
     pub bw_input_buf: String,
     /// Cursor frequency in Hz (absolute position).
     pub cursor_freq: f64,
-    /// Whether cursor is active/visible.
-    pub cursor_active: bool,
+    /// Whether the cursor audio chain is muted.
+    pub audio_muted: bool,
     /// Whether help modal is shown.
     pub show_help: bool,
     /// Channel bandwidth in Hz.
@@ -211,7 +209,7 @@ impl App {
             bw_input_mode: false,
             bw_input_buf: String::new(),
             cursor_freq: center,
-            cursor_active: true,
+            audio_muted: false,
             show_help: false,
             channel_bw: DemodMode::AM.default_channel_bw(),
             command_palette_active: false,
@@ -247,12 +245,87 @@ impl App {
         }
     }
 
-    /// Sync shared center frequency for capture/DSP threads and audio thread.
-    fn sync_shared_center_freq(&self) {
+    /// Publish the requested center frequency to capture/DSP threads.
+    fn publish_shared_center_freq(&self) {
         if let Some(ref freq) = self.shared_center_freq {
             freq.store(self.config.center_freq.to_bits(), Ordering::Relaxed);
         }
+    }
+
+    /// Sync a center-only tuning change with capture/DSP and audio threads.
+    fn sync_shared_center_freq(&self) {
+        self.publish_shared_center_freq();
         self.send_audio_control(AudioControl::SetCenterFreq(self.config.center_freq));
+    }
+
+    fn set_cursor_frequency(&mut self, frequency_hz: f64) {
+        if !frequency_hz.is_finite() {
+            tracing::warn!(frequency_hz, "ignoring non-finite cursor frequency");
+            return;
+        }
+        self.cursor_freq = frequency_hz;
+        self.send_audio_control(AudioControl::SetCursorFreq(frequency_hz));
+    }
+
+    fn set_center_frequency(&mut self, frequency_hz: f64) {
+        if !frequency_hz.is_finite() {
+            tracing::warn!(frequency_hz, "ignoring non-finite center frequency");
+            return;
+        }
+        self.config.center_freq = frequency_hz;
+        self.sync_shared_center_freq();
+    }
+
+    /// Retune center and cursor to the same finite frequency.
+    ///
+    /// Non-finite requests are rejected centrally so malformed inputs (for example a
+    /// corrupted bookmark import) can never reach capture, DSP or audio state.
+    /// Returns whether the tuning was applied.
+    fn tune_center_and_cursor(&mut self, frequency_hz: f64) -> bool {
+        if !frequency_hz.is_finite() {
+            tracing::warn!(frequency_hz, "ignoring non-finite tuning request");
+            return false;
+        }
+        self.config.center_freq = frequency_hz;
+        self.cursor_freq = frequency_hz;
+        self.publish_shared_center_freq();
+        self.send_audio_control(AudioControl::SetTuning {
+            center_freq: frequency_hz,
+            cursor_freq: frequency_hz,
+        });
+        true
+    }
+
+    fn move_cursor_by(&mut self, delta_hz: f64) {
+        let viewport = self.display_viewport();
+        let update = frequency_control::move_cursor(
+            self.cursor_freq,
+            viewport.center_freq,
+            viewport.sample_rate,
+            delta_hz,
+        );
+        self.scan_active = false;
+        if update.center_changed {
+            self.cursor_freq = update.cursor_freq;
+            self.config.center_freq = update.center_freq;
+            self.publish_shared_center_freq();
+            self.send_audio_control(AudioControl::SetTuning {
+                center_freq: update.center_freq,
+                cursor_freq: update.cursor_freq,
+            });
+        } else {
+            self.set_cursor_frequency(update.cursor_freq);
+        }
+    }
+
+    fn center_view_on_cursor(&mut self) {
+        let update = frequency_control::center_on_cursor(self.cursor_freq);
+        self.set_center_frequency(update.center_freq);
+    }
+
+    fn toggle_cursor_audio(&mut self) {
+        self.audio_muted = !self.audio_muted;
+        self.send_audio_control(AudioControl::Mute(self.audio_muted));
     }
 
     /// Sync shared averaging count for DSP thread.
@@ -274,19 +347,38 @@ impl App {
     }
 
     /// Tune to a bookmark: set freq, BW, mode, send audio controls.
+    ///
+    /// The whole retune is skipped when the bookmark frequency is not finite, so a
+    /// malformed import cannot leave the app partly retuned.
     fn tune_to_bookmark(&mut self, bookmark: &Bookmark) {
-        self.config.center_freq = bookmark.freq;
-        self.cursor_freq = bookmark.freq;
+        if !self.tune_center_and_cursor(bookmark.freq) {
+            return;
+        }
         self.channel_bw = bookmark.channel_bw;
         self.demod_mode = bookmark.mode;
-        self.sync_shared_center_freq();
-        self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
         self.send_audio_control(AudioControl::SetChannelBw(self.channel_bw));
         self.send_audio_control(AudioControl::SetDemodMode(self.demod_mode));
     }
 
     /// Push a new FFT result into the app state.
     pub fn push_fft(&mut self, fft: FftResult) {
+        if self
+            .latest_fft
+            .as_ref()
+            .is_some_and(|previous| {
+                !frequency_control::Viewport {
+                    center_freq: previous.center_freq,
+                    sample_rate: previous.sample_rate,
+                }
+                .same_geometry(frequency_control::Viewport {
+                    center_freq: fft.center_freq,
+                    sample_rate: fft.sample_rate,
+                })
+            })
+        {
+            self.waterfall_history.clear();
+        }
+
         // Update waterfall history
         self.waterfall_history.insert(0, fft.bins.clone());
         if self.waterfall_history.len() > self.max_waterfall_rows {
@@ -329,8 +421,7 @@ impl App {
 
             // Move cursor to peak frequency (within visible bandwidth only)
             let peak_freq = fft.bin_frequency(peak_bin);
-            self.cursor_freq = peak_freq;
-            self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
+            self.set_cursor_frequency(peak_freq);
         }
     }
 
@@ -550,8 +641,7 @@ impl App {
             match key.code {
                 KeyCode::Enter => {
                     if let Ok(freq) = crate::config::parse_frequency(&self.freq_input_buf) {
-                        self.config.center_freq = freq;
-                        self.sync_shared_center_freq();
+                        self.tune_center_and_cursor(freq);
                     }
                     self.freq_input_mode = false;
                     self.freq_input_buf.clear();
@@ -609,57 +699,24 @@ impl App {
                 self.scan_active = !self.scan_active;
                 if self.scan_active {
                     self.last_scan_time = Instant::now();
-                    if !self.cursor_active {
-                        self.cursor_active = true;
+                    if self.audio_muted {
+                        self.audio_muted = false;
                         self.send_audio_control(AudioControl::Mute(false));
                     }
                 }
             }
-            KeyCode::Left => {
-                if self.cursor_active {
-                    // Move cursor left by 2% of visible bandwidth
-                    self.cursor_freq -= 0.02 * self.config.sample_rate;
-                    self.scan_active = false;
-                    self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
-                } else {
-                    // Fine tune: visual scroll right (lower freq)
-                    self.config.center_freq += TUNE_STEP_FINE;
-                    self.cursor_freq += TUNE_STEP_FINE;
-                    self.sync_shared_center_freq();
-                    self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
-                }
-            }
-            KeyCode::Right => {
-                if self.cursor_active {
-                    // Move cursor right by 2% of visible bandwidth
-                    self.cursor_freq += 0.02 * self.config.sample_rate;
-                    self.scan_active = false;
-                    self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
-                } else {
-                    // Fine tune: visual scroll left (higher freq)
-                    self.config.center_freq -= TUNE_STEP_FINE;
-                    self.cursor_freq -= TUNE_STEP_FINE;
-                    self.sync_shared_center_freq();
-                    self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
-                }
+            KeyCode::Left | KeyCode::Right => {
+                let direction = if key.code == KeyCode::Left { -1.0 } else { 1.0 };
+                let step = frequency_control::cursor_step(key.modifiers);
+                self.move_cursor_by(direction * step);
             }
             KeyCode::PageUp => {
-                // Coarse tune: +1 MHz
-                self.config.center_freq += TUNE_STEP_COARSE;
-                if !self.cursor_active {
-                    self.cursor_freq += TUNE_STEP_COARSE;
-                    self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
-                }
-                self.sync_shared_center_freq();
+                // Coarse cursor step: +1 MHz, auto-panning at the frame edge.
+                self.move_cursor_by(PAGE_CURSOR_STEP_HZ);
             }
             KeyCode::PageDown => {
-                // Coarse tune: -1 MHz
-                self.config.center_freq -= TUNE_STEP_COARSE;
-                if !self.cursor_active {
-                    self.cursor_freq -= TUNE_STEP_COARSE;
-                    self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
-                }
-                self.sync_shared_center_freq();
+                // Coarse cursor step: -1 MHz, auto-panning at the frame edge.
+                self.move_cursor_by(-PAGE_CURSOR_STEP_HZ);
             }
             KeyCode::Up => {
                 // Increase gain
@@ -688,17 +745,10 @@ impl App {
                 self.bw_input_buf.clear();
             }
             KeyCode::Char('c') => {
-                self.cursor_freq = self.config.center_freq;
-            }
-            KeyCode::Char('C') => {
-                // Center bandwidth on cursor (retune to cursor frequency)
-                self.config.center_freq = self.cursor_freq;
-                self.sync_shared_center_freq();
+                self.center_view_on_cursor();
             }
             KeyCode::Char(' ') => {
-                // Toggle cursor active/inactive
-                self.cursor_active = !self.cursor_active;
-                self.send_audio_control(AudioControl::Mute(!self.cursor_active));
+                self.toggle_cursor_audio();
             }
             KeyCode::Char('?') => {
                 self.show_help = true;
@@ -802,8 +852,7 @@ impl App {
     fn apply_command_action(&mut self, action: CommandAction) {
         match action {
             CommandAction::SetFrequency(f) => {
-                self.config.center_freq = f;
-                self.sync_shared_center_freq();
+                self.tune_center_and_cursor(f);
             }
             CommandAction::SetBandwidth(bw) => self.config.sample_rate = bw,
             CommandAction::SetChannelBw(bw) => {
@@ -814,14 +863,7 @@ impl App {
                 self.channel_bw = (self.channel_bw * 2.0).min(MAX_CHANNEL_BW);
                 self.send_audio_control(AudioControl::SetChannelBw(self.channel_bw));
             }
-            CommandAction::CenterCursor => {
-                self.cursor_freq = self.config.center_freq;
-                self.send_audio_control(AudioControl::SetCursorFreq(self.cursor_freq));
-            }
-            CommandAction::CenterOnCursor => {
-                self.config.center_freq = self.cursor_freq;
-                self.sync_shared_center_freq();
-            }
+            CommandAction::CenterViewOnCursor => self.center_view_on_cursor(),
             CommandAction::GainUp => {
                 let g = self.config.gain.unwrap_or(0.0);
                 self.config.gain = Some((g + 1.0).min(50.0));
@@ -832,23 +874,11 @@ impl App {
             }
             CommandAction::ShowHelp => self.show_help = true,
             CommandAction::Quit => self.should_quit = true,
-            CommandAction::ToggleCursor => self.cursor_active = !self.cursor_active,
-            CommandAction::TuneUp => {
-                self.config.center_freq += TUNE_STEP_FINE;
-                self.sync_shared_center_freq();
-            }
-            CommandAction::TuneDown => {
-                self.config.center_freq -= TUNE_STEP_FINE;
-                self.sync_shared_center_freq();
-            }
-            CommandAction::TuneCoarseUp => {
-                self.config.center_freq += TUNE_STEP_COARSE;
-                self.sync_shared_center_freq();
-            }
-            CommandAction::TuneCoarseDown => {
-                self.config.center_freq -= TUNE_STEP_COARSE;
-                self.sync_shared_center_freq();
-            }
+            CommandAction::ToggleCursor => self.toggle_cursor_audio(),
+            CommandAction::TuneUp => self.move_cursor_by(frequency_control::CURSOR_STEP_FINE_HZ),
+            CommandAction::TuneDown => self.move_cursor_by(-frequency_control::CURSOR_STEP_FINE_HZ),
+            CommandAction::TuneCoarseUp => self.move_cursor_by(frequency_control::CURSOR_STEP_COARSE_HZ),
+            CommandAction::TuneCoarseDown => self.move_cursor_by(-frequency_control::CURSOR_STEP_COARSE_HZ),
             CommandAction::ZoomIn => self.config.sample_rate = (self.config.sample_rate * ZOOM_IN_FACTOR).max(MIN_BANDWIDTH),
             CommandAction::ZoomOut => self.config.sample_rate = (self.config.sample_rate * ZOOM_OUT_FACTOR).min(MAX_BANDWIDTH),
             CommandAction::SetVolume(v) => {
@@ -937,8 +967,8 @@ impl App {
                 self.scan_active = !self.scan_active;
                 if self.scan_active {
                     self.last_scan_time = Instant::now();
-                    if !self.cursor_active {
-                        self.cursor_active = true;
+                    if self.audio_muted {
+                        self.audio_muted = false;
                         self.send_audio_control(AudioControl::Mute(false));
                     }
                 }
@@ -959,12 +989,34 @@ impl App {
         }
     }
 
-    /// Get the relative cursor position (0.0–1.0) within the visible spectrum.
-    #[must_use] 
-    #[allow(clippy::cast_possible_truncation)] // intentional truncation
-    pub(crate) fn cursor_pos(&self) -> f32 {
-        let start = self.config.center_freq - self.config.sample_rate / 2.0;
-        ((self.cursor_freq - start) / self.config.sample_rate) as f32
+    /// Get the geometry of the frame currently displayed on screen.
+    #[must_use]
+    pub(crate) fn display_viewport(&self) -> frequency_control::Viewport {
+        self.latest_fft.as_ref().map_or(
+            frequency_control::Viewport {
+                center_freq: self.config.center_freq,
+                sample_rate: self.config.sample_rate,
+            },
+            |fft| frequency_control::Viewport {
+                center_freq: fft.center_freq,
+                sample_rate: fft.sample_rate,
+            },
+        )
+    }
+
+    /// Get the relative cursor position (0.0–1.0) within the displayed frame.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)] // display precision is sufficient
+    pub(crate) fn cursor_pos(&self) -> Option<f32> {
+        let viewport = self.display_viewport();
+        if !viewport.sample_rate.is_finite() || viewport.sample_rate <= 0.0 {
+            return None;
+        }
+        let start = viewport.center_freq - viewport.sample_rate / 2.0;
+        let pos = ((self.cursor_freq - start) / viewport.sample_rate) as f32;
+        pos.is_finite()
+            .then_some(pos)
+            .filter(|pos| (0.0..=1.0).contains(pos))
     }
 
     /// Get the frequency at the current cursor position.
@@ -976,7 +1028,7 @@ impl App {
     /// Get the dB value at the current cursor position from the latest FFT.
     #[must_use] 
     pub(crate) fn cursor_db(&self) -> Option<f32> {
-        let pos = self.cursor_pos();
+        let pos = self.cursor_pos()?;
         self.latest_fft.as_ref().and_then(|fft| {
             if fft.bins.is_empty() {
                 return None;
@@ -1031,19 +1083,19 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
     let vfo_data: Vec<(f64, f64, Color, usize)> = app.vfos.iter()
         .map(|v| (v.freq, v.channel_bw, v.color, v.id))
         .collect();
+    let viewport = app.display_viewport();
     let spectrum = SpectrumWidget::new(
         app.latest_fft.as_ref(),
         app.min_db,
         app.max_db,
     ).with_cursor(
-        Some(app.cursor_pos()),
-        app.cursor_active,
+        app.cursor_pos(),
         app.cursor_frequency(),
         app.cursor_db(),
     ).with_bandwidth(
         Some(app.channel_bw),
-        app.config.center_freq,
-        app.config.sample_rate,
+        viewport.center_freq,
+        viewport.sample_rate,
     ).with_vfos(&vfo_data)
     .with_squelch(app.squelch)
     .with_scan(app.scan_active);
@@ -1054,30 +1106,26 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         &app.waterfall_history,
         app.min_db,
         app.max_db,
-    ).with_cursor(Some(app.cursor_pos()), app.cursor_active)
+    ).with_cursor(app.cursor_pos())
     .with_bandwidth(
         Some(app.channel_bw),
         app.cursor_freq,
-        app.config.center_freq,
-        app.config.sample_rate,
+        viewport.center_freq,
+        viewport.sample_rate,
     ).with_vfos(&vfo_data);
     frame.render_widget(waterfall, chunks[1]);
 
     // Status bar
-    let cursor_info = if app.cursor_active {
-        Some((app.cursor_frequency(), app.cursor_db()))
-    } else {
-        None
-    };
+    let cursor_info = Some((app.cursor_frequency(), app.cursor_db()));
     let status = StatusBarWidget::new(
-        app.config.center_freq,
-        app.config.sample_rate,
+        viewport.center_freq,
+        viewport.sample_rate,
         app.config.gain,
         app.display_source(),
         app.fps,
     ).with_cursor(cursor_info)
     .with_channel_bw(app.channel_bw)
-    .with_audio(app.volume, app.cursor_active, app.squelch)
+    .with_audio(app.volume, !app.audio_muted, app.squelch)
     .with_waterfall_time_span(app.waterfall_time_span)
     .with_demod_mode(app.demod_mode.label())
     .with_averaging(app.averaging)
@@ -1168,12 +1216,20 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
             Span::styled("  Navigation", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
-            Span::styled("    ← →       ", Style::default().fg(Color::Cyan)),
-            Span::styled("Move cursor (when active) / Tune ±25 kHz", Style::default().fg(Color::White)),
+            Span::styled("    ←/→ ", Style::default().fg(Color::Cyan)),
+            Span::styled("Move cursor ±1 kHz", Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
-            Span::styled("    PgUp PgDn ", Style::default().fg(Color::Cyan)),
-            Span::styled("Tune ±1 MHz", Style::default().fg(Color::White)),
+            Span::styled("    Shift+←/→ ", Style::default().fg(Color::Cyan)),
+            Span::styled("Move cursor ±100 kHz", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("    PgUp/PgDn ", Style::default().fg(Color::Cyan)),
+            Span::styled("Move cursor ±1 MHz", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("              ", Style::default().fg(Color::Cyan)),
+            Span::styled("Arrows and PgUp/PgDn move cursor; auto-pan at edges", Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
             Span::styled("    f         ", Style::default().fg(Color::Cyan)),
@@ -1184,8 +1240,8 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
             Span::styled("Set bandwidth (type e.g. 2M, 500k)", Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
-            Span::styled("    c         ", Style::default().fg(Color::Cyan)),
-            Span::styled("Center cursor on current frequency", Style::default().fg(Color::White)),
+            Span::styled("    c ", Style::default().fg(Color::Cyan)),
+            Span::styled("Center view on cursor", Style::default().fg(Color::White)),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -1200,8 +1256,8 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
             Span::styled("Adjust gain ±1 dB", Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
-            Span::styled("    Space     ", Style::default().fg(Color::Cyan)),
-            Span::styled("Toggle cursor on/off", Style::default().fg(Color::White)),
+            Span::styled("    Space ", Style::default().fg(Color::Cyan)),
+            Span::styled("Mute/unmute cursor audio only", Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
             Span::styled("    w / W     ", Style::default().fg(Color::Cyan)),
@@ -1258,7 +1314,7 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
     ];
 
     let paragraph = Paragraph::new(lines).block(block);
-    let area = centered_rect(60, 70, size);
+    let area = centered_rect(60, 80, size);
     frame.render_widget(Clear, area);
     frame.render_widget(paragraph, area);
 }
@@ -1967,6 +2023,457 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use approx::assert_abs_diff_eq;
+
+    const FREQUENCY_EPSILON_HZ: f64 = 1.0e-6;
+
+    fn assert_frequency_eq(actual: f64, expected: f64) {
+        assert_abs_diff_eq!(actual, expected, epsilon = FREQUENCY_EPSILON_HZ);
+    }
+
+    fn frequencies_match(actual: f64, expected: f64) -> bool {
+        (actual - expected).abs() <= FREQUENCY_EPSILON_HZ
+    }
+
+    fn audio_controls() -> (
+        crossbeam_channel::Sender<AudioControl>,
+        crossbeam_channel::Receiver<AudioControl>,
+    ) {
+        crossbeam_channel::unbounded()
+    }
+
+    #[test]
+    fn frequency_input_synchronizes_center_cursor_shared_state_and_audio() {
+        let (tx, rx) = audio_controls();
+        let shared_center = Arc::new(AtomicU64::new(0));
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.shared_center_freq = Some(Arc::clone(&shared_center));
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        for character in "118.1M".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(character)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_frequency_eq(app.config.center_freq, 118_100_000.0);
+        assert_frequency_eq(app.cursor_freq, 118_100_000.0);
+        assert_frequency_eq(
+            f64::from_bits(shared_center.load(Ordering::Relaxed)),
+            118_100_000.0,
+        );
+        assert!(matches!(
+            rx.recv().unwrap(),
+            AudioControl::SetTuning { center_freq, cursor_freq }
+                if frequencies_match(center_freq, 118_100_000.0)
+                    && frequencies_match(cursor_freq, 118_100_000.0)
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn invalid_frequency_input_changes_nothing_and_emits_no_control() {
+        let (tx, rx) = audio_controls();
+        let shared_center = Arc::new(AtomicU64::new(123.0_f64.to_bits()));
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.shared_center_freq = Some(Arc::clone(&shared_center));
+        let original_center = app.config.center_freq;
+        let original_cursor = app.cursor_freq;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_frequency_eq(app.config.center_freq, original_center);
+        assert_frequency_eq(app.cursor_freq, original_cursor);
+        assert_frequency_eq(f64::from_bits(shared_center.load(Ordering::Relaxed)), 123.0);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn center_view_on_cursor_preserves_cursor_and_emits_only_center_control() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.cursor_freq = 119_250_000.0;
+
+        app.center_view_on_cursor();
+
+        assert_frequency_eq(app.cursor_freq, 119_250_000.0);
+        assert_frequency_eq(app.config.center_freq, 119_250_000.0);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            AudioControl::SetCenterFreq(freq) if frequencies_match(freq, 119_250_000.0)
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn moving_cursor_disables_scan_and_only_pans_after_crossing_edge() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.config.center_freq = 100_000_000.0;
+        app.config.sample_rate = 2_000_000.0;
+        app.cursor_freq = 100_999_500.0;
+        app.scan_active = true;
+
+        app.move_cursor_by(1_000.0);
+
+        assert!(!app.scan_active);
+        assert_frequency_eq(app.cursor_freq, 101_000_500.0);
+        assert_frequency_eq(app.config.center_freq, 100_000_500.0);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            AudioControl::SetTuning { center_freq, cursor_freq }
+                if frequencies_match(center_freq, 100_000_500.0)
+                    && frequencies_match(cursor_freq, 101_000_500.0)
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn page_up_moves_cursor_one_megahertz_and_emits_cursor_only_control() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.config.center_freq = 100_000_000.0;
+        app.config.sample_rate = 2_000_000.0;
+        app.cursor_freq = 100_000_000.0;
+
+        app.handle_key(KeyEvent::from(KeyCode::PageUp));
+
+        assert_frequency_eq(app.cursor_freq, 101_000_000.0);
+        assert_frequency_eq(app.config.center_freq, 100_000_000.0);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            AudioControl::SetCursorFreq(freq) if frequencies_match(freq, 101_000_000.0)
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn page_down_moves_cursor_one_megahertz_and_emits_cursor_only_control() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.config.center_freq = 100_000_000.0;
+        app.config.sample_rate = 2_000_000.0;
+        app.cursor_freq = 100_000_000.0;
+
+        app.handle_key(KeyEvent::from(KeyCode::PageDown));
+
+        assert_frequency_eq(app.cursor_freq, 99_000_000.0);
+        assert_frequency_eq(app.config.center_freq, 100_000_000.0);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            AudioControl::SetCursorFreq(freq) if frequencies_match(freq, 99_000_000.0)
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn page_up_at_right_edge_pans_minimally_and_emits_combined_tuning() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.config.center_freq = 100_000_000.0;
+        app.config.sample_rate = 2_000_000.0;
+        app.cursor_freq = 100_500_000.0;
+
+        app.handle_key(KeyEvent::from(KeyCode::PageUp));
+
+        assert_frequency_eq(app.cursor_freq, 101_500_000.0);
+        assert_frequency_eq(app.config.center_freq, 100_500_000.0);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            AudioControl::SetTuning { center_freq, cursor_freq }
+                if frequencies_match(center_freq, 100_500_000.0)
+                    && frequencies_match(cursor_freq, 101_500_000.0)
+        ));
+        assert!(rx.try_recv().is_err());
+        // Minimal pan: the cursor lands exactly on the right edge of the frame.
+        assert_abs_diff_eq!(app.cursor_pos().unwrap(), 1.0, epsilon = 1.0e-6);
+    }
+
+    #[test]
+    fn page_down_at_left_edge_pans_minimally_and_keeps_cursor_visible() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.config.center_freq = 100_000_000.0;
+        app.config.sample_rate = 2_000_000.0;
+        app.cursor_freq = 99_500_000.0;
+
+        app.handle_key(KeyEvent::from(KeyCode::PageDown));
+
+        assert_frequency_eq(app.cursor_freq, 98_500_000.0);
+        assert_frequency_eq(app.config.center_freq, 99_500_000.0);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            AudioControl::SetTuning { center_freq, cursor_freq }
+                if frequencies_match(center_freq, 99_500_000.0)
+                    && frequencies_match(cursor_freq, 98_500_000.0)
+        ));
+        assert!(rx.try_recv().is_err());
+        // Minimal pan: the cursor lands exactly on the left edge of the frame.
+        assert_abs_diff_eq!(app.cursor_pos().unwrap(), 0.0, epsilon = 1.0e-6);
+    }
+
+    #[test]
+    fn repeated_page_up_keeps_cursor_inside_displayed_frame() {
+        let mut app = App::new(AppConfig::default(), None);
+        app.config.center_freq = 100_000_000.0;
+        app.config.sample_rate = 2_000_000.0;
+        app.cursor_freq = 100_000_000.0;
+
+        for _ in 0..6 {
+            app.handle_key(KeyEvent::from(KeyCode::PageUp));
+        }
+
+        assert_frequency_eq(app.cursor_freq, 106_000_000.0);
+        assert!(
+            app.cursor_pos().is_some(),
+            "cursor must stay inside the displayed frame"
+        );
+    }
+
+    #[test]
+    fn repeated_page_down_keeps_cursor_inside_displayed_frame() {
+        let mut app = App::new(AppConfig::default(), None);
+        app.config.center_freq = 100_000_000.0;
+        app.config.sample_rate = 2_000_000.0;
+        app.cursor_freq = 100_000_000.0;
+
+        for _ in 0..6 {
+            app.handle_key(KeyEvent::from(KeyCode::PageDown));
+        }
+
+        assert_frequency_eq(app.cursor_freq, 94_000_000.0);
+        assert!(
+            app.cursor_pos().is_some(),
+            "cursor must stay inside the displayed frame"
+        );
+    }
+
+    #[test]
+    fn page_up_stops_scan_like_other_cursor_moves() {
+        let mut app = App::new(AppConfig::default(), None);
+        app.scan_active = true;
+
+        app.handle_key(KeyEvent::from(KeyCode::PageUp));
+
+        assert!(!app.scan_active);
+    }
+
+    #[test]
+    fn maybe_scan_emits_only_cursor_frequency_control() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.scan_active = true;
+        app.last_scan_time = Instant::now() - Duration::from_secs(1);
+
+        let mut bins = vec![-100.0_f32; 1024];
+        bins[800] = -10.0;
+        app.push_fft(FftResult {
+            bins,
+            center_freq: 100e6,
+            sample_rate: 2.048e6,
+        });
+
+        app.maybe_scan();
+
+        match rx.recv().unwrap() {
+            AudioControl::SetCursorFreq(freq) => {
+                assert_frequency_eq(freq, app.cursor_freq);
+            }
+            other => panic!("maybe_scan must only emit SetCursorFreq, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn starting_scan_while_unmuted_emits_no_mute_control() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('S')));
+
+        assert!(app.scan_active);
+        assert!(!app.audio_muted);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn bookmark_tuning_keeps_frequency_mode_and_bandwidth_coherent() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        let bookmark = Bookmark {
+            name: "Tower".into(),
+            freq: 118_700_000.0,
+            channel_bw: 12_500.0,
+            mode: DemodMode::NFM,
+            category: "Test".into(),
+        };
+
+        app.tune_to_bookmark(&bookmark);
+
+        assert_frequency_eq(app.config.center_freq, bookmark.freq);
+        assert_frequency_eq(app.cursor_freq, bookmark.freq);
+        assert_frequency_eq(app.channel_bw, bookmark.channel_bw);
+        assert_eq!(app.demod_mode, bookmark.mode);
+        assert!(
+            matches!(
+                rx.recv().unwrap(),
+                AudioControl::SetTuning { center_freq, cursor_freq }
+                    if frequencies_match(center_freq, bookmark.freq)
+                        && frequencies_match(cursor_freq, bookmark.freq)
+            )
+        );
+        assert!(
+            matches!(rx.recv().unwrap(), AudioControl::SetChannelBw(bw) if frequencies_match(bw, bookmark.channel_bw))
+        );
+        assert!(
+            matches!(rx.recv().unwrap(), AudioControl::SetDemodMode(mode) if mode == bookmark.mode)
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn bookmark_tuning_rejects_non_finite_frequency_and_emits_nothing() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        let original_center = app.config.center_freq;
+        let original_cursor = app.cursor_freq;
+        let original_bw = app.channel_bw;
+
+        for bad_freq in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let bookmark = Bookmark {
+                name: "Malformed".into(),
+                freq: bad_freq,
+                channel_bw: 12_500.0,
+                mode: DemodMode::NFM,
+                category: "Test".into(),
+            };
+
+            app.tune_to_bookmark(&bookmark);
+
+            assert!(
+                app.config.center_freq.is_finite(),
+                "center must stay finite for {bad_freq}"
+            );
+            assert!(
+                app.cursor_freq.is_finite(),
+                "cursor must stay finite for {bad_freq}"
+            );
+            assert_frequency_eq(app.config.center_freq, original_center);
+            assert_frequency_eq(app.cursor_freq, original_cursor);
+            assert_frequency_eq(app.channel_bw, original_bw);
+        }
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn set_cursor_frequency_ignores_non_finite_values() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        let original = app.cursor_freq;
+
+        for bad_freq in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            app.set_cursor_frequency(bad_freq);
+
+            assert!(app.cursor_freq.is_finite());
+            assert_frequency_eq(app.cursor_freq, original);
+        }
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn set_center_frequency_ignores_non_finite_values() {
+        let (tx, rx) = audio_controls();
+        let shared_center = Arc::new(AtomicU64::new(123.0_f64.to_bits()));
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.shared_center_freq = Some(Arc::clone(&shared_center));
+        let original = app.config.center_freq;
+
+        for bad_freq in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            app.set_center_frequency(bad_freq);
+
+            assert!(app.config.center_freq.is_finite());
+            assert_frequency_eq(app.config.center_freq, original);
+            assert_frequency_eq(f64::from_bits(shared_center.load(Ordering::Relaxed)), 123.0);
+        }
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn tune_center_and_cursor_ignores_non_finite_values() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        let original_center = app.config.center_freq;
+        let original_cursor = app.cursor_freq;
+
+        for bad_freq in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            app.tune_center_and_cursor(bad_freq);
+
+            assert!(app.config.center_freq.is_finite());
+            assert!(app.cursor_freq.is_finite());
+            assert_frequency_eq(app.config.center_freq, original_center);
+            assert_frequency_eq(app.cursor_freq, original_cursor);
+        }
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn cursor_geometry_uses_displayed_fft_frame() {
+        let mut app = App::new(AppConfig::default(), None);
+        app.config.center_freq = 101_000_000.0;
+        app.config.sample_rate = 1_000_000.0;
+        app.cursor_freq = 100_500_000.0;
+        app.push_fft(FftResult {
+            bins: vec![-10.0, -20.0, -30.0, -40.0, -50.0],
+            center_freq: 100_000_000.0,
+            sample_rate: 2_000_000.0,
+        });
+
+        assert_frequency_eq(app.display_viewport().center_freq, 100_000_000.0);
+        assert_frequency_eq(app.display_viewport().sample_rate, 2_000_000.0);
+        assert_abs_diff_eq!(app.cursor_pos().unwrap(), 0.75, epsilon = f32::EPSILON);
+        assert_abs_diff_eq!(app.cursor_db().unwrap(), -40.0, epsilon = f32::EPSILON);
+    }
+
+    #[test]
+    fn cursor_geometry_falls_back_to_config_before_first_frame() {
+        let mut app = App::new(AppConfig::default(), None);
+        app.config.center_freq = 50_000_000.0;
+        app.config.sample_rate = 400_000.0;
+        app.cursor_freq = 50_100_000.0;
+
+        assert_frequency_eq(app.display_viewport().center_freq, 50_000_000.0);
+        assert_frequency_eq(app.display_viewport().sample_rate, 400_000.0);
+        assert_abs_diff_eq!(app.cursor_pos().unwrap(), 0.75, epsilon = f32::EPSILON);
+        assert_eq!(app.cursor_db(), None);
+    }
+
+    #[test]
+    fn cursor_position_is_hidden_until_displayed_frame_contains_it() {
+        let mut app = App::new(AppConfig::default(), None);
+        app.cursor_freq = 102_000_000.0;
+        app.push_fft(FftResult {
+            bins: vec![-10.0; 5],
+            center_freq: 100_000_000.0,
+            sample_rate: 2_000_000.0,
+        });
+
+        assert_eq!(app.cursor_pos(), None);
+        assert_eq!(app.cursor_db(), None);
+
+        app.push_fft(FftResult {
+            bins: vec![-10.0; 5],
+            center_freq: 102_000_000.0,
+            sample_rate: 2_000_000.0,
+        });
+
+        assert_abs_diff_eq!(app.cursor_pos().unwrap(), 0.5, epsilon = f32::EPSILON);
+        assert_abs_diff_eq!(app.cursor_db().unwrap(), -10.0, epsilon = f32::EPSILON);
+    }
 
     #[test]
     fn test_app_push_fft() {
@@ -1982,6 +2489,65 @@ mod tests {
 
         assert!(app.latest_fft.is_some());
         assert_eq!(app.waterfall_history.len(), 1);
+    }
+
+    #[test]
+    fn waterfall_resets_when_fft_center_changes() {
+        let mut app = App::new(AppConfig::default(), None);
+        app.push_fft(FftResult {
+            bins: vec![-10.0],
+            center_freq: 100_000_000.0,
+            sample_rate: 2_000_000.0,
+        });
+        app.push_fft(FftResult {
+            bins: vec![-20.0],
+            center_freq: 100_000_000.0,
+            sample_rate: 2_000_000.0,
+        });
+
+        app.push_fft(FftResult {
+            bins: vec![-30.0],
+            center_freq: 101_000_000.0,
+            sample_rate: 2_000_000.0,
+        });
+
+        assert_eq!(app.waterfall_history, vec![vec![-30.0]]);
+    }
+
+    #[test]
+    fn waterfall_resets_when_fft_sample_rate_changes() {
+        let mut app = App::new(AppConfig::default(), None);
+        app.push_fft(FftResult {
+            bins: vec![-10.0],
+            center_freq: 100_000_000.0,
+            sample_rate: 2_000_000.0,
+        });
+        app.push_fft(FftResult {
+            bins: vec![-20.0],
+            center_freq: 100_000_000.0,
+            sample_rate: 1_000_000.0,
+        });
+
+        assert_eq!(app.waterfall_history, vec![vec![-20.0]]);
+    }
+
+    #[test]
+    fn waterfall_keeps_history_for_sub_ulp_scale_geometry_noise() {
+        let mut app = App::new(AppConfig::default(), None);
+        let center_freq = 100_000_000.0;
+        let sample_rate = 2_000_000.0;
+        app.push_fft(FftResult {
+            bins: vec![-10.0],
+            center_freq,
+            sample_rate,
+        });
+        app.push_fft(FftResult {
+            bins: vec![-20.0],
+            center_freq: center_freq + center_freq * f64::EPSILON,
+            sample_rate: sample_rate + sample_rate * f64::EPSILON,
+        });
+
+        assert_eq!(app.waterfall_history, vec![vec![-20.0], vec![-10.0]]);
     }
 
     #[test]
@@ -2021,64 +2587,192 @@ mod tests {
     }
 
     #[test]
-    fn test_app_handle_tune_right() {
+    fn arrow_right_moves_cursor_exactly_one_kilohertz_while_muted() {
         let config = AppConfig::default();
         let mut app = App::new(config, None);
-        // Deactivate cursor so arrows tune frequency
-        app.cursor_active = false;
-        let orig = app.config.center_freq;
+        app.audio_muted = true;
+        let original_center = app.config.center_freq;
+        let original_cursor = app.cursor_freq;
 
         app.handle_key(KeyEvent::from(KeyCode::Right));
-        // Right arrow scrolls spectrum right → decreases center_freq
-        assert!((app.config.center_freq - (orig - 25_000.0)).abs() < 1.0);
+
+        assert_frequency_eq(app.cursor_freq, original_cursor + 1_000.0);
+        assert_frequency_eq(app.config.center_freq, original_center);
     }
 
     #[test]
-    fn test_app_handle_tune_left() {
+    fn arrow_left_moves_cursor_exactly_one_kilohertz_while_muted() {
         let config = AppConfig::default();
         let mut app = App::new(config, None);
-        // Deactivate cursor so arrows tune frequency
-        app.cursor_active = false;
-        let orig = app.config.center_freq;
+        app.audio_muted = true;
+        let original_center = app.config.center_freq;
+        let original_cursor = app.cursor_freq;
 
         app.handle_key(KeyEvent::from(KeyCode::Left));
-        // Left arrow scrolls spectrum left → increases center_freq
-        assert!((app.config.center_freq - (orig + 25_000.0)).abs() < 1.0);
+
+        assert_frequency_eq(app.cursor_freq, original_cursor - 1_000.0);
+        assert_frequency_eq(app.config.center_freq, original_center);
     }
 
     #[test]
-    fn test_app_cursor_move_right() {
+    fn arrow_right_moves_cursor_exactly_one_kilohertz_while_active() {
         let config = AppConfig::default();
         let mut app = App::new(config, None);
-        assert!(app.cursor_active);
+        assert!(!app.audio_muted);
         let orig = app.cursor_freq;
 
         app.handle_key(KeyEvent::from(KeyCode::Right));
-        assert!(app.cursor_freq > orig);
+        assert_frequency_eq(app.cursor_freq, orig + 1_000.0);
     }
 
     #[test]
-    fn test_app_cursor_move_left() {
+    fn arrow_left_moves_cursor_exactly_one_kilohertz_while_active() {
         let config = AppConfig::default();
         let mut app = App::new(config, None);
-        assert!(app.cursor_active);
+        assert!(!app.audio_muted);
         let orig = app.cursor_freq;
 
         app.handle_key(KeyEvent::from(KeyCode::Left));
-        assert!(app.cursor_freq < orig);
+        assert_frequency_eq(app.cursor_freq, orig - 1_000.0);
     }
 
     #[test]
-    fn test_app_cursor_toggle() {
-        let config = AppConfig::default();
-        let mut app = App::new(config, None);
-        assert!(app.cursor_active);
+    fn arrow_shift_moves_cursor_exactly_one_hundred_kilohertz_regardless_of_mute() {
+        for audio_muted in [true, false] {
+            let mut app = App::new(AppConfig::default(), None);
+            app.audio_muted = audio_muted;
+            let original = app.cursor_freq;
+
+            app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+            assert_frequency_eq(app.cursor_freq, original + 100_000.0);
+
+            app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+            assert_frequency_eq(app.cursor_freq, original);
+        }
+    }
+
+    #[test]
+    fn arrow_movement_while_muted_emits_cursor_control_and_disables_scan() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.audio_muted = true;
+        app.scan_active = true;
+        let expected = app.cursor_freq + 1_000.0;
+
+        app.handle_key(KeyEvent::from(KeyCode::Right));
+
+        assert!(!app.scan_active);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            AudioControl::SetCursorFreq(freq) if frequencies_match(freq, expected)
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn arrow_crossing_visible_edge_minimally_pans_and_emits_center_control() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.config.center_freq = 100_000_000.0;
+        app.config.sample_rate = 2_000_000.0;
+        app.cursor_freq = 101_000_000.0;
+
+        app.handle_key(KeyEvent::from(KeyCode::Right));
+
+        assert_frequency_eq(app.cursor_freq, 101_001_000.0);
+        assert_frequency_eq(app.config.center_freq, 100_001_000.0);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            AudioControl::SetTuning {
+                center_freq: 100_001_000.0,
+                cursor_freq: 101_001_000.0,
+            }
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn arrow_edge_follow_uses_displayed_fft_geometry_when_config_is_ahead() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.config.center_freq = 102_000_000.0;
+        app.config.sample_rate = 400_000.0;
+        app.cursor_freq = 101_000_000.0;
+        app.push_fft(FftResult {
+            bins: vec![-10.0; 5],
+            center_freq: 100_000_000.0,
+            sample_rate: 2_000_000.0,
+        });
+
+        app.handle_key(KeyEvent::from(KeyCode::Right));
+
+        assert_frequency_eq(app.cursor_freq, 101_001_000.0);
+        assert_frequency_eq(app.config.center_freq, 100_001_000.0);
+        let requested_left = app.config.center_freq - 1_000_000.0;
+        let requested_right = app.config.center_freq + 1_000_000.0;
+        assert!((requested_left..=requested_right).contains(&app.cursor_freq));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AudioControl::SetTuning { center_freq, cursor_freq })
+                if frequencies_match(center_freq, 100_001_000.0)
+                    && frequencies_match(cursor_freq, 101_001_000.0)
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn space_toggles_audio_mute_without_moving_cursor() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        assert!(!app.audio_muted);
+        let center = app.config.center_freq;
+        let cursor = app.cursor_freq;
 
         app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
-        assert!(!app.cursor_active);
+        assert!(app.audio_muted);
+        assert_frequency_eq(app.config.center_freq, center);
+        assert_frequency_eq(app.cursor_freq, cursor);
+        assert!(matches!(rx.recv().unwrap(), AudioControl::Mute(true)));
 
         app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
-        assert!(app.cursor_active);
+        assert!(!app.audio_muted);
+        assert_frequency_eq(app.config.center_freq, center);
+        assert_frequency_eq(app.cursor_freq, cursor);
+        assert!(matches!(rx.recv().unwrap(), AudioControl::Mute(false)));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn palette_toggle_mirrors_space_and_emits_mute_state() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+
+        app.apply_command_action(CommandAction::ToggleCursor);
+        assert!(app.audio_muted);
+        assert!(matches!(rx.try_recv(), Ok(AudioControl::Mute(true))));
+
+        app.apply_command_action(CommandAction::ToggleCursor);
+        assert!(!app.audio_muted);
+        assert!(matches!(rx.try_recv(), Ok(AudioControl::Mute(false))));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn starting_scan_explicitly_unmutes_audio_without_changing_cursor_presentation() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.audio_muted = true;
+        let cursor = app.cursor_freq;
+        let cursor_pos = app.cursor_pos();
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('S')));
+
+        assert!(app.scan_active);
+        assert!(!app.audio_muted);
+        assert_frequency_eq(app.cursor_freq, cursor);
+        assert_eq!(app.cursor_pos(), cursor_pos);
+        assert!(matches!(rx.try_recv(), Ok(AudioControl::Mute(false))));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -2126,10 +2820,10 @@ mod tests {
     fn test_app_handle_page_up() {
         let config = AppConfig::default();
         let mut app = App::new(config, None);
-        let orig = app.config.center_freq;
+        let orig = app.cursor_freq;
 
         app.handle_key(KeyEvent::from(KeyCode::PageUp));
-        assert!((app.config.center_freq - (orig + 1_000_000.0)).abs() < 1.0);
+        assert!((app.cursor_freq - (orig + 1_000_000.0)).abs() < 1.0);
     }
 
     #[test]
@@ -2208,18 +2902,30 @@ mod tests {
     }
 
     #[test]
-    fn test_app_center_cursor() {
-        let config = AppConfig::default();
-        let mut app = App::new(config, None);
+    fn center_view_key_preserves_cursor_and_moves_center_to_it() {
+        let mut app = App::new(AppConfig::default(), None);
+        app.cursor_freq += 125_000.0;
+        let cursor = app.cursor_freq;
 
-        // Move cursor away from center
-        app.handle_key(KeyEvent::from(KeyCode::Right));
-        app.handle_key(KeyEvent::from(KeyCode::Right));
-        assert!((app.cursor_freq - app.config.center_freq).abs() > 1.0);
-
-        // Press 'c' to center
         app.handle_key(KeyEvent::from(KeyCode::Char('c')));
-        assert!((app.cursor_freq - app.config.center_freq).abs() < 1.0);
+
+        assert_frequency_eq(app.cursor_freq, cursor);
+        assert_frequency_eq(app.config.center_freq, cursor);
+    }
+
+    #[test]
+    fn uppercase_c_has_no_frequency_navigation_action() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.cursor_freq += 125_000.0;
+        let center = app.config.center_freq;
+        let cursor = app.cursor_freq;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('C')));
+
+        assert_frequency_eq(app.config.center_freq, center);
+        assert_frequency_eq(app.cursor_freq, cursor);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -2231,74 +2937,16 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_desync_bug() {
-        // When cursor is inactive and user tunes with ←→, cursor_freq should
-        // shift along with center_freq so the cursor stays at the same visual
-        // position on screen ("sticks" to the view, not to an absolute freq).
+    fn page_up_while_muted_still_moves_cursor() {
         let config = AppConfig::default();
         let mut app = App::new(config, None);
+        let original_cursor = app.cursor_freq;
 
-        // Cursor starts at center_freq
-        let original_center = app.config.center_freq;
-        assert!((app.cursor_frequency() - original_center).abs() < 1.0);
-
-        // Deactivate cursor
         app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
-        assert!(!app.cursor_active);
+        app.handle_key(KeyEvent::from(KeyCode::PageUp));
 
-        // Tune right (-25 kHz to center_freq, spectrum scrolls right)
-        app.handle_key(KeyEvent::from(KeyCode::Right));
-        let new_center = original_center - 25_000.0;
-        assert!((app.config.center_freq - new_center).abs() < 1.0);
-
-        // Cursor should have shifted by the same amount (stays at same screen pos)
-        let expected_cursor = original_center - 25_000.0;
-        assert!(
-            (app.cursor_frequency() - expected_cursor).abs() < 1.0,
-            "Cursor should track center_freq when inactive. Expected {}, got {}",
-            expected_cursor,
-            app.cursor_frequency()
-        );
-
-        // Reactivate cursor — it should still be at the shifted position
-        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
-        assert!(app.cursor_active);
-        assert!(
-            (app.cursor_frequency() - expected_cursor).abs() < 1.0,
-            "Cursor should remain at tracked position after reactivation",
-        );
-    }
-
-    #[test]
-    fn test_cursor_tracks_center_on_left_arrow_inactive() {
-        let config = AppConfig::default();
-        let mut app = App::new(config, None);
-        let original = app.config.center_freq;
-
-        app.handle_key(KeyEvent::from(KeyCode::Char(' '))); // deactivate
-        app.handle_key(KeyEvent::from(KeyCode::Left));      // +25kHz center
-
-        assert!((app.config.center_freq - (original + 25_000.0)).abs() < 1.0);
-        assert!(
-            (app.cursor_frequency() - (original + 25_000.0)).abs() < 1.0,
-            "Cursor should track center on Left when inactive",
-        );
-    }
-
-    #[test]
-    fn test_cursor_tracks_center_on_pageup_inactive() {
-        let config = AppConfig::default();
-        let mut app = App::new(config, None);
-        let original = app.config.center_freq;
-
-        app.handle_key(KeyEvent::from(KeyCode::Char(' '))); // deactivate
-        app.handle_key(KeyEvent::from(KeyCode::PageUp));     // +1MHz
-
-        assert!((app.config.center_freq - (original + 1_000_000.0)).abs() < 1.0);
-        assert!(
-            (app.cursor_frequency() - (original + 1_000_000.0)).abs() < 1.0,
-            "Cursor should track center on PageUp when inactive",
-        );
+        assert!(app.audio_muted);
+        assert_frequency_eq(app.cursor_frequency(), original_cursor + 1_000_000.0);
     }
 
     #[test]
@@ -2364,8 +3012,7 @@ mod tests {
         let mut app = App::new(config, None);
         // Move cursor way to the left of visible range
         app.cursor_freq = app.config.center_freq - app.config.sample_rate * 2.0;
-        let pos = app.cursor_pos();
-        assert!(pos < 0.0); // outside visible range
+        assert_eq!(app.cursor_pos(), None);
     }
 
     #[test]
@@ -2373,8 +3020,7 @@ mod tests {
         let config = AppConfig::default();
         let mut app = App::new(config, None);
         app.cursor_freq = app.config.center_freq + app.config.sample_rate * 2.0;
-        let pos = app.cursor_pos();
-        assert!(pos > 1.0); // outside visible range
+        assert_eq!(app.cursor_pos(), None);
     }
 
     #[test]
@@ -2620,16 +3266,25 @@ mod tests {
     }
 
     #[test]
-    fn test_command_palette_frequency_with_param() {
+    fn command_frequency_synchronizes_cursor_and_audio() {
+        let (tx, rx) = audio_controls();
         let config = AppConfig::default();
-        let mut app = App::new(config, None);
+        let mut app = App::new(config, Some(tx));
         app.handle_key(KeyEvent::from(KeyCode::Char('/')));
         for c in "frequency 118.1M".chars() {
             app.handle_key(KeyEvent::from(KeyCode::Char(c)));
         }
         app.handle_key(KeyEvent::from(KeyCode::Enter));
         assert!(!app.command_palette_active);
-        assert!((app.config.center_freq - 118_100_000.0).abs() < 1.0);
+        assert_frequency_eq(app.config.center_freq, 118_100_000.0);
+        assert_frequency_eq(app.cursor_freq, 118_100_000.0);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            AudioControl::SetTuning { center_freq, cursor_freq }
+                if frequencies_match(center_freq, 118_100_000.0)
+                    && frequencies_match(cursor_freq, 118_100_000.0)
+        ));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -2643,7 +3298,36 @@ mod tests {
             app.handle_key(KeyEvent::from(KeyCode::Char(c)));
         }
         app.handle_key(KeyEvent::from(KeyCode::Enter));
-        assert!((app.cursor_freq - 100_000_000.0).abs() < 1.0);
+        assert_frequency_eq(app.cursor_freq, 99_000_000.0);
+        assert_frequency_eq(app.config.center_freq, 99_000_000.0);
+    }
+
+    #[test]
+    fn command_tune_actions_use_cursor_navigation_steps() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        let initial = app.cursor_freq;
+
+        app.apply_command_action(CommandAction::TuneUp);
+        assert_frequency_eq(app.cursor_freq, initial + 1_000.0);
+        assert!(matches!(rx.recv().unwrap(), AudioControl::SetCursorFreq(freq) if frequencies_match(freq, initial + 1_000.0)));
+
+        app.apply_command_action(CommandAction::TuneDown);
+        assert_frequency_eq(app.cursor_freq, initial);
+        assert!(matches!(rx.recv().unwrap(), AudioControl::SetCursorFreq(freq) if frequencies_match(freq, initial)));
+
+        app.apply_command_action(CommandAction::TuneCoarseUp);
+        assert_frequency_eq(app.cursor_freq, initial + 100_000.0);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            AudioControl::SetCursorFreq(freq)
+                if frequencies_match(freq, initial + 100_000.0)
+        ));
+
+        app.apply_command_action(CommandAction::TuneCoarseDown);
+        assert_frequency_eq(app.cursor_freq, initial);
+        assert!(matches!(rx.recv().unwrap(), AudioControl::SetCursorFreq(freq) if frequencies_match(freq, initial)));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -2879,7 +3563,7 @@ mod tests {
 
         app.handle_key(KeyEvent::from(KeyCode::Char('m')));
         app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
-        assert!(!app.cursor_active);
+        assert!(app.audio_muted);
         assert_eq!(app.vfos.len(), 1);
     }
 
@@ -2960,14 +3644,14 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_activates_cursor_if_inactive() {
+    fn scan_unmutes_audio_if_muted() {
         let config = AppConfig::default();
         let mut app = App::new(config, None);
-        app.cursor_active = false;
+        app.audio_muted = true;
 
         app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
         assert!(app.scan_active);
-        assert!(app.cursor_active);
+        assert!(!app.audio_muted);
     }
 
     #[test]
@@ -3120,6 +3804,59 @@ mod tests {
     }
 
     #[test]
+    fn status_uses_displayed_frame_geometry_during_retune_latency() {
+        let backend = ratatui::backend::TestBackend::new(240, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new(AppConfig::default(), None);
+        app.push_fft(FftResult {
+            bins: vec![-50.0; 1024],
+            center_freq: 100_000_000.0,
+            sample_rate: 2_000_000.0,
+        });
+        app.config.center_freq = 101_000_000.0;
+        app.config.sample_rate = 1_000_000.0;
+
+        terminal.draw(|frame| draw_ui(frame, &app)).unwrap();
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("Freq: 100.000M"));
+        assert!(rendered.contains("BW: 2.000M"));
+        assert!(!rendered.contains("Freq: 101.000M"));
+        assert!(!rendered.contains("BW: 1.000M"));
+    }
+
+    #[test]
+    fn muted_status_keeps_cursor_information_visible() {
+        let backend = ratatui::backend::TestBackend::new(240, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new(AppConfig::default(), None);
+        app.audio_muted = true;
+        app.push_fft(FftResult {
+            bins: vec![-50.0; 1024],
+            center_freq: app.config.center_freq,
+            sample_rate: app.config.sample_rate,
+        });
+
+        terminal.draw(|frame| draw_ui(frame, &app)).unwrap();
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("MUTED"));
+        assert!(rendered.contains("Cursor:"));
+    }
+
+    #[test]
     fn smoke_draw_ui_with_overlays() {
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -3178,5 +3915,58 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let app = App::new(AppConfig::default(), None);
         terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    }
+
+    #[test]
+    fn help_renders_exact_frequency_navigation_contract() {
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new(AppConfig::default(), None);
+        app.show_help = true;
+
+        terminal.draw(|f| draw_ui(f, &app)).unwrap();
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("←/→ Move cursor ±1 kHz"));
+        assert!(rendered.contains("Shift+←/→ Move cursor ±100 kHz"));
+        assert!(rendered.contains("PgUp/PgDn Move cursor ±1 MHz"));
+        assert!(rendered.contains("Arrows and PgUp/PgDn move cursor; auto-pan at edges"));
+        assert!(rendered.contains("c Center view on cursor"));
+        assert!(rendered.contains("Space Mute/unmute cursor audio only"));
+        assert!(rendered.contains("Press any key to close"));
+        assert!(!rendered.contains("when active"));
+        assert!(!rendered.contains("25 kHz"));
+        assert!(!rendered.contains("    C "));
+    }
+
+    #[test]
+    fn readme_documents_page_keys_as_cursor_movement() {
+        let readme = include_str!("../../README.md");
+
+        assert!(readme.contains(
+            "| `PgUp` / `PgDn` | Move cursor ±1 MHz, whether audio is muted or unmuted; the viewport auto-pans at an edge |"
+        ));
+        assert!(!readme.contains("Move viewport center ±1 MHz"));
+    }
+
+    #[test]
+    fn concepts_document_matches_frequency_navigation_contract() {
+        let docs = include_str!("../../docs/concepts-and-architecture.html");
+
+        assert!(docs.contains("Mover cursor ±1 kHz"));
+        assert!(docs.contains("Mover cursor ±100 kHz"));
+        assert!(docs.contains("Mover cursor ±1 MHz"));
+        assert!(docs.contains("Centrar vista en cursor"));
+        assert!(docs.contains("Silenciar/reactivar solo el audio del cursor"));
+        assert!(!docs.contains("Mover cursor / Sintonización fina (±25 kHz)"));
+        assert!(!docs.contains("Sintonización gruesa (±1 MHz)"));
+        assert!(!docs.contains("Centrar cursor en pantalla"));
+        assert!(!docs.contains("Toggle cursor activo/inactivo + mute"));
     }
 }

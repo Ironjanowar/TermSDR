@@ -4,6 +4,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
+    text::Span,
     widgets::Widget,
 };
 
@@ -40,7 +41,7 @@ pub struct StatusBarWidget {
     pub channel_bw: f64,
     /// Volume (0-100).
     pub volume: u8,
-    /// Whether audio is active (cursor active).
+    /// Whether cursor audio is currently unmuted.
     pub audio_active: bool,
     /// Squelch threshold.
     pub squelch: Option<f32>,
@@ -55,7 +56,7 @@ pub struct StatusBarWidget {
 }
 
 impl StatusBarWidget {
-    #[must_use] 
+    #[must_use]
     pub fn new(
         center_freq: f64,
         sample_rate: f64,
@@ -161,9 +162,11 @@ impl StatusBarWidget {
             None => String::new(),
         };
         let scan_str = if self.scan_active { " │ 📡SCAN" } else { "" };
+        // Cursor readout comes before AVG/WF/source so it survives realistic
+        // terminal widths; the trailing segments are the first to be clipped.
         format!(
-            " ⏣ Freq: {} │ BW: {} │ ChBW: {} │ Gain: {} │ {}{}{} │ AVG:{} │ WF:{:.0}s │ {} │ {:.0} FPS{} ",
-            freq, bw, bw_str, gain_str, vol_str, sq_str, scan_str, self.averaging, self.waterfall_time_span, self.source, self.fps, cursor_str
+            " ⏣ Freq: {} │ BW: {} │ ChBW: {} │ Gain: {} │ {}{}{}{} │ AVG:{} │ WF:{:.0}s │ {} │ {:.0} FPS ",
+            freq, bw, bw_str, gain_str, vol_str, sq_str, scan_str, cursor_str, self.averaging, self.waterfall_time_span, self.source, self.fps
         )
     }
 }
@@ -175,6 +178,9 @@ impl Widget for StatusBarWidget {
         }
 
         let status = self.format_status();
+        // Terminal-column width (not byte length): multibyte symbols widen or
+        // narrow the visible row, so byte arithmetic would clip or overflow.
+        let status_width = Span::raw(status.as_str()).width();
         let style = Style::default()
             .fg(Color::White)
             .bg(Color::Rgb(30, 30, 60))
@@ -185,17 +191,13 @@ impl Widget for StatusBarWidget {
             buf.set_string(x, area.y, " ", style);
         }
 
-        // Write the status text
-        let truncated = if status.len() > area.width as usize {
-            &status[..area.width as usize]
-        } else {
-            &status
-        };
-        buf.set_string(area.x, area.y, truncated, style);
+        // Write the status text. `set_stringn` clips per grapheme and stops at a
+        // cell boundary, so byte-slicing panics on non-char boundaries are gone.
+        buf.set_stringn(area.x, area.y, &status, area.width as usize, style);
 
-        // Right-aligned help hint
-        let help = " [?]help [Space]cursor ";
-        if area.width as usize > status.len() + help.len() + 2 {
+        // Right-aligned help hint (ASCII only, so byte length equals width)
+        let help = " [?]help [Space]mute ";
+        if area.width as usize > status_width + help.len() + 2 {
             #[allow(clippy::cast_possible_truncation)] // intentional truncation
             let help_x = area.x + area.width - help.len() as u16;
             let help_style = Style::default()
@@ -292,6 +294,149 @@ mod tests {
             format!("{}", DisplaySource::File("test.iq".to_string())),
             "FILE: test.iq"
         );
+    }
+
+    #[test]
+    fn render_help_hint_describes_space_as_mute() {
+        let backend = ratatui::backend::TestBackend::new(240, 1);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    StatusBarWidget::new(
+                        100_000_000.0,
+                        2_000_000.0,
+                        None,
+                        DisplaySource::Test,
+                        30.0,
+                    ),
+                    frame.area(),
+                );
+            })
+            .unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(rendered.contains("[Space]mute"));
+        assert!(!rendered.contains("[Space]cursor"));
+    }
+
+    #[test]
+    fn format_status_puts_cursor_readout_before_average_waterfall_and_source() {
+        let status =
+            StatusBarWidget::new(100_000_000.0, 2_048_000.0, None, DisplaySource::Test, 30.0)
+                .with_cursor(Some((100_250_000.0, Some(-51.5))))
+                .format_status();
+
+        let cursor = status
+            .find("Cursor:")
+            .expect("cursor readout must be present");
+        let average = status
+            .find("AVG:")
+            .expect("average segment must be present");
+        let waterfall = status
+            .find("WF:")
+            .expect("waterfall segment must be present");
+        let source = status.find("TEST").expect("source segment must be present");
+
+        assert!(cursor < average, "cursor readout must precede AVG");
+        assert!(cursor < waterfall, "cursor readout must precede WF");
+        assert!(cursor < source, "cursor readout must precede the source");
+    }
+
+    fn render_status_cells(widget: StatusBarWidget, width: u16) -> Vec<String> {
+        let backend = ratatui::backend::TestBackend::new(width, 1);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(widget, frame.area()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect()
+    }
+
+    fn render_status(widget: StatusBarWidget, width: u16) -> String {
+        render_status_cells(widget, width).concat()
+    }
+
+    fn cursor_status_widget() -> StatusBarWidget {
+        StatusBarWidget::new(100_000_000.0, 2_048_000.0, None, DisplaySource::Test, 30.0)
+            .with_cursor(Some((100_250_000.0, Some(-51.5))))
+            .with_channel_bw(25_000.0)
+            .with_audio(80, true, None)
+            .with_demod_mode("AM")
+            .with_averaging(4)
+    }
+
+    #[test]
+    fn cursor_readout_survives_at_120_columns() {
+        let rendered = render_status(cursor_status_widget(), 120);
+
+        assert!(
+            rendered.contains("Cursor: 100.250M @ -51.5dB"),
+            "120-column status bar must show the cursor readout, got: {rendered}"
+        );
+    }
+
+    /// Total number of terminal columns consumed by the buffer row.
+    ///
+    /// Wide graphemes occupy one cell whose symbol is the grapheme plus one
+    /// placeholder cell, so a naive sum of symbol widths over-counts; this walk
+    /// skips the placeholder cells the renderer reset.
+    fn occupied_columns(cells: &[String]) -> usize {
+        let mut columns = 0;
+        let mut index = 0;
+        while index < cells.len() {
+            let symbol_width = ratatui::text::Span::raw(cells[index].as_str()).width();
+            columns += symbol_width;
+            index += symbol_width.max(1);
+        }
+        columns
+    }
+
+    #[test]
+    fn long_multibyte_source_never_panics_and_keeps_cursor_readout() {
+        let long_source = "FILE: /señales/日本/estación-🎚️-muy-larga-de-prueba.iq";
+        for width in 10..=200 {
+            let widget = StatusBarWidget::new(
+                100_000_000.0,
+                2_048_000.0,
+                None,
+                DisplaySource::File(long_source.to_string()),
+                30.0,
+            )
+            .with_cursor(Some((100_250_000.0, Some(-51.5))));
+
+            let cells = render_status_cells(widget, width);
+            let rendered = cells.concat();
+
+            assert_eq!(
+                cells.len(),
+                usize::from(width),
+                "width {width} must render exactly one row of cells"
+            );
+            assert_eq!(
+                occupied_columns(&cells),
+                usize::from(width),
+                "width {width} must fill the row without overflowing it"
+            );
+
+            if width >= 120 {
+                assert!(
+                    rendered.contains("Cursor: 100.250M"),
+                    "width {width} must keep cursor readout, got: {rendered}"
+                );
+            }
+        }
     }
 
     #[test]

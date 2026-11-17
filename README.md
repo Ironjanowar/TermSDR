@@ -118,11 +118,12 @@ cargo run -- --test -f 433.92M -s 1M --gain 20 --fft-size 4096
 
 | Key | Action |
 |-----|--------|
-| `←` / `→` | Move cursor (cursor active) / Fine tune ±25 kHz (cursor inactive) |
-| `PgUp` / `PgDn` | Coarse tune ±1 MHz |
+| `←` / `→` | Move cursor ±1 kHz, whether audio is muted or unmuted; the viewport auto-pans at an edge |
+| `Shift+←` / `Shift+→` | Move cursor ±100 kHz, whether audio is muted or unmuted; the viewport auto-pans at an edge |
+| `PgUp` / `PgDn` | Move cursor ±1 MHz, whether audio is muted or unmuted; the viewport auto-pans at an edge |
 | `f` | Enter frequency input mode |
 | `+` / `-` | Zoom in / out (adjust bandwidth) |
-| `c` | Center cursor on screen |
+| `c` | Center view on cursor without moving the cursor |
 
 ### Control
 
@@ -131,7 +132,7 @@ cargo run -- --test -f 433.92M -s 1M --gain 20 --fft-size 4096
 | `↑` / `↓` | Increase / decrease RF gain |
 | `b` | Enter bandwidth input mode |
 | `w` / `W` | Widen / narrow channel bandwidth (×2 / ÷2) |
-| `Space` | Toggle cursor active / inactive (also mutes/unmutes audio) |
+| `Space` | Mute/unmute cursor audio only |
 
 ### Audio & VFOs
 
@@ -174,7 +175,7 @@ Press `/` to open the command palette — a powerful way to execute any action w
 | Command | Description | Parameter | Hotkey |
 |---------|-------------|-----------|--------|
 | `bandwidth` | Set sample rate/bandwidth | `<value>` (required, e.g. `2M`, `500k`) | `b` |
-| `center` | Center cursor on screen | — | `c` |
+| `center` | Center view on cursor | — | `c` |
 | `channelbw` | Set channel bandwidth | `<value>` (optional, e.g. `25k`, `50k`) | `w`/`W` |
 | `frequency` | Jump to frequency | `<value>` (required, e.g. `118.1M`) | `f` |
 | `gain+` | Increase gain by 1 dB | — | `↑` |
@@ -183,11 +184,11 @@ Press `/` to open the command palette — a powerful way to execute any action w
 | `output` | Select audio output device | — | — |
 | `quit` | Quit application | — | `q` |
 | `squelch` | Set squelch threshold (dB) | `<dB>` (optional; omit to disable) | — |
-| `toggle-cursor` | Toggle cursor on/off | — | `Space` |
-| `tune+` | Tune up 25 kHz | — | `←` |
-| `tune-` | Tune down 25 kHz | — | `→` |
-| `tune-coarse+` | Tune up 1 MHz | — | `PgUp` |
-| `tune-coarse-` | Tune down 1 MHz | — | `PgDn` |
+| `toggle-cursor` | Mute/unmute cursor audio | — | `Space` |
+| `tune+` | Move cursor up 1 kHz | — | `→` |
+| `tune-` | Move cursor down 1 kHz | — | `←` |
+| `tune-coarse+` | Move cursor up 100 kHz | — | `Shift+→` |
+| `tune-coarse-` | Move cursor down 100 kHz | — | `Shift+←` |
 | `vfo-add` | Add VFO at frequency | `<freq>` (required, e.g. `118.1M`) | `m` |
 | `vfo-clear` | Remove all VFOs | — | — |
 | `vfo-remove` | Remove VFO by ID | `<id>` (required) | `x` |

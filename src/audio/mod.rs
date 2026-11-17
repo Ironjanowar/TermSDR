@@ -1,6 +1,7 @@
 //! Audio pipeline: IQ demodulation, mixing, and output routing.
 
 pub(crate) mod agc;
+pub(crate) mod am;
 pub(crate) mod channelizer;
 pub(crate) mod demod;
 pub(crate) mod limiter;

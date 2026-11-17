@@ -480,19 +480,29 @@ impl AmChannelizer {
     ///
     /// Returns an error when the newly derived filter specification is invalid. The previous
     /// filter then stays in use.
-    #[allow(dead_code)] // no inline test exercises a profile change yet; the AM pipeline will
     pub fn set_profiles(&mut self, rf: AmRfProfile, voice: VoiceProfile) -> Result<()> {
-        let (channel_fir, edges) = design_channel_filter(rf, voice, self.output_rate_hz)?;
-        let latency_output_samples = combined_latency_output_samples(
-            &*self.resampler,
-            &channel_fir,
-            self.priming_shift_samples,
-        );
-        self.channel_fir = channel_fir;
-        self.edges = edges;
+        let edges = rf.effective_edges_hz(voice);
+        let response_changed = self.edges.pass_edge_hz.to_bits() != edges.pass_edge_hz.to_bits()
+            || self.edges.stop_edge_hz.to_bits() != edges.stop_edge_hz.to_bits();
+
+        if response_changed {
+            let (channel_fir, designed_edges) =
+                design_channel_filter(rf, voice, self.output_rate_hz)?;
+            let latency_output_samples = combined_latency_output_samples(
+                &*self.resampler,
+                &channel_fir,
+                self.priming_shift_samples,
+            );
+            self.channel_fir = channel_fir;
+            self.edges = designed_edges;
+            self.latency_output_samples = latency_output_samples;
+        } else {
+            // Profile names are observable metadata even when they collapse to the same RF response.
+            // Keep the live FIR history and update the equivalent effective edges in place.
+            self.edges = edges;
+        }
         self.rf = rf;
         self.voice = voice;
-        self.latency_output_samples = latency_output_samples;
         Ok(())
     }
 
@@ -1142,6 +1152,89 @@ mod tests {
                 "{label}: RMS difference {rms:.3e} from the reference exceeds the 1e-4 gate"
             );
         }
+    }
+
+    #[test]
+    fn equivalent_edge_profile_change_updates_metadata_without_rebuilding_fir() {
+        let initial_rf = AmRfProfile::Khz6;
+        let initial_voice = VoiceProfile::Narrow;
+        let updated_rf = AmRfProfile::Khz6;
+        let updated_voice = VoiceProfile::Standard;
+        let initial_edges = initial_rf.effective_edges_hz(initial_voice);
+        let updated_edges = updated_rf.effective_edges_hz(updated_voice);
+        assert_eq!(initial_edges.pass_edge_hz, updated_edges.pass_edge_hz);
+        assert_eq!(initial_edges.stop_edge_hz, updated_edges.stop_edge_hz);
+        assert_eq!(updated_edges.pass_edge_hz, 2_700.0);
+        assert_eq!(updated_edges.stop_edge_hz, 3_300.0);
+
+        let mut changed = channelizer(initial_rf, initial_voice);
+        let mut reference = channelizer(initial_rf, initial_voice);
+        let warm_len = 8 * 4_096;
+        let warm = tone_block(
+            INPUT_RATE_HZ,
+            0,
+            warm_len,
+            &[(350.0, 0.55), (1_900.0, 0.25), (5_100.0, 0.15)],
+        );
+        let changed_warm = changed
+            .process(&warm)
+            .expect("changed channelizer must accept the warm-up stream");
+        let reference_warm = reference
+            .process(&warm)
+            .expect("reference channelizer must accept the warm-up stream");
+        assert_eq!(
+            changed_warm.iq, reference_warm.iq,
+            "identical channelizers must have identical FIR history before the profile update"
+        );
+        assert_eq!(changed_warm.power_dbfs, reference_warm.power_dbfs);
+
+        let latency_before = changed.latency_samples();
+        changed
+            .set_profiles(updated_rf, updated_voice)
+            .expect("an equivalent-edge profile update must succeed");
+
+        assert_eq!(changed.rf, AmRfProfile::Khz6);
+        assert_eq!(changed.voice, VoiceProfile::Standard);
+        assert_eq!(changed.edges, updated_edges);
+        assert_eq!(changed.effective_voice_high_hz(), 2_600.0);
+        assert_eq!(
+            changed.latency_samples(),
+            latency_before,
+            "equivalent RF pass/stop edges must keep the design latency unchanged"
+        );
+
+        let continuation = tone_block(
+            INPUT_RATE_HZ,
+            warm_len,
+            2 * 4_096,
+            &[(350.0, 0.55), (1_900.0, 0.25), (5_100.0, 0.15)],
+        );
+        let changed_output = changed
+            .process(&continuation)
+            .expect("updated channelizer must process the continuation");
+        let reference_output = reference
+            .process(&continuation)
+            .expect("reference channelizer must process the continuation");
+        assert!(
+            !changed_output.iq.is_empty(),
+            "the continuation must emit IQ"
+        );
+        assert_eq!(changed_output.iq.len(), reference_output.iq.len());
+        for (index, (actual, expected)) in changed_output
+            .iq
+            .iter()
+            .zip(&reference_output.iq)
+            .enumerate()
+        {
+            assert_eq!(
+                actual, expected,
+                "equivalent RF edges must preserve FIR history; output differs at sample {index}"
+            );
+        }
+        assert_eq!(
+            changed_output.power_dbfs, reference_output.power_dbfs,
+            "bit-identical channelized IQ must report bit-identical power"
+        );
     }
 
     #[test]

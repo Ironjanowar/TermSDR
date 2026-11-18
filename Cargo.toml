@@ -1,6 +1,6 @@
 [package]
 name = "termsdr"
-version = "0.5.0"
+version = "0.5.1-rc.1"
 edition = "2021"
 rust-version = "1.87"
 description = "Terminal-based SDR application with spectrum and waterfall displays"

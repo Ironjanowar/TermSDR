@@ -2319,7 +2319,10 @@ fn draw_settings_modal(frame: &mut Frame, size: Rect, modal: &SettingsModal) {
     let hint_y = inner.y + inner.height.saturating_sub(1);
     if hint_y < area.y + area.height {
         let hint = if modal.editing {
-            "  Type value, Enter confirm, Esc cancel".to_string()
+            match &modal.edit_error {
+                Some(error) => format!("  {error} — Enter to retry, Esc cancel"),
+                None => "  Type value, Enter confirm, Esc cancel".to_string(),
+            }
         } else if modal.showing_help {
             "  [?] Close help | [Esc] Close help".to_string()
         } else if let Some(item) = modal.selected_item() {
@@ -4622,6 +4625,52 @@ mod tests {
         let mut app = App::new(AppConfig::default(), None);
         app.settings_modal.visible = true;
         terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    }
+
+    #[test]
+    fn typing_a_squelch_value_in_the_settings_modal_reaches_the_app() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.handle_key(KeyEvent::from(KeyCode::Char('s')));
+        app.handle_key(KeyEvent::from(KeyCode::Down)); // Squelch
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.settings_modal.editing, "Enter starts editing a slider");
+        while rx.try_recv().is_ok() {}
+
+        for key in [KeyCode::Char('-'), KeyCode::Char('3'), KeyCode::Char('0')] {
+            app.handle_key(KeyEvent::from(key));
+        }
+        assert_eq!(
+            app.settings_modal.edit_buffer, "-30",
+            "typing replaces the prefilled current value"
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert!(!app.settings_modal.editing);
+        assert_eq!(app.squelch, Some(-30.0), "the typed threshold is applied");
+        assert!(
+            matches!(rx.try_recv(), Ok(AudioControl::SetSquelch(Some(v))) if (v - -30.0).abs() < 0.01),
+            "the audio thread is told about the new threshold"
+        );
+    }
+
+    #[test]
+    fn a_rejected_settings_value_stays_editable_and_explains_itself() {
+        let mut app = App::new(AppConfig::default(), None);
+        app.handle_key(KeyEvent::from(KeyCode::Char('s')));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        app.settings_modal.edit_buffer = "-".to_string();
+        app.settings_modal.edit_fresh = false;
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert!(app.settings_modal.editing, "a bad value must not close the edit");
+        let rendered = render_to_string(&app, 120, 40);
+        assert!(
+            rendered.contains("Not a number: -"),
+            "the footer names the problem: {rendered}"
+        );
     }
 
     #[test]

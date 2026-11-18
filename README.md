@@ -161,15 +161,23 @@ a restart when a session is loaded at runtime.
 | `Shift+←` / `Shift+→` | Move cursor ±100 kHz, whether audio is muted or unmuted; the viewport auto-pans at an edge |
 | `PgUp` / `PgDn` | Move cursor ±1 MHz, whether audio is muted or unmuted; the viewport auto-pans at an edge |
 | `f` | Enter frequency input mode |
-| `+` / `-` | Zoom in / out (adjust bandwidth) |
+| `+` / `-` | Zoom the display in / out around the cursor; never retunes the receiver |
 | `c` | Center view on cursor without moving the cursor |
+
+### Zooming the display
+
+`+` / `-` and `b` change **what is drawn**, not what is captured. The receiver keeps
+its sample rate, so audio never drops and the whole band is still there when you
+zoom back out. The view is anchored on the cursor, and the axis stops shrinking at
+four FFT bins — below that you would be magnifying interpolation, not signal. To see
+a narrower span with more resolution, capture at a lower `-s` or raise `--fft-size`.
 
 ### Control
 
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` | Increase / decrease RF gain |
-| `b` | Enter bandwidth input mode |
+| `b` | Set the displayed bandwidth exactly (e.g. `20k`); never retunes the receiver |
 | `w` / `W` | Widen / narrow channel bandwidth (×2 / ÷2) |
 | `Space` | Mute/unmute cursor audio only |
 
@@ -235,8 +243,8 @@ Press `/` to open the command palette — a powerful way to execute any action w
 | `vfo-remove` | Remove VFO by ID | `<id>` (required) | `x` |
 | `volume` | Set volume (0–100) | `<value>` (required) | `v`/`V` |
 | `waterfall` | Set waterfall time span | `<seconds>` (required, 5–120) | `t`/`T` |
-| `zoom-in` | Zoom in (decrease bandwidth) | — | `+` |
-| `zoom-out` | Zoom out (increase bandwidth) | — | `-` |
+| `zoom-in` | Zoom the display in around the cursor | — | `+` |
+| `zoom-out` | Zoom the display out around the cursor | — | `-` |
 
 ### Parameterized Commands
 

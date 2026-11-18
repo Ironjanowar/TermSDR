@@ -29,6 +29,8 @@ pub struct WaterfallWidget<'a> {
     center_freq: f64,
     /// Sample rate in Hz.
     sample_rate: f64,
+    /// Range of captured bins covered by the displayed window.
+    bin_range: std::ops::Range<usize>,
     /// VFO markers: (freq, `channel_bw`, color, id).
     vfos: Vec<(f64, f64, ratatui::style::Color, usize)>,
 }
@@ -45,8 +47,19 @@ impl<'a> WaterfallWidget<'a> {
             cursor_freq: 0.0,
             center_freq: 0.0,
             sample_rate: 0.0,
+            bin_range: 0..0,
             vfos: Vec::new(),
         }
+    }
+
+    /// Draw only `bin_range` of each row, matching the displayed window.
+    ///
+    /// Every row in the history was captured under the same geometry, so the same
+    /// slice applies to all of them.
+    #[must_use]
+    pub fn with_bin_range(mut self, bin_range: std::ops::Range<usize>) -> Self {
+        self.bin_range = bin_range;
+        self
     }
 
     #[must_use] 
@@ -56,7 +69,13 @@ impl<'a> WaterfallWidget<'a> {
     }
 
     #[must_use] 
-    pub fn with_bandwidth(mut self, bw: Option<f64>, cursor_freq: f64, center_freq: f64, sample_rate: f64) -> Self {
+    pub fn with_bandwidth(
+        mut self,
+        bw: Option<f64>,
+        cursor_freq: f64,
+        center_freq: f64,
+        sample_rate: f64,
+    ) -> Self {
         self.channel_bw = bw;
         self.cursor_freq = cursor_freq;
         self.center_freq = center_freq;
@@ -88,8 +107,9 @@ impl Widget for WaterfallWidget<'_> {
                 break;
             }
 
-            // Resample the FFT bins to fit the display width
-            let resampled = resample_waterfall_row(row_data, width);
+            // Resample only the bins the displayed window covers.
+            let visible = row_data.get(self.bin_range.clone()).unwrap_or(&[]);
+            let resampled = resample_waterfall_row(visible, width);
 
             for (col, &db_val) in resampled.iter().enumerate() {
                 #[allow(clippy::cast_possible_truncation)] // intentional truncation
@@ -118,7 +138,12 @@ impl Widget for WaterfallWidget<'_> {
 
         // Draw cursor vertical line on waterfall
         if let Some(cursor_pos) = self.cursor_pos {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)] // precision loss acceptable for DSP/UI; intentional truncation; value is non-negative here
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_precision_loss,
+                clippy::cast_sign_loss
+            )]
+            // precision loss acceptable for DSP/UI; intentional truncation; value is non-negative here
             let cursor_x = area.x + (cursor_pos * width.saturating_sub(1) as f32) as u16;
             if cursor_x >= area.x && cursor_x < area.x + area.width {
                 use ratatui::style::Color;
@@ -148,15 +173,26 @@ impl Widget for WaterfallWidget<'_> {
                     #[allow(clippy::cast_possible_truncation)] // intentional truncation
                     let pos = ((edge_freq - start_freq) / self.sample_rate) as f32;
                     if (0.0..=1.0).contains(&pos) {
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)] // precision loss acceptable for DSP/UI; intentional truncation; value is non-negative here
+                        #[allow(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_precision_loss,
+                            clippy::cast_sign_loss
+                        )]
+                        // precision loss acceptable for DSP/UI; intentional truncation; value is non-negative here
                         let edge_x = area.x + (pos * width.saturating_sub(1) as f32) as u16;
                         if edge_x >= area.x && edge_x < area.x + area.width {
                             for row in 0..height {
                                 if row % 2 == 0 {
-                                    #[allow(clippy::cast_possible_truncation)] // intentional truncation
+                                    #[allow(clippy::cast_possible_truncation)]
+                                    // intentional truncation
                                     let y = area.y + row as u16;
                                     if y < area.y + area.height {
-                                        buf.set_string(edge_x, y, "┊", Style::default().fg(bw_color));
+                                        buf.set_string(
+                                            edge_x,
+                                            y,
+                                            "┊",
+                                            Style::default().fg(bw_color),
+                                        );
                                     }
                                 }
                             }
@@ -177,12 +213,18 @@ impl Widget for WaterfallWidget<'_> {
                     #[allow(clippy::cast_possible_truncation)] // intentional truncation
                     let pos = ((edge_freq - start_freq) / self.sample_rate) as f32;
                     if (0.0..=1.0).contains(&pos) {
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)] // precision loss acceptable for DSP/UI; intentional truncation; value is non-negative here
+                        #[allow(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_precision_loss,
+                            clippy::cast_sign_loss
+                        )]
+                        // precision loss acceptable for DSP/UI; intentional truncation; value is non-negative here
                         let edge_x = area.x + (pos * width.saturating_sub(1) as f32) as u16;
                         if edge_x >= area.x && edge_x < area.x + area.width {
                             for row in 0..height {
                                 if row % 2 == 0 {
-                                    #[allow(clippy::cast_possible_truncation)] // intentional truncation
+                                    #[allow(clippy::cast_possible_truncation)]
+                                    // intentional truncation
                                     let y = area.y + row as u16;
                                     if y < area.y + area.height {
                                         buf.set_string(edge_x, y, "┊", Style::default().fg(color));
@@ -208,9 +250,19 @@ fn resample_waterfall_row(bins: &[f32], target_width: usize) -> Vec<f32> {
     let ratio = bins.len() as f64 / target_width as f64;
     (0..target_width)
         .map(|i| {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)] // precision loss acceptable for DSP/UI; intentional truncation; value is non-negative here
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_precision_loss,
+                clippy::cast_sign_loss
+            )]
+            // precision loss acceptable for DSP/UI; intentional truncation; value is non-negative here
             let start = (i as f64 * ratio) as usize;
-            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)] // precision loss acceptable for DSP/UI; intentional truncation; value is non-negative here
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_precision_loss,
+                clippy::cast_sign_loss
+            )]
+            // precision loss acceptable for DSP/UI; intentional truncation; value is non-negative here
             let end = ((i + 1) as f64 * ratio) as usize;
             let end = end.min(bins.len());
             if start < end {
@@ -300,10 +352,12 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(80, 20);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let history: Vec<Vec<f32>> = Vec::new();
-        terminal.draw(|f| {
+        terminal
+            .draw(|f| {
             let widget = WaterfallWidget::new(&history, -80.0, 0.0);
             f.render_widget(widget, f.area());
-        }).unwrap();
+            })
+            .unwrap();
     }
 
     #[test]
@@ -311,11 +365,13 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(80, 20);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let history: Vec<Vec<f32>> = (0..10).map(|_| vec![-50.0; 64]).collect();
-        terminal.draw(|f| {
+        terminal
+            .draw(|f| {
             let widget = WaterfallWidget::new(&history, -80.0, 0.0)
                 .with_cursor(Some(0.5))
                 .with_bandwidth(Some(25_000.0), 100e6, 100e6, 2.048e6);
             f.render_widget(widget, f.area());
-        }).unwrap();
+            })
+            .unwrap();
     }
 }

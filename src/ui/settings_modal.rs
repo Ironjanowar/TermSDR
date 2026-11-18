@@ -65,11 +65,20 @@ pub enum DefaultKind {
 
 /// The settings modal state.
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)] // UI state naturally has many boolean flags
 pub struct SettingsModal {
     pub visible: bool,
     pub selected_index: usize,
     pub editing: bool,
     pub edit_buffer: String,
+    /// True while the buffer still holds the prefilled current value.
+    ///
+    /// The first keystroke replaces that prefill instead of appending to it;
+    /// otherwise typing "-30" into a "-120" prefill builds "-120-30", which is
+    /// unparseable and silently dropped on confirm.
+    pub edit_fresh: bool,
+    /// Why the last confirm was rejected, shown in the modal footer.
+    pub edit_error: Option<String>,
     pub items: Vec<SettingsItem>,
     pub showing_help: bool,
 }
@@ -107,6 +116,8 @@ impl SettingsModal {
             selected_index: 0,
             editing: false,
             edit_buffer: String::new(),
+            edit_fresh: false,
+            edit_error: None,
             items: Self::default_items(),
             showing_help: false,
         }
@@ -463,40 +474,85 @@ impl SettingsModal {
             SettingsItemKind::Slider { value, .. } => {
                 self.editing = true;
                 self.edit_buffer = format_value(*value);
+                self.edit_fresh = true;
+                self.edit_error = None;
                 None
             }
         }
     }
 
     /// Confirm the edit buffer value.
+    ///
+    /// A rejected buffer keeps the modal in edit mode and records `edit_error`
+    /// so the operator sees why nothing happened; silently dropping the input
+    /// is what made direct value entry look broken.
     pub fn confirm_edit(&mut self) -> Option<AudioControl> {
         if !self.editing { return None; }
-        self.editing = false;
-        if let Ok(v) = self.edit_buffer.parse::<f64>() {
-            let item = &mut self.items[self.selected_index];
-            if let SettingsItemKind::Slider { value, min, max, .. } = &mut item.kind {
-                *value = v.clamp(*min, *max);
+        match self.edit_buffer.parse::<f64>() {
+            Ok(v) if v.is_finite() => {
+                self.editing = false;
+                self.edit_fresh = false;
+                self.edit_error = None;
+                let item = &mut self.items[self.selected_index];
+                if let SettingsItemKind::Slider { value, min, max, .. } = &mut item.kind {
+                    *value = v.clamp(*min, *max);
+                }
+                self.audio_control_for(self.selected_index)
             }
-            return self.audio_control_for(self.selected_index);
+            Ok(_) => {
+                self.edit_error = Some("Value must be finite".to_string());
+                None
+            }
+            Err(_) => {
+                self.edit_error = Some(format!("Not a number: {}", self.edit_buffer));
+                None
+            }
         }
-        None
     }
 
     /// Cancel edit mode.
     pub fn cancel_edit(&mut self) {
         self.editing = false;
+        self.edit_fresh = false;
+        self.edit_error = None;
         self.edit_buffer.clear();
     }
 
     /// Type a character into the edit buffer.
+    ///
+    /// The first keystroke after `activate` replaces the prefilled current value
+    /// instead of appending to it. `-` is only accepted at the start and the
+    /// decimal point only once, so a buffer can never become unparseable by
+    /// typing extra signs.
     pub fn edit_type(&mut self, c: char) {
-        if c.is_ascii_digit() || c == '.' || c == '-' {
-            self.edit_buffer.push(c);
+        if self.edit_fresh {
+            self.edit_buffer.clear();
+            self.edit_fresh = false;
+        }
+        self.edit_error = None;
+        match c {
+            '-' if self.edit_buffer.is_empty() => self.edit_buffer.push(c),
+            '.' if !self.edit_buffer.contains('.') => self.edit_buffer.push(c),
+            _ if c.is_ascii_digit() => self.edit_buffer.push(c),
+            // A second sign, a second decimal point, or any other character is
+            // ignored rather than appended: appending is what turned "-120" plus
+            // "-30" into an unparseable buffer.
+            _ => {}
         }
     }
 
     /// Backspace in edit buffer.
+    ///
+    /// On a fresh buffer the whole prefill goes at once: the operator asked to
+    /// type a new value, so deleting a sentinel like "-120" should not cost
+    /// four presses.
     pub fn edit_backspace(&mut self) {
+        if self.edit_fresh {
+            self.edit_buffer.clear();
+            self.edit_fresh = false;
+            return;
+        }
+        self.edit_error = None;
         self.edit_buffer.pop();
     }
 
@@ -828,13 +884,14 @@ mod tests {
         let mut modal = SettingsModal::new();
         modal.editing = true;
         modal.edit_buffer.clear();
+        modal.edit_fresh = false;
         modal.edit_type('1');
         modal.edit_type('a'); // rejected
         modal.edit_type('.');
         modal.edit_type('5');
-        modal.edit_type('-');
+        modal.edit_type('-'); // rejected: not at the start
         modal.edit_type('z'); // rejected
-        assert_eq!(modal.edit_buffer, "1.5-");
+        assert_eq!(modal.edit_buffer, "1.5");
     }
 
     #[test]
@@ -983,13 +1040,130 @@ mod tests {
     fn test_edit_invalid_input_ignored() {
         let mut modal = SettingsModal::new();
         modal.activate(); // enter edit mode for volume
-        modal.edit_buffer = "abc".to_string();
+        modal.edit_buffer = "-".to_string();
         let ctrl = modal.confirm_edit();
         assert!(ctrl.is_none());
+        assert!(modal.editing, "an unparseable buffer must stay editable");
+        assert!(modal.edit_error.is_some(), "the failure must be visible");
         // Value should be unchanged
         if let SettingsItemKind::Slider { value, .. } = &modal.items[0].kind {
             assert!((*value - 80.0).abs() < 0.01);
         }
+    }
+
+    #[test]
+    fn typing_after_activating_replaces_the_prefilled_value() {
+        let mut modal = SettingsModal::new();
+        assert!(modal.activate().is_none());
+        assert_eq!(modal.edit_buffer, "80", "the current value is prefilled");
+
+        for c in "42".chars() {
+            modal.edit_type(c);
+        }
+
+        assert_eq!(modal.edit_buffer, "42", "the first keystroke replaces the prefill");
+        assert!(matches!(modal.confirm_edit(), Some(AudioControl::SetVolume(42))));
+        if let SettingsItemKind::Slider { value, .. } = &modal.items[0].kind {
+            assert!((*value - 42.0).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn a_typed_squelch_value_replaces_the_prefilled_off_sentinel() {
+        let mut modal = SettingsModal::new();
+        modal.selected_index = 1; // Squelch
+        assert!(modal.activate().is_none());
+        assert_eq!(modal.edit_buffer, "-120", "squelch opens showing its current value");
+
+        for c in "-30".chars() {
+            modal.edit_type(c);
+        }
+        assert_eq!(modal.edit_buffer, "-30");
+
+        assert!(matches!(
+            modal.confirm_edit(),
+            Some(AudioControl::SetSquelch(Some(value))) if (value - -30.0).abs() < 0.01
+        ));
+        if let SettingsItemKind::Slider { value, .. } = &modal.items[1].kind {
+            assert!((*value - -30.0).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn backspace_on_a_fresh_buffer_clears_the_prefill() {
+        let mut modal = SettingsModal::new();
+        modal.activate();
+        modal.edit_backspace();
+        assert_eq!(modal.edit_buffer, "", "backspace clears the whole prefill first");
+
+        modal.edit_type('7');
+        modal.edit_backspace();
+        assert_eq!(modal.edit_buffer, "", "later backspaces delete one character");
+    }
+
+    #[test]
+    fn edit_type_accepts_a_leading_minus_only() {
+        let mut modal = SettingsModal::new();
+        modal.selected_index = 1; // Squelch allows negatives
+        modal.activate();
+        modal.edit_buffer.clear();
+        modal.edit_fresh = false;
+
+        modal.edit_type('-');
+        modal.edit_type('-');
+        modal.edit_type('3');
+        modal.edit_type('0');
+
+        assert_eq!(modal.edit_buffer, "-30");
+    }
+
+    #[test]
+    fn edit_type_accepts_a_single_decimal_point() {
+        let mut modal = SettingsModal::new();
+        modal.activate();
+        modal.edit_buffer.clear();
+        modal.edit_fresh = false;
+
+        for c in "1.5.5".chars() {
+            modal.edit_type(c);
+        }
+
+        assert_eq!(modal.edit_buffer, "1.55");
+    }
+
+    #[test]
+    fn cancelling_an_edit_clears_the_error_and_the_prefill_state() {
+        let mut modal = SettingsModal::new();
+        modal.activate();
+        modal.edit_buffer = "-".to_string();
+        let _ = modal.confirm_edit();
+        assert!(modal.edit_error.is_some());
+
+        modal.cancel_edit();
+
+        assert!(!modal.editing);
+        assert!(modal.edit_error.is_none());
+        assert!(modal.edit_buffer.is_empty());
+    }
+
+    #[test]
+    fn a_rejected_value_clears_its_error_on_the_next_keystroke() {
+        let mut modal = SettingsModal::new();
+        modal.activate();
+        modal.edit_buffer = "-".to_string();
+        let _ = modal.confirm_edit();
+        assert!(modal.edit_error.is_some());
+
+        modal.edit_type('3');
+
+        assert!(
+            modal.edit_error.is_none(),
+            "typing again clears the stale error"
+        );
+        for c in "30".chars() {
+            modal.edit_type(c);
+        }
+        assert!(modal.confirm_edit().is_some());
     }
 
     #[test]

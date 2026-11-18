@@ -89,6 +89,12 @@ cargo run --features rtlsdr
 
 # Full example
 cargo run -- --test -f 433.92M -s 1M --gain 20 --fft-size 4096
+
+# Load the source-independent Barajas airband session
+cargo run -- --test --config examples/barajas-session-v1.json
+
+# Explicit receiver flags override only those fields from the session
+cargo run -- --test --config examples/barajas-session-v1.json --frequency 119M
 ```
 
 ### CLI Options
@@ -110,7 +116,40 @@ cargo run -- --test -f 433.92M -s 1M --gain 20 --fft-size 4096
 | `--iq-format` | Raw IQ sample format: `cu8` or `cf32le` | — |
 | `--file-sample-rate` | Raw IQ sample rate in Hz | — |
 | `--file-center-frequency` | Raw IQ center frequency in Hz | — |
-| `-c`, `--config` | JSON config file path | — |
+| `-c`, `--config`, `--config-file` | Native JSON session path | — |
+
+### Native sessions (JSON v1)
+
+Native sessions are source-independent snapshots: choose the source with `--test`,
+`--file`, or the startup source picker, then load the same session on top of it.
+The file stores receiver tuning, cursor and pinned VFOs, volume/squelch, AGC,
+bandpass, display, waterfall, and scan state. It intentionally does not store an
+RTL-SDR device index, IQ file path, FFT frames, waterfall history, open dialogs,
+or other transient runtime state.
+
+At startup, `--config <path>` and `--config-file <path>` are equivalent. Values
+from the session form the baseline; only receiver flags explicitly present on the
+command line override it. The public
+[`examples/barajas-session-v1.json`](examples/barajas-session-v1.json) profile is
+a complete v1 example.
+
+The top-level v1 schema is:
+
+```text
+version: 1
+receiver: center_frequency_hz, sample_rate_hz, fft_size, gain_db, ppm
+cursor: name, frequency_hz, mode, channel_bandwidth_hz, muted
+vfos[]: id, name, frequency_hz, mode, channel_bandwidth_hz
+audio: volume, global_squelch_dbfs, agc, bandpass
+display: min_db, max_db, averaging, waterfall_span_seconds
+scan: active, interval_ms
+```
+
+In the TUI, `/config-save <path>` atomically writes to the exact path (without
+adding an extension), creating parent directories as needed. `/config-load
+<path>` replaces the durable runtime state and updates the audio pipeline. Sample
+rate, FFT size, RF gain, and PPM are hardware-bound and are reported as requiring
+a restart when a session is loaded at runtime.
 
 ## ⌨️ Keyboard Shortcuts
 
@@ -177,6 +216,8 @@ Press `/` to open the command palette — a powerful way to execute any action w
 | `bandwidth` | Set sample rate/bandwidth | `<value>` (required, e.g. `2M`, `500k`) | `b` |
 | `center` | Center view on cursor | — | `c` |
 | `channelbw` | Set channel bandwidth | `<value>` (optional, e.g. `25k`, `50k`) | `w`/`W` |
+| `config-load` | Load a native session | `<path>` (required) | — |
+| `config-save` | Atomically save a native session | `<path>` (required) | — |
 | `frequency` | Jump to frequency | `<value>` (required, e.g. `118.1M`) | `f` |
 | `gain+` | Increase gain by 1 dB | — | `↑` |
 | `gain-` | Decrease gain by 1 dB | — | `↓` |
@@ -212,6 +253,8 @@ Commands that accept parameters let you set exact values:
 /vfo-add 118.1M       → Pin a VFO at 118.1 MHz
 /vfo-remove 3         → Remove VFO #3
 /vfo-clear            → Remove all VFOs
+/config-load profiles/airband.json → Replace runtime state from a session
+/config-save profiles/airband.json → Save runtime state to the exact path
 ```
 
 Frequency suffixes supported: `M` (MHz), `k` (kHz), `G` (GHz), or raw Hz.

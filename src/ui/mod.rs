@@ -159,6 +159,8 @@ pub struct App {
     pub next_vfo_id: usize,
     /// Whether VFO delete modal is shown.
     pub show_vfo_delete_modal: bool,
+    /// Selected row in the VFO delete modal (index into `vfos`).
+    pub vfo_delete_selected: usize,
     /// Bookmark store (user bookmarks).
     pub bookmark_store: BookmarkStore,
     /// Whether bookmarks modal is shown.
@@ -230,6 +232,7 @@ impl App {
             vfos: Vec::new(),
             next_vfo_id: 1,
             show_vfo_delete_modal: false,
+            vfo_delete_selected: 0,
             bookmark_store: BookmarkStore::load(),
             show_bookmarks_modal: false,
             bookmark_selected: 0,
@@ -349,6 +352,30 @@ impl App {
         let next = id.checked_add(1)?;
         self.next_vfo_id = next;
         Some(id)
+    }
+
+    /// Open the VFO delete modal with the cursor on the first pin.
+    fn open_vfo_delete_modal(&mut self) {
+        self.vfo_delete_selected = 0;
+        self.show_vfo_delete_modal = true;
+    }
+
+    /// Remove the pin under the delete-modal cursor and keep the modal in sync.
+    ///
+    /// The modal stays open so several pins can be removed in a row; it closes
+    /// only when the list is empty, because there is nothing left to point at.
+    fn delete_selected_vfo(&mut self) {
+        if self.vfo_delete_selected >= self.vfos.len() {
+            return;
+        }
+        let vfo = self.vfos.remove(self.vfo_delete_selected);
+        self.send_audio_control(AudioControl::RemoveVfo(vfo.id));
+
+        let last = self.vfos.len().saturating_sub(1);
+        self.vfo_delete_selected = self.vfo_delete_selected.min(last);
+        if self.vfos.is_empty() {
+            self.show_vfo_delete_modal = false;
+        }
     }
 
     /// Sync shared averaging count for DSP thread.
@@ -571,14 +598,14 @@ impl App {
                 KeyCode::Esc => {
                     self.show_vfo_delete_modal = false;
                 }
-                KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
-                    let num = c.to_digit(10).expect("invariant: is_ascii_digit guard") as usize;
-                    if let Some(idx) = self.vfos.iter().position(|v| v.id == num) {
-                        let vfo = self.vfos.remove(idx);
-                        self.send_audio_control(AudioControl::RemoveVfo(vfo.id));
-                        self.show_vfo_delete_modal = false;
-                    }
+                KeyCode::Up => {
+                    self.vfo_delete_selected = self.vfo_delete_selected.saturating_sub(1);
                 }
+                KeyCode::Down => {
+                    let last = self.vfos.len().saturating_sub(1);
+                    self.vfo_delete_selected = (self.vfo_delete_selected + 1).min(last);
+                }
+                KeyCode::Enter => self.delete_selected_vfo(),
                 _ => {}
             }
             return;
@@ -859,7 +886,7 @@ impl App {
                 }
             KeyCode::Char('x')
                 if !self.vfos.is_empty() => {
-                    self.show_vfo_delete_modal = true;
+                    self.open_vfo_delete_modal();
                 }
             KeyCode::Char('d') => {
                 // Cycle demod mode: AM → FM → NFM → AM
@@ -1468,7 +1495,7 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
 
     // VFO delete modal
     if app.show_vfo_delete_modal {
-        draw_vfo_delete_modal(frame, size, &app.vfos);
+        draw_vfo_delete_modal(frame, size, &app.vfos, app.vfo_delete_selected);
     }
 
     // Bookmarks modal
@@ -1793,15 +1820,24 @@ fn draw_command_palette(frame: &mut Frame, size: Rect, palette: &CommandPalette)
 }
 
 /// Draw the VFO delete modal.
-fn draw_vfo_delete_modal(frame: &mut Frame, size: Rect, vfos: &[Vfo]) {
+///
+/// A single navigable list: the pin under the cursor is highlighted and Enter
+/// removes it. The list scrolls so the cursor stays visible with up to eight
+/// pins, and every rectangle is clamped to the area a degenerate pane allows.
+fn draw_vfo_delete_modal(frame: &mut Frame, size: Rect, vfos: &[Vfo], selected: usize) {
     use spectrum::format_frequency;
 
+    let rows = vfos.len();
     #[allow(clippy::cast_possible_truncation)] // intentional truncation
-    let height = (vfos.len() as u16 + 5).min(size.height);
+    let wanted_height = (rows as u16).saturating_add(3); // rows + title/border + hint
+    if size.height < 3 || size.width < 10 {
+        return;
+    }
+    let height = wanted_height.min(size.height);
     let width = 50.min(size.width);
     let area = Rect {
-        x: (size.width - width) / 2,
-        y: (size.height - height) / 2,
+        x: size.width.saturating_sub(width) / 2,
+        y: size.height.saturating_sub(height) / 2,
         width,
         height,
     };
@@ -1821,34 +1857,52 @@ fn draw_vfo_delete_modal(frame: &mut Frame, size: Rect, vfos: &[Vfo]) {
         height: area.height.saturating_sub(2),
     };
 
-    for (i, vfo) in vfos.iter().enumerate() {
-        #[allow(clippy::cast_possible_truncation)] // intentional truncation
-        let y = inner.y + i as u16;
-        if y >= inner.y + inner.height.saturating_sub(1) {
-            break;
-        }
-        let freq_str = format_frequency(vfo.freq);
-        let bw_str = format_frequency(vfo.channel_bw);
-        let label = format!("  [{}] {} {}  BW: {}", vfo.id, vfo.demod_mode.label(), freq_str, bw_str);
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                label,
-                Style::default().fg(vfo.color),
-            ))),
-            Rect {
-                x: inner.x,
-                y,
-                width: inner.width,
-                height: 1,
-            },
+    // Last row is the hint; the rest scroll.
+    let list_height = usize::from(inner.height.saturating_sub(1));
+    if list_height == 0 {
+        return;
+    }
+    let scroll = selected.saturating_sub(list_height.saturating_sub(1));
+
+    for (row, vfo) in vfos.iter().enumerate().skip(scroll).take(list_height) {
+        #[allow(clippy::cast_possible_truncation)] // bounded by list_height
+        let y = inner.y + (row - scroll) as u16;
+        let is_selected = row == selected;
+        let (marker, style) = if is_selected {
+            (
+                ">",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(vfo.color)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            (" ", Style::default().fg(vfo.color))
+        };
+        let label = format!(
+            "{marker} [{}] {} {}  BW: {}",
+            vfo.id,
+            vfo.demod_mode.label(),
+            format_frequency(vfo.freq),
+            format_frequency(vfo.channel_bw)
         );
+        let row_area = Rect {
+            x: inner.x,
+            y,
+            width: inner.width,
+            height: 1,
+        };
+        if is_selected {
+            frame.render_widget(Clear, row_area);
+        }
+        frame.render_widget(Paragraph::new(Line::from(Span::styled(label, style))), row_area);
     }
 
     let hint_y = inner.y + inner.height.saturating_sub(1);
     if hint_y < area.y + area.height {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "  Press number to delete, Esc to cancel",
+                "Up/Down Select  Enter Delete  Esc Cancel",
                 Style::default().fg(Color::DarkGray),
             ))),
             Rect {
@@ -2400,6 +2454,30 @@ mod tests {
         crossbeam_channel::Receiver<AudioControl>,
     ) {
         crossbeam_channel::unbounded()
+    }
+
+    /// Three pins with ids 1, 2 and 3, then no key state to undo.
+    fn three_pin_app() -> App {
+        let mut app = App::new(AppConfig::default(), None);
+        for _ in 0..3 {
+            app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        }
+        app
+    }
+
+    fn render_to_string(app: &App, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| draw_ui(frame, app))
+            .expect("draw must survive the area");
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
     }
 
     #[test]
@@ -4021,19 +4099,117 @@ mod tests {
     }
 
     #[test]
-    fn test_vfo_delete_by_id() {
-        let config = AppConfig::default();
-        let mut app = App::new(config, None);
+    fn test_vfo_delete_modal_navigates_with_arrows() {
+        let mut app = three_pin_app();
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+        assert!(app.show_vfo_delete_modal);
+        assert_eq!(app.vfo_delete_selected, 0, "modal opens on the first pin");
 
-        app.handle_key(KeyEvent::from(KeyCode::Char('m'))); // id=1
-        app.handle_key(KeyEvent::from(KeyCode::Char('m'))); // id=2
+        app.handle_key(KeyEvent::from(KeyCode::Up));
+        assert_eq!(app.vfo_delete_selected, 0, "Up clamps at the first pin");
+
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(app.vfo_delete_selected, 2);
+
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(app.vfo_delete_selected, 2, "Down clamps at the last pin");
+    }
+
+    #[test]
+    fn test_vfo_delete_enter_removes_the_selected_pin_and_keeps_the_modal_open() {
+        let mut app = three_pin_app();
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
         assert_eq!(app.vfos.len(), 2);
+        assert!(!app.vfos.iter().any(|vfo| vfo.id == 2), "the selected pin is the one removed");
+        assert!(app.show_vfo_delete_modal, "the modal stays open to delete more pins");
+        assert_eq!(app.vfo_delete_selected, 1);
+    }
 
-        app.show_vfo_delete_modal = true;
+    #[test]
+    fn test_vfo_delete_enter_emits_remove_control_for_the_selected_pin() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        while rx.try_recv().is_ok() {}
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert!(matches!(rx.try_recv(), Ok(AudioControl::RemoveVfo(2))));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_vfo_delete_selection_clamps_after_removing_the_last_row() {
+        let mut app = three_pin_app();
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(app.vfo_delete_selected, 2);
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(app.vfos.len(), 2);
+        assert_eq!(app.vfo_delete_selected, 1, "selection follows the shorter list");
+    }
+
+    #[test]
+    fn test_vfo_delete_modal_closes_when_the_last_pin_is_removed() {
+        let mut app = App::new(AppConfig::default(), None);
+        app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert!(app.vfos.is_empty());
+        assert!(!app.show_vfo_delete_modal, "nothing left to delete, so the modal closes");
+    }
+
+    #[test]
+    fn test_vfo_delete_modal_ignores_digit_keys() {
+        let mut app = three_pin_app();
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+
         app.handle_key(KeyEvent::from(KeyCode::Char('1')));
-        assert_eq!(app.vfos.len(), 1);
-        assert_eq!(app.vfos[0].id, 2);
-        assert!(!app.show_vfo_delete_modal);
+
+        assert_eq!(app.vfos.len(), 3, "digits no longer delete by bare id");
+        assert!(app.show_vfo_delete_modal);
+    }
+
+    #[test]
+    fn test_vfo_delete_modal_renders_the_selected_row_as_a_cursor() {
+        let mut app = three_pin_app();
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+
+        let rendered = render_to_string(&app, 120, 40);
+
+        assert!(rendered.contains("> [2]"), "selected pin 2 carries the cursor: {rendered}");
+        assert!(
+            rendered.contains("Up/Down Select  Enter Delete  Esc Cancel"),
+            "hint describes arrows plus Enter: {rendered}"
+        );
+        assert!(
+            !rendered.contains("Press number to delete"),
+            "the numbered shortcut hint is gone from the modal"
+        );
+    }
+
+    #[test]
+    fn test_vfo_delete_modal_survives_degenerate_terminals() {
+        let mut app = three_pin_app();
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+
+        for (width, height) in [(0_u16, 0_u16), (1, 1), (80, 0), (80, 1), (80, 3), (80, 6)] {
+            let _ = render_to_string(&app, width, height);
+        }
     }
 
     #[test]

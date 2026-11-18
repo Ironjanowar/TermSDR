@@ -187,7 +187,7 @@ a narrower span with more resolution, capture at a lower `-s` or raise `--fft-si
 |-----|--------|
 | `v` / `V` | Volume up / down (+5 / -5, range 0–100) |
 | `m` | Pin a VFO at current cursor position (max 8) |
-| `x` | Open VFO delete modal (press VFO number to remove) |
+| `x` | Open VFO delete modal (↑↓ to select, Enter to remove) |
 
 ### Waterfall
 
@@ -285,7 +285,7 @@ TermSDR supports up to **8 simultaneous VFOs** (Variable Frequency Oscillators),
 3. Each VFO gets a unique **color** (Red, Green, Blue, Magenta, Cyan, etc.) and **ID number** (1–8)
 4. VFOs appear as colored vertical lines with bandwidth markers on both the **spectrum** and **waterfall** displays
 5. All pinned VFOs are **demodulated simultaneously** and mixed to mono audio output
-6. Press `x` to open the **delete modal**, then press the VFO's number to remove it
+6. Press `x` to open the **delete modal**, move with `↑`/`↓` and press `Enter` to remove the highlighted pin
 
 ### VFO Management
 

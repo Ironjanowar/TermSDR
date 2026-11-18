@@ -32,6 +32,10 @@ use crate::audio::AudioControl;
 use crate::audio::demod::DemodMode;
 use crate::bookmarks::{Bookmark, BookmarkStore, default_catalog};
 use crate::types::{AppConfig, FftResult, SourceType};
+use crate::session::{
+    self, DisplaySession, ReceiverSession, ScanSession, Session, TunedChannelSession, VfoSession,
+    SESSION_VERSION,
+};
 use command_palette::{CommandAction, CommandPalette};
 use settings_modal::SettingsModal;
 use spectrum::SpectrumWidget;
@@ -96,6 +100,7 @@ const VFO_COLORS: [Color; 8] = [
 #[derive(Debug, Clone)]
 pub(crate) struct Vfo {
     pub id: usize,
+    pub name: String,
     pub freq: f64,
     pub channel_bw: f64,
     pub color: Color,
@@ -138,6 +143,8 @@ pub struct App {
     pub bw_input_buf: String,
     /// Cursor frequency in Hz (absolute position).
     pub cursor_freq: f64,
+    /// User-facing cursor name retained by native sessions.
+    pub cursor_name: String,
     /// Whether the cursor audio chain is muted.
     pub audio_muted: bool,
     /// Whether help modal is shown.
@@ -209,6 +216,7 @@ impl App {
             bw_input_mode: false,
             bw_input_buf: String::new(),
             cursor_freq: center,
+            cursor_name: "Cursor".to_string(),
             audio_muted: false,
             show_help: false,
             channel_bw: DemodMode::AM.default_channel_bw(),
@@ -328,6 +336,18 @@ impl App {
         self.send_audio_control(AudioControl::Mute(self.audio_muted));
     }
 
+    /// Reserve the next VFO id and advance the counter, or `None` when exhausted.
+    ///
+    /// The counter is bumped with `checked_add` so a session carrying a
+    /// pathological id (or a long-running app that somehow reaches the end of the
+    /// id space) can never wrap in a debug build or alias an existing VFO.
+    fn allocate_vfo_id(&mut self) -> Option<usize> {
+        let id = self.next_vfo_id;
+        let next = id.checked_add(1)?;
+        self.next_vfo_id = next;
+        Some(id)
+    }
+
     /// Sync shared averaging count for DSP thread.
     fn sync_averaging(&self) {
         if let Some(ref avg) = self.shared_averaging {
@@ -444,6 +464,22 @@ impl App {
     /// Panics if internal state (e.g., VFO indices) becomes inconsistent.
     #[allow(clippy::too_many_lines)] // large key event dispatch
     pub fn handle_key(&mut self, key: KeyEvent) {
+        // Let the palette shortcut replace the help overlay. This also clears any
+        // stale input mode that may have been hidden behind that overlay.
+        if key.code == KeyCode::Char('/')
+            && self.show_help
+            && !self.settings_modal.visible
+            && !self.command_palette_active
+        {
+            self.show_help = false;
+            self.freq_input_mode = false;
+            self.freq_input_buf.clear();
+            self.bw_input_mode = false;
+            self.bw_input_buf.clear();
+            self.command_palette.reset();
+            self.command_palette_active = true;
+            return;
+        }
         // Help modal takes priority — any key closes it
         if self.show_help {
             self.show_help = false;
@@ -575,23 +611,26 @@ impl App {
                         self.show_bookmarks_modal = false;
                         // Also create a VFO
                         if self.vfos.len() < 8 {
-                            let id = self.next_vfo_id;
-                            let color = VFO_COLORS[self.vfos.len() % 8];
-                            let vfo = Vfo {
-                                id,
-                                freq: self.cursor_freq,
-                                channel_bw: self.channel_bw,
-                                color,
-                                demod_mode: self.demod_mode,
-                            };
-                            self.vfos.push(vfo);
-                            self.next_vfo_id += 1;
-                            self.send_audio_control(AudioControl::AddVfo {
-                                id,
-                                freq: self.cursor_freq,
-                                channel_bw: self.channel_bw,
-                                mode: self.demod_mode,
-                            });
+                            if let Some(id) = self.allocate_vfo_id() {
+                                let color = VFO_COLORS[self.vfos.len() % 8];
+                                let vfo = Vfo {
+                                    id,
+                                    name: format!("VFO {id}"),
+                                    freq: self.cursor_freq,
+                                    channel_bw: self.channel_bw,
+                                    color,
+                                    demod_mode: self.demod_mode,
+                                };
+                                self.vfos.push(vfo);
+                                self.send_audio_control(AudioControl::AddVfo {
+                                    id,
+                                    freq: self.cursor_freq,
+                                    channel_bw: self.channel_bw,
+                                    mode: self.demod_mode,
+                                });
+                            } else {
+                                tracing::warn!("VFO id space exhausted; bookmark VFO not created");
+                            }
                         }
                     }
                 }
@@ -628,6 +667,9 @@ impl App {
                 }
                 KeyCode::Backspace => {
                     self.command_palette.backspace();
+                }
+                KeyCode::Char('/') if self.command_palette.error.is_some() => {
+                    self.command_palette.reset();
                 }
                 KeyCode::Char(c) => {
                     self.command_palette.type_char(c);
@@ -788,23 +830,26 @@ impl App {
             }
             KeyCode::Char('m')
                 if self.vfos.len() < 8 => {
-                    let id = self.next_vfo_id;
-                    let color = VFO_COLORS[self.vfos.len() % 8];
-                    let vfo = Vfo {
-                        id,
-                        freq: self.cursor_freq,
-                        channel_bw: self.channel_bw,
-                        color,
-                        demod_mode: self.demod_mode,
-                    };
-                    self.vfos.push(vfo);
-                    self.next_vfo_id += 1;
-                    self.send_audio_control(AudioControl::AddVfo {
-                        id,
-                        freq: self.cursor_freq,
-                        channel_bw: self.channel_bw,
-                        mode: self.demod_mode,
-                    });
+                    if let Some(id) = self.allocate_vfo_id() {
+                        let color = VFO_COLORS[self.vfos.len() % 8];
+                        let vfo = Vfo {
+                            id,
+                            name: format!("VFO {id}"),
+                            freq: self.cursor_freq,
+                            channel_bw: self.channel_bw,
+                            color,
+                            demod_mode: self.demod_mode,
+                        };
+                        self.vfos.push(vfo);
+                        self.send_audio_control(AudioControl::AddVfo {
+                            id,
+                            freq: self.cursor_freq,
+                            channel_bw: self.channel_bw,
+                            mode: self.demod_mode,
+                        });
+                    } else {
+                        tracing::warn!("VFO id space exhausted; VFO not created");
+                    }
                 }
             KeyCode::Char('x')
                 if !self.vfos.is_empty() => {
@@ -896,23 +941,26 @@ impl App {
             }
             CommandAction::AddVfo(freq) => {
                 if self.vfos.len() < 8 {
-                    let id = self.next_vfo_id;
-                    let color = VFO_COLORS[self.vfos.len() % 8];
-                    let vfo = Vfo {
-                        id,
-                        freq,
-                        channel_bw: self.channel_bw,
-                        color,
-                        demod_mode: self.demod_mode,
-                    };
-                    self.vfos.push(vfo);
-                    self.next_vfo_id += 1;
-                    self.send_audio_control(AudioControl::AddVfo {
-                        id,
-                        freq,
-                        channel_bw: self.channel_bw,
-                        mode: self.demod_mode,
-                    });
+                    if let Some(id) = self.allocate_vfo_id() {
+                        let color = VFO_COLORS[self.vfos.len() % 8];
+                        let vfo = Vfo {
+                            id,
+                            name: format!("VFO {id}"),
+                            freq,
+                            channel_bw: self.channel_bw,
+                            color,
+                            demod_mode: self.demod_mode,
+                        };
+                        self.vfos.push(vfo);
+                        self.send_audio_control(AudioControl::AddVfo {
+                            id,
+                            freq,
+                            channel_bw: self.channel_bw,
+                            mode: self.demod_mode,
+                        });
+                    } else {
+                        tracing::warn!("VFO id space exhausted; VFO not created");
+                    }
                 }
             }
             CommandAction::RemoveVfo(id) => {
@@ -976,7 +1024,199 @@ impl App {
             CommandAction::SetScanInterval(ms) => {
                 self.scan_interval_ms = ms;
             }
+            CommandAction::LoadConfig(path) => match session::load(&path) {
+                Ok(loaded) => {
+                    let mut deferred = Vec::new();
+                    if self.config.sample_rate.to_bits() != loaded.receiver.sample_rate_hz.to_bits()
+                    {
+                        deferred.push("sample rate");
+                    }
+                    if self.config.fft_size != loaded.receiver.fft_size {
+                        deferred.push("FFT size");
+                    }
+                    if self.config.gain != loaded.receiver.gain_db {
+                        deferred.push("gain");
+                    }
+                    if self.config.ppm != loaded.receiver.ppm {
+                        deferred.push("PPM");
+                    }
+                    self.apply_runtime_session(loaded);
+                    if deferred.is_empty() {
+                        self.command_palette.error = None;
+                    } else {
+                        self.command_palette_active = true;
+                        self.command_palette.error = Some(format!(
+                            "Session loaded; restart required to apply {}",
+                            deferred.join(", ")
+                        ));
+                    }
+                }
+                Err(error) => {
+                    self.command_palette_active = true;
+                    self.command_palette.error = Some(error.to_string());
+                }
+            },
+            CommandAction::SaveConfig(path) => {
+                if let Err(error) = session::save(&path, &self.session_snapshot()) {
+                    self.command_palette_active = true;
+                    self.command_palette.error = Some(error.to_string());
+                }
+            }
         }
+    }
+
+    fn session_snapshot(&self) -> Session {
+        Session {
+            version: SESSION_VERSION,
+            receiver: ReceiverSession {
+                center_frequency_hz: self.config.center_freq,
+                sample_rate_hz: self.config.sample_rate,
+                fft_size: self.config.fft_size,
+                gain_db: self.config.gain,
+                ppm: self.config.ppm,
+            },
+            cursor: TunedChannelSession {
+                name: self.cursor_name.clone(),
+                frequency_hz: self.cursor_freq,
+                mode: self.demod_mode.into(),
+                channel_bandwidth_hz: self.channel_bw,
+                muted: self.audio_muted,
+            },
+            vfos: self
+                .vfos
+                .iter()
+                .map(|vfo| VfoSession {
+                    id: vfo.id,
+                    name: vfo.name.clone(),
+                    frequency_hz: vfo.freq,
+                    mode: vfo.demod_mode.into(),
+                    channel_bandwidth_hz: vfo.channel_bw,
+                })
+                .collect(),
+            audio: self.settings_modal.session_audio(self.volume, self.squelch),
+            display: DisplaySession {
+                min_db: self.min_db,
+                max_db: self.max_db,
+                averaging: self.averaging,
+                waterfall_span_seconds: self.waterfall_time_span,
+            },
+            scan: ScanSession {
+                active: self.scan_active,
+                interval_ms: self.scan_interval_ms,
+            },
+        }
+    }
+
+    /// Apply the live-mutable portion of a session on `center_freq`.
+    ///
+    /// `center_freq` is the receiver tuning passed in by the caller: the session's own
+    /// receiver block for the in-app `/config-load` path, or the already-resolved
+    /// startup config for `apply_startup_session`. Exactly one `SetTuning` is emitted,
+    /// after the cursor is known, so the audio thread never sees the session center
+    /// and then a correcting update.
+    fn apply_session_state(&mut self, loaded: Session, center_freq: f64) {
+        let old_vfo_ids: Vec<_> = self.vfos.iter().map(|vfo| vfo.id).collect();
+        for id in old_vfo_ids {
+            self.send_audio_control(AudioControl::RemoveVfo(id));
+        }
+
+        self.config.center_freq = center_freq;
+        self.cursor_freq = loaded.cursor.frequency_hz;
+        self.publish_shared_center_freq();
+        self.send_audio_control(AudioControl::SetTuning {
+            center_freq: self.config.center_freq,
+            cursor_freq: self.cursor_freq,
+        });
+
+        self.cursor_name = loaded.cursor.name;
+        self.channel_bw = loaded.cursor.channel_bandwidth_hz;
+        self.demod_mode = loaded.cursor.mode.into();
+        self.audio_muted = loaded.cursor.muted;
+        self.volume = loaded.audio.volume;
+        self.squelch = loaded.audio.global_squelch_dbfs;
+        self.min_db = loaded.display.min_db;
+        self.max_db = loaded.display.max_db;
+        self.averaging = loaded.display.averaging;
+        self.sync_averaging();
+        self.waterfall_time_span = loaded.display.waterfall_span_seconds;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let max_waterfall_rows = (self.waterfall_time_span * 30.0) as usize;
+        self.max_waterfall_rows = max_waterfall_rows;
+        self.waterfall_history.clear();
+        self.scan_active = loaded.scan.active;
+        self.scan_interval_ms = loaded.scan.interval_ms;
+        self.last_scan_time = Instant::now();
+        self.settings_modal.apply_session_audio(&loaded.audio);
+
+        self.send_audio_control(AudioControl::SetChannelBw(self.channel_bw));
+        self.send_audio_control(AudioControl::SetDemodMode(self.demod_mode));
+        self.send_audio_control(AudioControl::Mute(self.audio_muted));
+        self.send_audio_control(AudioControl::SetVolume(self.volume));
+        self.send_audio_control(AudioControl::SetSquelch(self.squelch));
+        self.send_audio_control(AudioControl::SetAgcEnabled(loaded.audio.agc.enabled));
+        self.send_audio_control(AudioControl::SetAgcAttack(loaded.audio.agc.attack_ms));
+        self.send_audio_control(AudioControl::SetAgcDecay(loaded.audio.agc.decay_ms));
+        self.send_audio_control(AudioControl::SetAgcTarget(loaded.audio.agc.target_level));
+        self.send_audio_control(AudioControl::SetAgcMaxGain(loaded.audio.agc.max_gain_db));
+        self.send_audio_control(AudioControl::SetBandpassEnabled(
+            loaded.audio.bandpass.enabled,
+        ));
+        self.send_audio_control(AudioControl::SetBandpassLowCut(
+            loaded.audio.bandpass.low_hz,
+        ));
+        self.send_audio_control(AudioControl::SetBandpassHighCut(
+            loaded.audio.bandpass.high_hz,
+        ));
+
+        self.vfos = loaded
+            .vfos
+            .into_iter()
+            .enumerate()
+            .map(|(index, saved)| Vfo {
+                id: saved.id,
+                name: saved.name,
+                freq: saved.frequency_hz,
+                channel_bw: saved.channel_bandwidth_hz,
+                color: VFO_COLORS[index % VFO_COLORS.len()],
+                demod_mode: saved.mode.into(),
+            })
+            .collect();
+        // Session validation caps ids at `usize::MAX - 2`, so this cannot saturate.
+        self.next_vfo_id = self
+            .vfos
+            .iter()
+            .map(|vfo| vfo.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        for vfo in &self.vfos {
+            self.send_audio_control(AudioControl::AddVfo {
+                id: vfo.id,
+                freq: vfo.freq,
+                channel_bw: vfo.channel_bw,
+                mode: vfo.demod_mode,
+            });
+        }
+    }
+
+    /// Apply an in-app `/config-load` session.
+    ///
+    /// The loaded receiver center is authoritative because the user chose this file at
+    /// runtime; startup-only fields (sample rate, FFT size, gain, PPM) are left to the
+    /// caller's deferred-restart report.
+    fn apply_runtime_session(&mut self, loaded: Session) {
+        let center_freq = loaded.receiver.center_frequency_hz;
+        self.apply_session_state(loaded, center_freq);
+    }
+
+    /// Apply the durable UI/audio portion of a startup session.
+    ///
+    /// The receiver configuration is already resolved (session baseline with explicit
+    /// CLI overrides, then file metadata), so it stays untouched here; only the
+    /// cursor/VFO/audio/display/scanner state comes from `loaded`.
+    pub fn apply_startup_session(&mut self, loaded: Session) {
+        let resolved_center_freq = self.config.center_freq;
+        self.apply_session_state(loaded, resolved_center_freq);
     }
 
     /// Get the display source type.
@@ -1133,10 +1373,13 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
     frame.render_widget(status, chunks[2]);
 
     // Bandwidth input overlay
-    if app.bw_input_mode {
+    // A 3-row overlay cannot be placed in an area shorter than itself; skip it
+    // rather than computing a y that underflows (panes of 0-1 rows happen with
+    // tiny splits, resizes mid-drag, and ptys that report no window size).
+    if app.bw_input_mode && size.height >= 3 {
         let input_area = Rect {
             x: size.width / 4,
-            y: size.height / 2 - 1,
+            y: (size.height / 2).saturating_sub(1),
             width: size.width / 2,
             height: 3,
         };
@@ -1155,10 +1398,11 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
     }
 
     // Frequency input overlay
-    if app.freq_input_mode {
+    // Same guard as the bandwidth overlay: no room for 3 rows, no overlay.
+    if app.freq_input_mode && size.height >= 3 {
         let input_area = Rect {
             x: size.width / 4,
-            y: size.height / 2 - 1,
+            y: (size.height / 2).saturating_sub(1),
             width: size.width / 2,
             height: 3,
         };
@@ -1334,8 +1578,10 @@ fn draw_command_palette(frame: &mut Frame, size: Rect, palette: &CommandPalette)
     let width = (size.width * 60 / 100).max(40).min(size.width);
     
     let area = Rect {
-        x: (size.width - width) / 2,
-        y: size.height / 5,
+        x: (size.width.saturating_sub(width)) / 2,
+        // The one-fifth top offset assumes room below it; on a pane shorter than
+        // the palette the offset alone would push the area past the buffer.
+        y: (size.height / 5).min(size.height.saturating_sub(total_height)),
         width,
         height: total_height,
     };
@@ -1439,7 +1685,9 @@ fn draw_command_palette(frame: &mut Frame, size: Rect, palette: &CommandPalette)
         let name_width = 18;
         let padded_name = format!("  {:<width$}", cmd.name, width = name_width);
         let hotkey_text = format!("  [{}]", cmd.hotkey);
-        let desc_width = inner.width as usize - padded_name.len() - hotkey_text.len();
+        let desc_width = (inner.width as usize)
+            .saturating_sub(padded_name.len())
+            .saturating_sub(hotkey_text.len());
         let padded_desc = if desc_width > 0 {
             format!("{:<width$}", cmd.description, width = desc_width)
         } else {
@@ -1560,7 +1808,7 @@ fn draw_bookmarks_modal(frame: &mut Frame, size: Rect, bookmarks: &[Bookmark], s
         total_rows += 1;
     }
 
-    let visible_rows = (inner.height - 1) as usize; // -1 for hint line
+    let visible_rows = inner.height.saturating_sub(1) as usize; // -1 for hint line
     let scroll_offset = if selected_row >= visible_rows {
         selected_row - visible_rows + 1
     } else {

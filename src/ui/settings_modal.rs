@@ -5,6 +5,7 @@ const SQUELCH_OFF_DB: f32 = -120.0;
 
 use crate::audio::AudioControl;
 use crate::audio::demod::DemodMode;
+use crate::session::{AgcSession, AudioSession, BandpassSession};
 
 /// Unique identifier for each settings item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +80,24 @@ impl Default for SettingsModal {
     }
 }
 
+/// Convert a slider's `f64` value into the `f32` session field without a silent
+/// truncating `as` cast.
+///
+/// The modal stores every slider as `f64` because that is what an editable text
+/// buffer parses, while the session schema keeps AGC levels as `f32`. The
+/// conversion is explicit and finite-checked so a malformed internal value
+/// cannot smuggle a NaN into a saved session.
+fn slider_f32(value: f64) -> f32 {
+    if value.is_finite() {
+        #[allow(clippy::cast_possible_truncation)] // slider ranges are bounded well inside f32
+        let narrowed = value as f32;
+        narrowed
+    } else {
+        tracing::warn!(value, "ignoring non-finite settings slider while building a session");
+        0.0
+    }
+}
+
 impl SettingsModal {
     /// Create a new settings modal with default items.
     #[must_use] 
@@ -90,6 +109,83 @@ impl SettingsModal {
             edit_buffer: String::new(),
             items: Self::default_items(),
             showing_help: false,
+        }
+    }
+
+    pub(crate) fn session_audio(&self, volume: u8, squelch: Option<f32>) -> AudioSession {
+        let slider = |id, fallback| {
+            self.items
+                .iter()
+                .find(|item| item.id == id)
+                .and_then(|item| match item.kind {
+                    SettingsItemKind::Slider { value, .. } => Some(value),
+                    _ => None,
+                })
+                .unwrap_or(fallback)
+        };
+        let toggle = |id, fallback| {
+            self.items
+                .iter()
+                .find(|item| item.id == id)
+                .and_then(|item| match item.kind {
+                    SettingsItemKind::Toggle { value } => Some(value),
+                    _ => None,
+                })
+                .unwrap_or(fallback)
+        };
+        AudioSession {
+            volume,
+            global_squelch_dbfs: squelch,
+            agc: AgcSession {
+                enabled: toggle(SettingsItemId::AgcEnabled, true),
+                attack_ms: slider(SettingsItemId::AgcAttack, 10.0),
+                decay_ms: slider(SettingsItemId::AgcDecay, 250.0),
+                target_level: slider_f32(slider(SettingsItemId::AgcTarget, 0.3)),
+                max_gain_db: slider_f32(slider(SettingsItemId::AgcMaxGain, 50.0)),
+            },
+            bandpass: BandpassSession {
+                enabled: toggle(SettingsItemId::BandpassEnabled, false),
+                low_hz: slider(SettingsItemId::BandpassLowCut, 300.0),
+                high_hz: slider(SettingsItemId::BandpassHighCut, 3000.0),
+            },
+        }
+    }
+
+    pub(crate) fn apply_session_audio(&mut self, audio: &AudioSession) {
+        for item in &mut self.items {
+            match (&mut item.kind, item.id) {
+                (SettingsItemKind::Slider { value, .. }, SettingsItemId::Volume) => {
+                    *value = f64::from(audio.volume);
+                }
+                (SettingsItemKind::Slider { value, .. }, SettingsItemId::Squelch) => {
+                    *value = f64::from(audio.global_squelch_dbfs.unwrap_or(SQUELCH_OFF_DB));
+                }
+                (SettingsItemKind::Toggle { value }, SettingsItemId::AgcEnabled) => {
+                    *value = audio.agc.enabled;
+                }
+                (SettingsItemKind::Slider { value, .. }, SettingsItemId::AgcAttack) => {
+                    *value = audio.agc.attack_ms;
+                }
+                (SettingsItemKind::Slider { value, .. }, SettingsItemId::AgcDecay) => {
+                    *value = audio.agc.decay_ms;
+                }
+                (SettingsItemKind::Slider { value, .. }, SettingsItemId::AgcTarget) => {
+                    *value = f64::from(audio.agc.target_level);
+                }
+                (SettingsItemKind::Slider { value, .. }, SettingsItemId::AgcMaxGain) => {
+                    *value = f64::from(audio.agc.max_gain_db);
+                }
+                (SettingsItemKind::Toggle { value }, SettingsItemId::BandpassEnabled) => {
+                    *value = audio.bandpass.enabled;
+                }
+                (SettingsItemKind::Slider { value, .. }, SettingsItemId::BandpassLowCut) => {
+                    *value = audio.bandpass.low_hz;
+                }
+                (SettingsItemKind::Slider { value, .. }, SettingsItemId::BandpassHighCut) => {
+                    *value = audio.bandpass.high_hz;
+                }
+                _ => {}
+            }
         }
     }
 

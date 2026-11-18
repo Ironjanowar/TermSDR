@@ -28,14 +28,14 @@ use ratatui::{
     Frame, Terminal,
 };
 
-use crate::audio::AudioControl;
 use crate::audio::demod::DemodMode;
-use crate::bookmarks::{Bookmark, BookmarkStore, default_catalog};
-use crate::types::{AppConfig, FftResult, SourceType};
+use crate::audio::AudioControl;
+use crate::bookmarks::{default_catalog, Bookmark, BookmarkStore};
 use crate::session::{
     self, DisplaySession, ReceiverSession, ScanSession, Session, TunedChannelSession, VfoSession,
     SESSION_VERSION,
 };
+use crate::types::{AppConfig, FftResult, SourceType};
 use command_palette::{CommandAction, CommandPalette};
 use settings_modal::SettingsModal;
 use spectrum::SpectrumWidget;
@@ -44,18 +44,6 @@ use waterfall::WaterfallWidget;
 
 /// `PageUp`/`PageDown` cursor movement step in Hz (1 MHz).
 const PAGE_CURSOR_STEP_HZ: f64 = 1_000_000.0;
-
-/// Zoom-in bandwidth multiplier (reduce by 20%).
-const ZOOM_IN_FACTOR: f64 = 0.8;
-
-/// Zoom-out bandwidth multiplier (increase by 25%).
-const ZOOM_OUT_FACTOR: f64 = 1.25;
-
-/// Minimum allowed sample rate / bandwidth in Hz (256 kHz).
-const MIN_BANDWIDTH: f64 = 256_000.0;
-
-/// Maximum allowed sample rate / bandwidth in Hz (3.2 MHz).
-const MAX_BANDWIDTH: f64 = 3_200_000.0;
 
 /// Minimum channel bandwidth in Hz (1 kHz).
 const MIN_CHANNEL_BW: f64 = 1_000.0;
@@ -122,6 +110,12 @@ pub struct App {
     pub config: AppConfig,
     /// Latest FFT result to display.
     pub latest_fft: Option<FftResult>,
+    /// Display zoom: the sub-window of the captured frame currently on screen.
+    ///
+    /// Kept apart from `config.sample_rate`, which is the capture rate reported to
+    /// the DSP and audio threads. Zooming changes only this, so it can never
+    /// retune hardware or interrupt audio.
+    pub(crate) zoom: frequency_control::ZoomState,
     /// Waterfall history (newest first).
     pub waterfall_history: Vec<Vec<f32>>,
     /// Maximum waterfall rows to keep.
@@ -199,11 +193,20 @@ pub struct App {
 
 impl App {
     #[must_use] 
-    pub fn new(config: AppConfig, audio_control_tx: Option<crossbeam_channel::Sender<AudioControl>>) -> Self {
+    pub fn new(
+        config: AppConfig,
+        audio_control_tx: Option<crossbeam_channel::Sender<AudioControl>>,
+    ) -> Self {
         let center = config.center_freq;
+        let zoom = frequency_control::ZoomState::from_frame(frequency_control::CapturedFrame {
+            center_freq: config.center_freq,
+            span_hz: config.sample_rate,
+            bin_count: config.fft_size,
+        });
         Self {
             config,
             latest_fft: None,
+            zoom,
             waterfall_history: Vec::new(),
             max_waterfall_rows: DEFAULT_MAX_WATERFALL_ROWS,
             waterfall_time_span: 20.0,
@@ -309,7 +312,7 @@ impl App {
         let update = frequency_control::move_cursor(
             self.cursor_freq,
             viewport.center_freq,
-            viewport.sample_rate,
+            viewport.span_hz,
             delta_hz,
         );
         self.scan_active = false;
@@ -385,19 +388,15 @@ impl App {
         if self
             .latest_fft
             .as_ref()
-            .is_some_and(|previous| {
-                !frequency_control::Viewport {
-                    center_freq: previous.center_freq,
-                    sample_rate: previous.sample_rate,
-                }
-                .same_geometry(frequency_control::Viewport {
-                    center_freq: fft.center_freq,
-                    sample_rate: fft.sample_rate,
-                })
-            })
+            .is_some_and(|previous| !same_capture_geometry(previous, &fft))
         {
             self.waterfall_history.clear();
         }
+
+        // Keep the displayed window aligned with the capture that produced this
+        // frame: a new rate resets the zoom, a new center re-anchors on the cursor.
+        self.zoom
+            .follow_capture(capture_frame(&fft), self.cursor_freq);
 
         // Update waterfall history
         self.waterfall_history.insert(0, fft.bins.clone());
@@ -645,8 +644,7 @@ impl App {
                 KeyCode::Esc => {
                     self.command_palette_active = false;
                 }
-                KeyCode::Enter => {
-                    match self.command_palette.execute() {
+                KeyCode::Enter => match self.command_palette.execute() {
                         Ok(action) => {
                             self.command_palette_active = false;
                             self.apply_command_action(action);
@@ -654,8 +652,7 @@ impl App {
                         Err(msg) => {
                             self.command_palette.error = Some(msg);
                         }
-                    }
-                }
+                },
                 KeyCode::Up => {
                     self.command_palette.select_up();
                 }
@@ -707,7 +704,9 @@ impl App {
             match key.code {
                 KeyCode::Enter => {
                     if let Ok(bw) = crate::config::parse_frequency(&self.bw_input_buf) {
-                        self.config.sample_rate = bw;
+                        // Sets the width of the *view*; the capture keeps its rate.
+                        self.sync_zoom_to_capture();
+                        self.zoom.set_span(bw, self.cursor_freq);
                     }
                     self.bw_input_mode = false;
                     self.bw_input_buf.clear();
@@ -735,7 +734,12 @@ impl App {
                 self.should_quit = true;
             }
             KeyCode::Char('s') => {
-                self.settings_modal.open(self.volume, self.squelch, self.channel_bw, self.demod_mode);
+                self.settings_modal.open(
+                    self.volume,
+                    self.squelch,
+                    self.channel_bw,
+                    self.demod_mode,
+                );
             }
             KeyCode::Char('S') => {
                 self.scan_active = !self.scan_active;
@@ -771,12 +775,14 @@ impl App {
                 self.config.gain = Some((g - 1.0).max(0.0));
             }
             KeyCode::Char('+' | '=') => {
-                // Zoom in (decrease displayed bandwidth)
-                self.config.sample_rate = (self.config.sample_rate * ZOOM_IN_FACTOR).max(MIN_BANDWIDTH);
+                // Zoom the display around the cursor; capture rate is untouched.
+                self.sync_zoom_to_capture();
+                self.zoom.zoom_in(self.cursor_freq);
             }
             KeyCode::Char('-') => {
-                // Zoom out (increase displayed bandwidth)
-                self.config.sample_rate = (self.config.sample_rate * ZOOM_OUT_FACTOR).min(MAX_BANDWIDTH);
+                // Zoom the display out around the cursor, up to the captured band.
+                self.sync_zoom_to_capture();
+                self.zoom.zoom_out(self.cursor_freq);
             }
             KeyCode::Char('f') => {
                 self.freq_input_mode = true;
@@ -899,7 +905,10 @@ impl App {
             CommandAction::SetFrequency(f) => {
                 self.tune_center_and_cursor(f);
             }
-            CommandAction::SetBandwidth(bw) => self.config.sample_rate = bw,
+            CommandAction::SetBandwidth(bw) => {
+                self.sync_zoom_to_capture();
+                self.zoom.set_span(bw, self.cursor_freq);
+            }
             CommandAction::SetChannelBw(bw) => {
                 self.channel_bw = bw;
                 self.send_audio_control(AudioControl::SetChannelBw(self.channel_bw));
@@ -924,8 +933,14 @@ impl App {
             CommandAction::TuneDown => self.move_cursor_by(-frequency_control::CURSOR_STEP_FINE_HZ),
             CommandAction::TuneCoarseUp => self.move_cursor_by(frequency_control::CURSOR_STEP_COARSE_HZ),
             CommandAction::TuneCoarseDown => self.move_cursor_by(-frequency_control::CURSOR_STEP_COARSE_HZ),
-            CommandAction::ZoomIn => self.config.sample_rate = (self.config.sample_rate * ZOOM_IN_FACTOR).max(MIN_BANDWIDTH),
-            CommandAction::ZoomOut => self.config.sample_rate = (self.config.sample_rate * ZOOM_OUT_FACTOR).min(MAX_BANDWIDTH),
+            CommandAction::ZoomIn => {
+                self.sync_zoom_to_capture();
+                self.zoom.zoom_in(self.cursor_freq);
+            }
+            CommandAction::ZoomOut => {
+                self.sync_zoom_to_capture();
+                self.zoom.zoom_out(self.cursor_freq);
+            }
             CommandAction::SetVolume(v) => {
                 self.volume = v;
                 self.send_audio_control(AudioControl::SetVolume(self.volume));
@@ -1229,34 +1244,47 @@ impl App {
         }
     }
 
-    /// Get the geometry of the frame currently displayed on screen.
+    /// The frequency window currently drawn on screen, zoom included.
+    ///
+    /// This is the authority for every displayed frequency-to-column conversion:
+    /// spectrum, waterfall, cursor and bandwidth markers, and status geometry.
+    /// Before the first frame arrives there is nothing to zoom into, so the
+    /// configured capture geometry stands in.
     #[must_use]
-    pub(crate) fn display_viewport(&self) -> frequency_control::Viewport {
-        self.latest_fft.as_ref().map_or(
-            frequency_control::Viewport {
+    pub(crate) fn display_viewport(&self) -> frequency_control::ViewWindow {
+        if self.latest_fft.is_some() {
+            self.zoom.window
+        } else {
+            frequency_control::ViewWindow {
                 center_freq: self.config.center_freq,
-                sample_rate: self.config.sample_rate,
-            },
-            |fft| frequency_control::Viewport {
-                center_freq: fft.center_freq,
-                sample_rate: fft.sample_rate,
-            },
-        )
+                span_hz: self.config.sample_rate,
+            }
+        }
     }
 
-    /// Get the relative cursor position (0.0–1.0) within the displayed frame.
+    /// Re-base the zoom on the configured capture.
+    ///
+    /// A retune or rate change rewrites `config` directly, so any zoom action has
+    /// to re-read the capture before it computes a new window; otherwise it would
+    /// resize a window belonging to a capture that no longer exists.
+    fn sync_zoom_to_capture(&mut self) {
+        self.zoom.follow_capture(
+            frequency_control::CapturedFrame {
+                center_freq: self.config.center_freq,
+                span_hz: self.config.sample_rate,
+                bin_count: self
+                    .latest_fft
+                    .as_ref()
+                    .map_or(self.config.fft_size, |fft| fft.bins.len()),
+            },
+            self.cursor_freq,
+        );
+    }
+
+    /// Get the relative cursor position (0.0–1.0) within the displayed window.
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)] // display precision is sufficient
     pub(crate) fn cursor_pos(&self) -> Option<f32> {
-        let viewport = self.display_viewport();
-        if !viewport.sample_rate.is_finite() || viewport.sample_rate <= 0.0 {
-            return None;
-        }
-        let start = viewport.center_freq - viewport.sample_rate / 2.0;
-        let pos = ((self.cursor_freq - start) / viewport.sample_rate) as f32;
-        pos.is_finite()
-            .then_some(pos)
-            .filter(|pos| (0.0..=1.0).contains(pos))
+        self.display_viewport().fraction_of(self.cursor_freq)
     }
 
     /// Get the frequency at the current cursor position.
@@ -1278,6 +1306,23 @@ impl App {
             fft.bins.get(bin_index).copied()
         })
     }
+}
+
+/// The capture window described by one FFT frame.
+fn capture_frame(fft: &FftResult) -> frequency_control::CapturedFrame {
+    frequency_control::CapturedFrame {
+        center_freq: fft.center_freq,
+        span_hz: fft.sample_rate,
+        bin_count: fft.bins.len(),
+    }
+}
+
+/// Whether two frames come from captures covering the same frequency window.
+///
+/// Waterfall rows are drawn under one axis, so a frame from a different capture
+/// must discard them rather than relabel old rows.
+fn same_capture_geometry(previous: &FftResult, next: &FftResult) -> bool {
+    capture_frame(previous).same_geometry(capture_frame(next))
 }
 
 /// Initialize the terminal for TUI.
@@ -1324,42 +1369,33 @@ pub fn draw_ui(frame: &mut Frame, app: &App) {
         .map(|v| (v.freq, v.channel_bw, v.color, v.id))
         .collect();
     let viewport = app.display_viewport();
-    let spectrum = SpectrumWidget::new(
-        app.latest_fft.as_ref(),
-        app.min_db,
-        app.max_db,
-    ).with_cursor(
-        app.cursor_pos(),
-        app.cursor_frequency(),
-        app.cursor_db(),
-    ).with_bandwidth(
-        Some(app.channel_bw),
-        viewport.center_freq,
-        viewport.sample_rate,
-    ).with_vfos(&vfo_data)
+    let spectrum = SpectrumWidget::new(app.latest_fft.as_ref(), app.min_db, app.max_db)
+        .with_cursor(app.cursor_pos(), app.cursor_frequency(), app.cursor_db())
+        .with_bandwidth(Some(app.channel_bw), viewport.center_freq, viewport.span_hz)
+        .with_window(viewport, app.zoom.visible_bin_range())
+        .with_vfos(&vfo_data)
     .with_squelch(app.squelch)
     .with_scan(app.scan_active);
     frame.render_widget(spectrum, chunks[0]);
 
     // Waterfall
-    let waterfall = WaterfallWidget::new(
-        &app.waterfall_history,
-        app.min_db,
-        app.max_db,
-    ).with_cursor(app.cursor_pos())
+    let waterfall = WaterfallWidget::new(&app.waterfall_history, app.min_db, app.max_db)
+        .with_cursor(app.cursor_pos())
     .with_bandwidth(
         Some(app.channel_bw),
         app.cursor_freq,
         viewport.center_freq,
-        viewport.sample_rate,
-    ).with_vfos(&vfo_data);
+            viewport.span_hz,
+        )
+        .with_bin_range(app.zoom.visible_bin_range())
+        .with_vfos(&vfo_data);
     frame.render_widget(waterfall, chunks[1]);
 
     // Status bar
     let cursor_info = Some((app.cursor_frequency(), app.cursor_db()));
     let status = StatusBarWidget::new(
         viewport.center_freq,
-        viewport.sample_rate,
+        viewport.span_hz,
         app.config.gain,
         app.display_source(),
         app.fps,
@@ -1456,9 +1492,12 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
 
     let lines = vec![
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  Navigation", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "  Navigation",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(vec![
             Span::styled("    ←/→ ", Style::default().fg(Color::Cyan)),
             Span::styled("Move cursor ±1 kHz", Style::default().fg(Color::White)),
@@ -1473,27 +1512,42 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
         ]),
         Line::from(vec![
             Span::styled("              ", Style::default().fg(Color::Cyan)),
-            Span::styled("Arrows and PgUp/PgDn move cursor; auto-pan at edges", Style::default().fg(Color::White)),
+            Span::styled(
+                "Arrows and PgUp/PgDn move cursor; auto-pan at edges",
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(vec![
             Span::styled("    f         ", Style::default().fg(Color::Cyan)),
-            Span::styled("Jump to frequency (type e.g. 118.1M)", Style::default().fg(Color::White)),
+            Span::styled(
+                "Jump to frequency (type e.g. 118.1M)",
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(vec![
             Span::styled("    b         ", Style::default().fg(Color::Cyan)),
-            Span::styled("Set bandwidth (type e.g. 2M, 500k)", Style::default().fg(Color::White)),
+            Span::styled(
+                "Set displayed bandwidth (e.g. 20k, 500k)",
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(vec![
             Span::styled("    c ", Style::default().fg(Color::Cyan)),
             Span::styled("Center view on cursor", Style::default().fg(Color::White)),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  Display", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "  Display",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(vec![
             Span::styled("    + -       ", Style::default().fg(Color::Cyan)),
-            Span::styled("Zoom bandwidth in/out", Style::default().fg(Color::White)),
+            Span::styled(
+                "Zoom display in/out (capture unchanged)",
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(vec![
             Span::styled("    ↑ ↓       ", Style::default().fg(Color::Cyan)),
@@ -1501,11 +1555,17 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
         ]),
         Line::from(vec![
             Span::styled("    Space ", Style::default().fg(Color::Cyan)),
-            Span::styled("Mute/unmute cursor audio only", Style::default().fg(Color::White)),
+            Span::styled(
+                "Mute/unmute cursor audio only",
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(vec![
             Span::styled("    w / W     ", Style::default().fg(Color::Cyan)),
-            Span::styled("Widen/narrow channel bandwidth", Style::default().fg(Color::White)),
+            Span::styled(
+                "Widen/narrow channel bandwidth",
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(vec![
             Span::styled("    v / V     ", Style::default().fg(Color::Cyan)),
@@ -1513,7 +1573,10 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
         ]),
         Line::from(vec![
             Span::styled("    m         ", Style::default().fg(Color::Cyan)),
-            Span::styled("Pin VFO at cursor position", Style::default().fg(Color::White)),
+            Span::styled(
+                "Pin VFO at cursor position",
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(vec![
             Span::styled("    x         ", Style::default().fg(Color::Cyan)),
@@ -1521,40 +1584,59 @@ fn draw_help_modal(frame: &mut Frame, size: Rect) {
         ]),
         Line::from(vec![
             Span::styled("    d         ", Style::default().fg(Color::Cyan)),
-            Span::styled("Cycle demod mode (AM \u{2192} FM \u{2192} NFM)", Style::default().fg(Color::White)),
+            Span::styled(
+                "Cycle demod mode (AM \u{2192} FM \u{2192} NFM)",
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(vec![
             Span::styled("    s         ", Style::default().fg(Color::Cyan)),
-            Span::styled("Toggle scan mode (auto-tune to strongest signal)", Style::default().fg(Color::White)),
+            Span::styled(
+                "Toggle scan mode (auto-tune to strongest signal)",
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(vec![
             Span::styled("    t / T     ", Style::default().fg(Color::Cyan)),
-            Span::styled("Waterfall time span +/- 5s", Style::default().fg(Color::White)),
+            Span::styled(
+                "Waterfall time span +/- 5s",
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  General", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "  General",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(vec![
             Span::styled("    ?         ", Style::default().fg(Color::Cyan)),
             Span::styled("Show this help", Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
             Span::styled("    /         ", Style::default().fg(Color::Cyan)),
-            Span::styled("Open command palette (/volume, /squelch)", Style::default().fg(Color::White)),
+            Span::styled(
+                "Open command palette (/volume, /squelch)",
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(vec![
             Span::styled("              ", Style::default().fg(Color::Cyan)),
-            Span::styled("/bookmarks, /bookmark-add <name>", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "/bookmarks, /bookmark-add <name>",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
         Line::from(vec![
             Span::styled("    q / Esc   ", Style::default().fg(Color::Cyan)),
             Span::styled("Quit", Style::default().fg(Color::White)),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  Press any key to close", Style::default().fg(Color::DarkGray)),
-        ]),
+        Line::from(vec![Span::styled(
+            "  Press any key to close",
+            Style::default().fg(Color::DarkGray),
+        )]),
     ];
 
     let paragraph = Paragraph::new(lines).block(block);
@@ -1628,9 +1710,10 @@ fn draw_command_palette(frame: &mut Frame, size: Rect, palette: &CommandPalette)
                 height: 1,
             };
             let error_text = palette.error.as_deref().unwrap_or("");
-            let error_line = Paragraph::new(Line::from(
-                Span::styled(format!("  ⚠ {error_text}"), Style::default().fg(Color::Red))
-            ));
+            let error_line = Paragraph::new(Line::from(Span::styled(
+                format!("  ⚠ {error_text}"),
+                Style::default().fg(Color::Red),
+            )));
             frame.render_widget(error_line, error_area);
         }
         1
@@ -1646,9 +1729,10 @@ fn draw_command_palette(frame: &mut Frame, size: Rect, palette: &CommandPalette)
             width: inner.width,
             height: 1,
         };
-        let sep = Paragraph::new(Line::from(
-            Span::styled("─".repeat(inner.width as usize), Style::default().fg(Color::DarkGray))
-        ));
+        let sep = Paragraph::new(Line::from(Span::styled(
+            "─".repeat(inner.width as usize),
+            Style::default().fg(Color::DarkGray),
+        )));
         frame.render_widget(sep, sep_area);
     }
     
@@ -1747,8 +1831,16 @@ fn draw_vfo_delete_modal(frame: &mut Frame, size: Rect, vfos: &[Vfo]) {
         let bw_str = format_frequency(vfo.channel_bw);
         let label = format!("  [{}] {} {}  BW: {}", vfo.id, vfo.demod_mode.label(), freq_str, bw_str);
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(label, Style::default().fg(vfo.color)))),
-            Rect { x: inner.x, y, width: inner.width, height: 1 },
+            Paragraph::new(Line::from(Span::styled(
+                label,
+                Style::default().fg(vfo.color),
+            ))),
+            Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            },
         );
     }
 
@@ -1759,7 +1851,12 @@ fn draw_vfo_delete_modal(frame: &mut Frame, size: Rect, vfos: &[Vfo]) {
                 "  Press number to delete, Esc to cancel",
                 Style::default().fg(Color::DarkGray),
             ))),
-            Rect { x: inner.x, y: hint_y, width: inner.width, height: 1 },
+            Rect {
+                x: inner.x,
+                y: hint_y,
+                width: inner.width,
+                height: 1,
+            },
         );
     }
 }
@@ -1995,9 +2092,7 @@ pub fn show_source_selection(
 }
 
 /// Show a file path input dialog.
-fn show_file_input(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-) -> Result<Option<String>> {
+fn show_file_input(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<Option<String>> {
     let mut input = String::new();
     loop {
         terminal.draw(|frame| {
@@ -2015,9 +2110,10 @@ fn show_file_input(
                     Span::styled("█", Style::default().fg(Color::Yellow)),
                 ]),
                 Line::from(""),
-                Line::from(vec![
-                    Span::styled("  Enter to confirm, Esc to cancel", Style::default().fg(Color::DarkGray)),
-                ]),
+                Line::from(vec![Span::styled(
+                    "  Enter to confirm, Esc to cancel",
+                    Style::default().fg(Color::DarkGray),
+                )]),
             ];
 
             let paragraph = Paragraph::new(lines).block(block);
@@ -2046,7 +2142,7 @@ fn show_file_input(
 /// Draw the settings modal.
 #[allow(clippy::too_many_lines)] // settings modal UI layout
 fn draw_settings_modal(frame: &mut Frame, size: Rect, modal: &SettingsModal) {
-    use settings_modal::{SettingsItemKind, format_display_value};
+    use settings_modal::{format_display_value, SettingsItemKind};
 
     // Calculate total rows: items + section headers + title + footer
     let section_headers = modal.section_headers();
@@ -2096,7 +2192,12 @@ fn draw_settings_modal(frame: &mut Frame, size: Rect, modal: &SettingsModal) {
                         centered,
                         Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
                     ))),
-                    Rect { x: inner.x, y: row_y, width: inner.width, height: 1 },
+                    Rect {
+                        x: inner.x,
+                        y: row_y,
+                        width: inner.width,
+                        height: 1,
+                    },
                 );
                 row_y += 1;
                 if row_y >= inner.y + inner.height.saturating_sub(1) {
@@ -2141,7 +2242,12 @@ fn draw_settings_modal(frame: &mut Frame, size: Rect, modal: &SettingsModal) {
             _ => String::new(),
         };
 
-        let row_area = Rect { x: inner.x, y: row_y, width: inner.width, height: 1 };
+        let row_area = Rect {
+            x: inner.x,
+            y: row_y,
+            width: inner.width,
+            height: 1,
+        };
         if is_selected {
             frame.render_widget(Clear, row_area);
         }
@@ -2183,7 +2289,12 @@ fn draw_settings_modal(frame: &mut Frame, size: Rect, modal: &SettingsModal) {
                 hint,
                 Style::default().fg(Color::DarkGray),
             ))),
-            Rect { x: inner.x, y: hint_y, width: inner.width, height: 1 },
+            Rect {
+                x: inner.x,
+                y: hint_y,
+                width: inner.width,
+                height: 1,
+            },
         );
     }
 
@@ -2228,9 +2339,10 @@ fn draw_settings_modal(frame: &mut Frame, size: Rect, modal: &SettingsModal) {
                 .borders(Borders::ALL)
                 .style(Style::default().fg(Color::Yellow).bg(Color::Black));
             frame.render_widget(Clear, tooltip_area);
-            let help_lines: Vec<Line> = lines.iter().map(|l| {
-                Line::from(Span::styled(l.as_str(), Style::default().fg(Color::White)))
-            }).collect();
+            let help_lines: Vec<Line> = lines
+                .iter()
+                .map(|l| Line::from(Span::styled(l.as_str(), Style::default().fg(Color::White))))
+                .collect();
             let help_para = Paragraph::new(help_lines).block(tooltip_block);
             frame.render_widget(help_para, tooltip_area);
         }
@@ -2682,7 +2794,7 @@ mod tests {
         });
 
         assert_frequency_eq(app.display_viewport().center_freq, 100_000_000.0);
-        assert_frequency_eq(app.display_viewport().sample_rate, 2_000_000.0);
+        assert_frequency_eq(app.display_viewport().span_hz, 2_000_000.0);
         assert_abs_diff_eq!(app.cursor_pos().unwrap(), 0.75, epsilon = f32::EPSILON);
         assert_abs_diff_eq!(app.cursor_db().unwrap(), -40.0, epsilon = f32::EPSILON);
     }
@@ -2695,7 +2807,7 @@ mod tests {
         app.cursor_freq = 50_100_000.0;
 
         assert_frequency_eq(app.display_viewport().center_freq, 50_000_000.0);
-        assert_frequency_eq(app.display_viewport().sample_rate, 400_000.0);
+        assert_frequency_eq(app.display_viewport().span_hz, 400_000.0);
         assert_abs_diff_eq!(app.cursor_pos().unwrap(), 0.75, epsilon = f32::EPSILON);
         assert_eq!(app.cursor_db(), None);
     }
@@ -3120,6 +3232,7 @@ mod tests {
     fn test_app_bw_input_mode() {
         let config = AppConfig::default();
         let mut app = App::new(config, None);
+        app.push_fft(captured_frame(2_048_000.0, 2048));
 
         app.handle_key(KeyEvent::from(KeyCode::Char('b')));
         assert!(app.bw_input_mode);
@@ -3132,21 +3245,22 @@ mod tests {
 
         app.handle_key(KeyEvent::from(KeyCode::Enter));
         assert!(!app.bw_input_mode);
-        assert!((app.config.sample_rate - 1_500_000.0).abs() < 1.0);
+        assert_abs_diff_eq!(app.display_viewport().span_hz, 1_500_000.0, epsilon = 1.0);
     }
 
     #[test]
     fn test_app_bw_input_cancel() {
         let config = AppConfig::default();
         let mut app = App::new(config, None);
-        let orig = app.config.sample_rate;
+        app.push_fft(captured_frame(2_048_000.0, 2048));
+        let orig = app.display_viewport().span_hz;
 
         app.handle_key(KeyEvent::from(KeyCode::Char('b')));
         app.handle_key(KeyEvent::from(KeyCode::Char('5')));
         app.handle_key(KeyEvent::from(KeyCode::Esc));
 
         assert!(!app.bw_input_mode);
-        assert!((app.config.sample_rate - orig).abs() < 1.0);
+        assert_abs_diff_eq!(app.display_viewport().span_hz, orig, epsilon = 1.0);
     }
 
     #[test]
@@ -3384,21 +3498,198 @@ mod tests {
         assert!(app.config.center_freq > 100e6);
     }
 
+    // === Visualization zoom ===
+
+    /// A capture frame spanning `span_hz` around 100 MHz, with `bins` bins.
+    fn captured_frame(span_hz: f64, bins: usize) -> FftResult {
+        FftResult {
+            bins: vec![-70.0; bins],
+            center_freq: 100_000_000.0,
+            sample_rate: span_hz,
+        }
+    }
+
+    fn zoomed_app(span_hz: f64) -> App {
+        let mut app = App::new(AppConfig::default(), None);
+        app.config.center_freq = 100_000_000.0;
+        app.config.sample_rate = span_hz;
+        app.push_fft(captured_frame(span_hz, 2048));
+        app
+    }
+
     #[test]
-    fn test_zoom_bandwidth_extremes_repeatedly() {
-        let config = AppConfig::default();
-        let mut app = App::new(config, None);
-        // Zoom in repeatedly
-        for _ in 0..50 {
+    fn plus_zooms_the_display_without_retuning_the_receiver() {
+        let mut app = zoomed_app(2_048_000.0);
+        let receiver_rate = app.config.sample_rate;
+        let receiver_center = app.config.center_freq;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('+')));
+
+        assert_abs_diff_eq!(app.display_viewport().span_hz, 1_024_000.0, epsilon = 1.0);
+        // A display zoom must not touch the capture: retuning here would drop audio
+        // and throw away the wider band the zoom is supposed to inspect.
+        assert_frequency_eq(app.config.sample_rate, receiver_rate);
+        assert_frequency_eq(app.config.center_freq, receiver_center);
+    }
+
+    #[test]
+    fn minus_zooms_the_display_back_out_to_the_whole_capture() {
+        let mut app = zoomed_app(2_048_000.0);
+        for _ in 0..3 {
             app.handle_key(KeyEvent::from(KeyCode::Char('+')));
         }
-        assert!(app.config.sample_rate >= 256_000.0); // min clamp
+        assert_abs_diff_eq!(app.display_viewport().span_hz, 256_000.0, epsilon = 1.0);
 
-        // Zoom out repeatedly
-        for _ in 0..50 {
+        for _ in 0..3 {
             app.handle_key(KeyEvent::from(KeyCode::Char('-')));
         }
-        assert!(app.config.sample_rate <= 3_200_000.0); // max clamp
+
+        assert_abs_diff_eq!(app.display_viewport().span_hz, 2_048_000.0, epsilon = 1.0);
+    }
+
+    #[test]
+    fn zooming_in_holds_the_cursor_frequency_at_its_screen_position() {
+        let mut app = zoomed_app(2_048_000.0);
+        app.cursor_freq = 100_400_000.0;
+        let before = app.cursor_pos().expect("cursor must be visible");
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('+')));
+
+        assert_frequency_eq(app.cursor_freq, 100_400_000.0);
+        assert_abs_diff_eq!(
+            app.cursor_pos().expect("cursor must stay visible"),
+            before,
+            epsilon = 1.0e-6
+        );
+    }
+
+    #[test]
+    fn zooming_never_narrows_past_a_few_real_bins() {
+        let mut app = zoomed_app(2_048_000.0);
+
+        for _ in 0..80 {
+            app.handle_key(KeyEvent::from(KeyCode::Char('+')));
+        }
+
+        // 2.048 MS/s over 2048 bins is 1 kHz/bin; four bins is the floor.
+        assert_abs_diff_eq!(app.display_viewport().span_hz, 4_000.0, epsilon = 1.0);
+    }
+
+    #[test]
+    fn zooming_out_stops_at_the_captured_band() {
+        let mut app = zoomed_app(2_048_000.0);
+        app.handle_key(KeyEvent::from(KeyCode::Char('+')));
+
+        for _ in 0..80 {
+            app.handle_key(KeyEvent::from(KeyCode::Char('-')));
+        }
+
+        assert_abs_diff_eq!(app.display_viewport().span_hz, 2_048_000.0, epsilon = 1.0);
+        assert_frequency_eq(app.display_viewport().center_freq, 100_000_000.0);
+    }
+
+    #[test]
+    fn zoom_emits_no_audio_control() {
+        let (tx, rx) = audio_controls();
+        let mut app = App::new(AppConfig::default(), Some(tx));
+        app.config.sample_rate = 2_048_000.0;
+        app.push_fft(captured_frame(2_048_000.0, 2048));
+        while rx.try_recv().is_ok() {}
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('+')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('-')));
+
+        // Zoom is a display concern: it must not retune the audio chain.
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn the_bandwidth_prompt_sets_the_display_span_exactly() {
+        let mut app = zoomed_app(2_048_000.0);
+
+        for key in [
+            KeyCode::Char('b'),
+            KeyCode::Char('2'),
+            KeyCode::Char('0'),
+            KeyCode::Char('k'),
+            KeyCode::Enter,
+        ] {
+            app.handle_key(KeyEvent::from(key));
+        }
+
+        assert_abs_diff_eq!(app.display_viewport().span_hz, 20_000.0, epsilon = 1.0);
+        assert_frequency_eq(app.config.sample_rate, 2_048_000.0);
+    }
+
+    #[test]
+    fn the_bandwidth_prompt_clamps_to_the_captured_band() {
+        let mut app = zoomed_app(2_048_000.0);
+
+        for key in [
+            KeyCode::Char('b'),
+            KeyCode::Char('5'),
+            KeyCode::Char('0'),
+            KeyCode::Char('M'),
+            KeyCode::Enter,
+        ] {
+            app.handle_key(KeyEvent::from(key));
+        }
+
+        assert_abs_diff_eq!(app.display_viewport().span_hz, 2_048_000.0, epsilon = 1.0);
+    }
+
+    #[test]
+    fn an_invalid_bandwidth_prompt_leaves_the_view_untouched() {
+        let mut app = zoomed_app(2_048_000.0);
+        app.handle_key(KeyEvent::from(KeyCode::Char('+')));
+        let span = app.display_viewport().span_hz;
+
+        for key in [KeyCode::Char('b'), KeyCode::Char('x'), KeyCode::Enter] {
+            app.handle_key(KeyEvent::from(key));
+        }
+
+        assert_abs_diff_eq!(app.display_viewport().span_hz, span, epsilon = 1.0);
+    }
+
+    #[test]
+    fn a_capture_at_a_new_rate_resets_the_zoom() {
+        let mut app = zoomed_app(2_048_000.0);
+        app.handle_key(KeyEvent::from(KeyCode::Char('+')));
+
+        app.push_fft(captured_frame(1_024_000.0, 2048));
+
+        assert_abs_diff_eq!(app.display_viewport().span_hz, 1_024_000.0, epsilon = 1.0);
+        assert!(
+            app.waterfall_history.len() == 1,
+            "old rows must not survive a geometry change"
+        );
+    }
+
+    #[test]
+    fn the_spectrum_is_reshaped_by_the_zoom() {
+        let mut app = zoomed_app(2_048_000.0);
+        assert_eq!(app.zoom.visible_bin_range(), 0..2048);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('+')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('+')));
+
+        // Two halvings: a quarter of the captured bins, centred on the cursor.
+        let range = app.zoom.visible_bin_range();
+        assert_eq!(range, 768..1280);
+    }
+
+    #[test]
+    fn the_command_palette_zoom_actions_zoom_the_display() {
+        let mut app = zoomed_app(2_048_000.0);
+
+        app.apply_command_action(CommandAction::ZoomIn);
+        assert_abs_diff_eq!(app.display_viewport().span_hz, 1_024_000.0, epsilon = 1.0);
+
+        app.apply_command_action(CommandAction::SetBandwidth(64_000.0));
+        assert_abs_diff_eq!(app.display_viewport().span_hz, 64_000.0, epsilon = 1.0);
+
+        app.apply_command_action(CommandAction::ZoomOut);
+        assert_abs_diff_eq!(app.display_viewport().span_hz, 128_000.0, epsilon = 1.0);
     }
 
     #[test]

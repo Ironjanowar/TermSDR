@@ -119,7 +119,7 @@ impl Widget for WaterfallWidget<'_> {
         // Draw cursor vertical line on waterfall
         if let Some(cursor_pos) = self.cursor_pos {
             #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)] // precision loss acceptable for DSP/UI; intentional truncation; value is non-negative here
-            let cursor_x = area.x + (cursor_pos * (width - 1) as f32) as u16;
+            let cursor_x = area.x + (cursor_pos * width.saturating_sub(1) as f32) as u16;
             if cursor_x >= area.x && cursor_x < area.x + area.width {
                 use ratatui::style::Color;
                 // Cursor line is always solid yellow: presentation never depends
@@ -149,7 +149,7 @@ impl Widget for WaterfallWidget<'_> {
                     let pos = ((edge_freq - start_freq) / self.sample_rate) as f32;
                     if (0.0..=1.0).contains(&pos) {
                         #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)] // precision loss acceptable for DSP/UI; intentional truncation; value is non-negative here
-                        let edge_x = area.x + (pos * (width - 1) as f32) as u16;
+                        let edge_x = area.x + (pos * width.saturating_sub(1) as f32) as u16;
                         if edge_x >= area.x && edge_x < area.x + area.width {
                             for row in 0..height {
                                 if row % 2 == 0 {
@@ -178,7 +178,7 @@ impl Widget for WaterfallWidget<'_> {
                     let pos = ((edge_freq - start_freq) / self.sample_rate) as f32;
                     if (0.0..=1.0).contains(&pos) {
                         #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)] // precision loss acceptable for DSP/UI; intentional truncation; value is non-negative here
-                        let edge_x = area.x + (pos * (width - 1) as f32) as u16;
+                        let edge_x = area.x + (pos * width.saturating_sub(1) as f32) as u16;
                         if edge_x >= area.x && edge_x < area.x + area.width {
                             for row in 0..height {
                                 if row % 2 == 0 {

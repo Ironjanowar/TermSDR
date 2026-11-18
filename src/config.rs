@@ -14,24 +14,24 @@ use crate::types::AppConfig;
 #[command(name = "termsdr", version, about)]
 pub struct CliArgs {
     /// Center frequency (e.g., "100M", "118.1M", "433920000")
-    #[arg(short = 'f', long, default_value = "100M")]
-    pub frequency: String,
+    #[arg(short = 'f', long)]
+    pub frequency: Option<String>,
 
     /// Sample rate (e.g., "2.048M", "1024000")
-    #[arg(short = 's', long, default_value = "2.048M")]
-    pub sample_rate: String,
+    #[arg(short = 's', long)]
+    pub sample_rate: Option<String>,
 
     /// RF gain in dB (omit for AGC)
     #[arg(short, long)]
     pub gain: Option<f32>,
 
     /// FFT size
-    #[arg(long, default_value = "2048")]
-    pub fft_size: usize,
+    #[arg(long)]
+    pub fft_size: Option<usize>,
 
     /// PPM correction
-    #[arg(long, default_value = "0")]
-    pub ppm: i32,
+    #[arg(long)]
+    pub ppm: Option<i32>,
 
     /// Use test signal source instead of hardware
     #[arg(long)]
@@ -54,7 +54,7 @@ pub struct CliArgs {
     pub file_center_frequency: Option<f64>,
 
     /// JSON config file path
-    #[arg(short, long)]
+    #[arg(short, long, visible_alias = "config-file")]
     pub config: Option<String>,
 
     /// Import bookmarks from `CubicSDR` XML file
@@ -119,13 +119,63 @@ pub(crate) fn parse_frequency(s: &str) -> Result<f64> {
 }
 
 impl CliArgs {
-    /// Convert CLI args into an `AppConfig`.
+    /// Resolve startup state exactly once: the receiver baseline plus the parsed session.
+    ///
+    /// The `--config`/`--config-file` path is read at most once here, so a caller can
+    /// hand the owned snapshots to worker threads that must never re-read the file.
+    /// The returned [`AppConfig`] starts from the session's receiver block and lets
+    /// only explicitly supplied CLI flags override their own field, so the session
+    /// remains the baseline for everything the user did not ask for.
     ///
     /// # Errors
-    /// Returns an error if frequency or sample rate values are invalid.
-    pub fn to_config(&self) -> Result<AppConfig> {
-        let center_freq = parse_frequency(&self.frequency)?;
-        let sample_rate = parse_frequency(&self.sample_rate)?;
+    /// Returns an error if the session cannot be read or validated, or if a
+    /// frequency/sample-rate string cannot be parsed.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use clap::Parser;
+    /// use termsdr::config::CliArgs;
+    ///
+    /// let args = CliArgs::parse_from(["termsdr", "--test", "--config", "tower.json"]);
+    /// let (config, session) = args.resolve_startup()?;
+    /// assert!(session.is_some());
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    pub fn resolve_startup(&self) -> Result<(AppConfig, Option<crate::session::Session>)> {
+        let session = self
+            .config
+            .as_deref()
+            .map(crate::session::load)
+            .transpose()?;
+
+        let mut config = if let Some(loaded) = &session {
+            AppConfig {
+                center_freq: loaded.receiver.center_frequency_hz,
+                sample_rate: loaded.receiver.sample_rate_hz,
+                fft_size: loaded.receiver.fft_size,
+                gain: loaded.receiver.gain_db,
+                ppm: loaded.receiver.ppm,
+                ..AppConfig::default()
+            }
+        } else {
+            AppConfig::default()
+        };
+
+        if let Some(frequency) = &self.frequency {
+            config.center_freq = parse_frequency(frequency)?;
+        }
+        if let Some(sample_rate) = &self.sample_rate {
+            config.sample_rate = parse_frequency(sample_rate)?;
+        }
+        if let Some(fft_size) = self.fft_size {
+            config.fft_size = fft_size;
+        }
+        if self.gain.is_some() {
+            config.gain = self.gain;
+        }
+        if let Some(ppm) = self.ppm {
+            config.ppm = ppm;
+        }
 
         let source = if self.test {
             crate::types::SourceType::Test {
@@ -142,14 +192,20 @@ impl CliArgs {
             crate::types::SourceType::RtlSdr { device_index: 0 }
         };
 
-        Ok(AppConfig {
-            center_freq,
-            sample_rate,
-            fft_size: self.fft_size,
-            gain: self.gain,
-            ppm: self.ppm,
-            source,
-        })
+        config.source = source;
+        Ok((config, session))
+    }
+
+    /// Convert CLI args into an `AppConfig`.
+    ///
+    /// This is [`CliArgs::resolve_startup`] with the session snapshot dropped, so
+    /// startup and bare-configuration callers share one resolution path.
+    ///
+    /// # Errors
+    /// Returns an error if frequency or sample rate values are invalid, or if the
+    /// session path cannot be loaded.
+    pub fn to_config(&self) -> Result<AppConfig> {
+        self.resolve_startup().map(|(config, _)| config)
     }
 }
 

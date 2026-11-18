@@ -1788,7 +1788,7 @@ dependencies = [
 
 [[package]]
 name = "termsdr"
-version = "0.5.1-rc.1"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "approx",

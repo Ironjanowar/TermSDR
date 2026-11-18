@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 use super::commands::{self, DispatchResult, SharedState};
 use super::protocol::{self, ErrorMessage};
 use crate::audio::AudioControl;
+use crate::session::Session;
 use crate::types::AppConfig;
 
 /// Unique client identifier.
@@ -50,6 +51,100 @@ impl ServerState {
             shared_center_freq: None,
             next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         }
+    }
+
+    /// Create server state with the live-mutable portion of a validated session.
+    #[must_use]
+    pub fn from_session(
+        config: AppConfig,
+        session: &Session,
+        audio_control_tx: Option<crossbeam_channel::Sender<AudioControl>>,
+    ) -> Self {
+        const COLORS: [&str; 8] = [
+            "red",
+            "green",
+            "blue",
+            "magenta",
+            "cyan",
+            "lightred",
+            "white",
+            "lightmagenta",
+        ];
+        let mut state = Self::new(config);
+        let shared = Arc::get_mut(&mut state.shared)
+            .expect("invariant: newly-created server state has one shared-state owner")
+            .get_mut();
+        shared.cursor_freq = session.cursor.frequency_hz;
+        shared.channel_bw = session.cursor.channel_bandwidth_hz;
+        shared.demod_mode = session.cursor.mode.into();
+        shared.muted = session.cursor.muted;
+        shared.volume = session.audio.volume;
+        shared.squelch = session.audio.global_squelch_dbfs.unwrap_or(-120.0);
+        shared.agc.enabled = session.audio.agc.enabled;
+        shared.agc.attack_ms = session.audio.agc.attack_ms;
+        shared.agc.decay_ms = session.audio.agc.decay_ms;
+        shared.agc.target_level = session.audio.agc.target_level;
+        shared.agc.max_gain_db = session.audio.agc.max_gain_db;
+        shared.bandpass.enabled = session.audio.bandpass.enabled;
+        shared.bandpass.low_hz = session.audio.bandpass.low_hz;
+        shared.bandpass.high_hz = session.audio.bandpass.high_hz;
+        shared.vfos = session
+            .vfos
+            .iter()
+            .enumerate()
+            .map(|(index, vfo)| commands::VfoEntry {
+                id: vfo.id,
+                freq: vfo.frequency_hz,
+                channel_bw: vfo.channel_bandwidth_hz,
+                mode: vfo.mode.into(),
+                color: COLORS[index % COLORS.len()].to_string(),
+            })
+            .collect();
+        // The session loader caps ids at `usize::MAX - 2`, so this cannot saturate;
+        // saturating in any case keeps the invariant local instead of relying on the
+        // caller and never wraps into an existing id.
+        shared.next_vfo_id = shared
+            .vfos
+            .iter()
+            .map(|vfo| vfo.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+
+        if let Some(tx) = audio_control_tx {
+            let controls = [
+                AudioControl::SetTuning {
+                    center_freq: shared.center_freq,
+                    cursor_freq: shared.cursor_freq,
+                },
+                AudioControl::SetChannelBw(shared.channel_bw),
+                AudioControl::SetDemodMode(shared.demod_mode),
+                AudioControl::Mute(shared.muted),
+                AudioControl::SetVolume(shared.volume),
+                AudioControl::SetSquelch(session.audio.global_squelch_dbfs),
+                AudioControl::SetAgcEnabled(shared.agc.enabled),
+                AudioControl::SetAgcAttack(shared.agc.attack_ms),
+                AudioControl::SetAgcDecay(shared.agc.decay_ms),
+                AudioControl::SetAgcTarget(shared.agc.target_level),
+                AudioControl::SetAgcMaxGain(shared.agc.max_gain_db),
+                AudioControl::SetBandpassEnabled(shared.bandpass.enabled),
+                AudioControl::SetBandpassLowCut(shared.bandpass.low_hz),
+                AudioControl::SetBandpassHighCut(shared.bandpass.high_hz),
+            ];
+            for control in controls {
+                let _ = tx.send(control);
+            }
+            for vfo in &shared.vfos {
+                let _ = tx.send(AudioControl::AddVfo {
+                    id: vfo.id,
+                    freq: vfo.freq,
+                    channel_bw: vfo.channel_bw,
+                    mode: vfo.mode,
+                });
+            }
+            state.audio_control_tx = Some(tx);
+        }
+        state
     }
 
     /// Attach the audio format selector atomic.

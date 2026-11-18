@@ -30,6 +30,20 @@ const MAX_VOLUME: u8 = 100;
 /// Squelch threshold below which squelch is disabled (dB).
 const SQUELCH_OFF_THRESHOLD: f32 = -100.0;
 
+/// Quietest squelch threshold accepted on the wire, in dBFS.
+///
+/// The TUI `/squelch` command and the protocol documentation both define
+/// `[-120, 0]`: -120 dB is the noise floor of the receiver chain, so a lower
+/// threshold would never open the squelch and is rejected rather than silently
+/// accepted.
+const MIN_SQUELCH_DB: f32 = -120.0;
+
+/// Loudest squelch threshold accepted on the wire, in dBFS.
+///
+/// A positive threshold is above full scale, so it would mute audio permanently.
+/// See [`MIN_SQUELCH_DB`].
+const MAX_SQUELCH_DB: f32 = 0.0;
+
 /// Minimum allowed channel bandwidth in Hz (1 kHz).
 const MIN_CHANNEL_BW: f64 = 1_000.0;
 
@@ -203,6 +217,19 @@ pub fn dispatch(
         }
 
         Command::SetSquelch { value } => {
+            // Validate before touching state: a rejected command must not poison the
+            // broadcast state or reach the audio thread (mirrors the TUI palette).
+            if !value.is_finite() || !(MIN_SQUELCH_DB..=MAX_SQUELCH_DB).contains(value) {
+                return (
+                    DispatchResult::Error(ErrorMessage::new(
+                        "set_squelch",
+                        &format!(
+                            "Squelch must be finite and between {MIN_SQUELCH_DB} and {MAX_SQUELCH_DB} dB"
+                        ),
+                    )),
+                    audio_msgs,
+                );
+            }
             state.squelch = *value;
             let sq = if *value <= SQUELCH_OFF_THRESHOLD { None } else { Some(*value) };
             send(&mut audio_msgs, AudioControl::SetSquelch(sq));
@@ -248,7 +275,15 @@ pub fn dispatch(
                 )), audio_msgs);
             }
             let demod = protocol::parse_demod_mode(mode).unwrap_or(state.demod_mode);
+            // Reserve the id before mutating anything: if the counter cannot advance,
+            // the command fails atomically instead of aliasing or overwriting a VFO.
             let id = state.next_vfo_id;
+            let Some(next_id) = id.checked_add(1) else {
+                return (
+                    DispatchResult::Error(ErrorMessage::new("vfo_add", "VFO id space exhausted")),
+                    audio_msgs,
+                );
+            };
             let color = VFO_COLOR_NAMES[state.vfos.len() % 8].to_string();
             state.vfos.push(VfoEntry {
                 id,
@@ -257,7 +292,7 @@ pub fn dispatch(
                 mode: demod,
                 color,
             });
-            state.next_vfo_id += 1;
+            state.next_vfo_id = next_id;
             send(&mut audio_msgs, AudioControl::AddVfo {
                 id,
                 freq: *freq,
@@ -1037,5 +1072,68 @@ mod tests {
         let mut state = make_state();
         dispatch(&Command::SetAudioFormat { format: "pcm".to_string() }, &mut state, Some(&tx));
         assert!(rx.try_recv().is_err());
+    }
+
+    // ── WebSocket squelch validation ──
+
+    /// `set_squelch` must validate before touching shared state or the audio
+    /// thread. The old dispatcher assigned `state.squelch = *value` first, so a
+    /// non-finite or out-of-range value poisoned the state and was broadcast.
+    #[test]
+    fn test_set_squelch_rejects_nonfinite_and_out_of_range_atomically() {
+        let mut failures = Vec::new();
+        for (label, value) in [
+            ("nan", f32::NAN),
+            ("+inf", f32::INFINITY),
+            ("-inf", f32::NEG_INFINITY),
+            ("below-range", -120.1),
+            ("above-range", 0.1),
+            ("f32-max", f32::MAX),
+        ] {
+            let mut state = make_state();
+            state.squelch = -41.0;
+            let (tx, rx) = crossbeam_channel::unbounded();
+
+            let (result, messages) =
+                dispatch(&Command::SetSquelch { value }, &mut state, Some(&tx));
+
+            if !matches!(result, DispatchResult::Error(_)) {
+                failures.push(format!("{label}: accepted"));
+            }
+            if state.squelch != -41.0 {
+                failures.push(format!("{label}: state became {}", state.squelch));
+            }
+            if !messages.is_empty() {
+                failures.push(format!("{label}: queued {messages:?}"));
+            }
+            if rx.try_recv().is_ok() {
+                failures.push(format!("{label}: reached the audio thread"));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "invalid SetSquelch values were not rejected atomically: {failures:?}"
+        );
+    }
+
+    /// The documented range is inclusive: -120 dB is squelch-off and 0 dB is the
+    /// loudest threshold. Both endpoints must still be accepted.
+    #[test]
+    fn test_set_squelch_accepts_inclusive_documented_range() {
+        for value in [-120.0_f32, -60.0, 0.0] {
+            let mut state = make_state();
+            let (result, messages) = dispatch(&Command::SetSquelch { value }, &mut state, None);
+
+            assert!(
+                matches!(result, DispatchResult::Ok),
+                "SetSquelch({value}) must be accepted"
+            );
+            assert_eq!(state.squelch, value);
+            assert!(
+                matches!(messages.as_slice(), [AudioControl::SetSquelch(_)]),
+                "SetSquelch({value}) must emit exactly one squelch control, got {messages:?}"
+            );
+        }
     }
 }

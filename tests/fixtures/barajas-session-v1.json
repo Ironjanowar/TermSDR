@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "receiver": {
+    "center_frequency_hz": 118522500.0,
+    "sample_rate_hz": 2048000.0,
+    "fft_size": 4096,
+    "gain_db": 28.0,
+    "ppm": -1
+  },
+  "cursor": {
+    "name": "TWR1",
+    "frequency_hz": 118070000.0,
+    "mode": "am",
+    "channel_bandwidth_hz": 6000.0,
+    "muted": false
+  },
+  "vfos": [
+    {
+      "id": 1,
+      "name": "TWR2",
+      "frequency_hz": 118150000.0,
+      "mode": "am",
+      "channel_bandwidth_hz": 6000.0
+    },
+    {
+      "id": 2,
+      "name": "TWR3",
+      "frequency_hz": 118670000.0,
+      "mode": "am",
+      "channel_bandwidth_hz": 6000.0
+    },
+    {
+      "id": 3,
+      "name": "TWR4",
+      "frequency_hz": 118975000.0,
+      "mode": "am",
+      "channel_bandwidth_hz": 6000.0
+    }
+  ],
+  "audio": {
+    "volume": 80,
+    "global_squelch_dbfs": -60.0,
+    "agc": {
+      "enabled": true,
+      "attack_ms": 10.0,
+      "decay_ms": 250.0,
+      "target_level": 0.3,
+      "max_gain_db": 40.0
+    },
+    "bandpass": {
+      "enabled": true,
+      "low_hz": 300.0,
+      "high_hz": 3000.0
+    }
+  },
+  "display": {
+    "min_db": -95.0,
+    "max_db": -5.0,
+    "averaging": 6,
+    "waterfall_span_seconds": 30.0
+  },
+  "scan": {
+    "active": false,
+    "interval_ms": 750
+  }
+}

@@ -53,7 +53,11 @@ fn main() -> Result<()> {
         .init();
 
     let args = CliArgs::parse();
-    let mut config = args.to_config()?;
+    // Resolve the native session once, before any worker thread exists. A missing or
+    // invalid `--config` path therefore fails startup instead of failing after the
+    // capture/DSP/audio threads are already running (which would leave a headless
+    // server alive with a half-applied session).
+    let (mut config, startup_session) = args.resolve_startup()?;
 
     // Handle bookmark import
     if let Some(ref path) = args.import_bookmarks {
@@ -115,11 +119,15 @@ fn main() -> Result<()> {
     }
 
     // Run the 3-thread pipeline
-    run_pipeline(config, &args)
+    run_pipeline(config, &args, startup_session)
 }
 
 #[allow(clippy::too_many_lines, clippy::similar_names)] // pipeline setup with multiple threads; tx/rx pairs
-fn run_pipeline(mut config: AppConfig, args: &CliArgs) -> Result<()> {
+fn run_pipeline(
+    mut config: AppConfig,
+    args: &CliArgs,
+    startup_session: Option<termsdr::session::Session>,
+) -> Result<()> {
     // Open the IQ file before the threads start: its metadata (SigMF sidecar or the
     // explicit raw-file flags) is authoritative for replay, so the FFT axis, audio
     // decimation, and pacing all use the rates the recording actually has.
@@ -288,6 +296,7 @@ fn run_pipeline(mut config: AppConfig, args: &CliArgs) -> Result<()> {
         };
         termsdr::server::run_server(
             config,
+            startup_session,
             server_config,
             fft_rx,
             ws_audio_rx,
@@ -297,7 +306,15 @@ fn run_pipeline(mut config: AppConfig, args: &CliArgs) -> Result<()> {
             shared_center_freq,
         )
     } else {
-        tui_thread(config, fft_rx, running.clone(), audio_ctrl_tx.clone(), shared_center_freq, shared_averaging)
+        tui_thread(
+            config,
+            startup_session,
+            fft_rx,
+            running.clone(),
+            audio_ctrl_tx.clone(),
+            shared_center_freq,
+            shared_averaging,
+        )
     };
 
     // Offline EOF is an orderly channel close: the capture sender disappears
@@ -621,6 +638,7 @@ fn dsp_thread(
 #[allow(clippy::needless_pass_by_value)] // thread entry point takes ownership
 fn tui_thread(
     config: AppConfig,
+    startup_session: Option<termsdr::session::Session>,
     fft_rx: Receiver<FftResult>,
     running: Arc<AtomicBool>,
     audio_ctrl_tx: crossbeam_channel::Sender<AudioControl>,
@@ -631,6 +649,9 @@ fn tui_thread(
     let mut app = App::new(config, Some(audio_ctrl_tx));
     app.shared_center_freq = shared_center_freq;
     app.shared_averaging = Some(shared_averaging);
+    if let Some(session) = startup_session {
+        app.apply_startup_session(session);
+    }
 
     let target_frame_time = Duration::from_millis(TUI_FRAME_TIME_MS); // ~30 FPS
 

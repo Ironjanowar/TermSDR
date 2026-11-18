@@ -63,6 +63,8 @@ impl CommandRegistry {
             Command { name: "waterfall", description: "Set waterfall time span (seconds)", accepts_param: true, requires_param: true, hotkey: "t/T" },
             Command { name: "zoom-in", description: "Zoom in (decrease bandwidth)", accepts_param: false, requires_param: false, hotkey: "+" },
             Command { name: "zoom-out", description: "Zoom out (increase bandwidth)", accepts_param: false, requires_param: false, hotkey: "-" },
+            Command { name: "config-load", description: "Load native session from exact path", accepts_param: true, requires_param: true, hotkey: "-" },
+            Command { name: "config-save", description: "Save native session to exact path", accepts_param: true, requires_param: true, hotkey: "-" },
         ];
         commands.sort_by_key(|c| c.name);
         Self { commands }
@@ -168,10 +170,15 @@ impl CommandPalette {
         }
     }
 
-    /// Move selection down.
+    /// Move selection down, stopping at the last filtered command.
+    ///
+    /// The bound comes from the live filtered list rather than a hard-coded
+    /// index, so every registered command stays reachable as the registry grows.
+    /// There is no wrap-around: Down at the last entry is a no-op.
     pub fn select_down(&mut self) {
         let count = self.filtered().len();
-        if count > 0 && self.selected < count - 1 {
+        let last_selectable = count.saturating_sub(1);
+        if count > 0 && self.selected < last_selectable {
             self.selected += 1;
         }
     }
@@ -249,6 +256,16 @@ impl CommandPalette {
             }
             "bookmarks" => Ok(CommandAction::ShowBookmarks),
             "center" => Ok(CommandAction::CenterViewOnCursor),
+            "config-load" => Ok(CommandAction::LoadConfig(
+                param
+                    .expect("invariant: requires_param verified")
+                    .to_string(),
+            )),
+            "config-save" => Ok(CommandAction::SaveConfig(
+                param
+                    .expect("invariant: requires_param verified")
+                    .to_string(),
+            )),
             "channelbw" => {
                 if let Some(p) = param {
                     parse_frequency(p)
@@ -300,7 +317,12 @@ impl CommandPalette {
             "squelch" => {
                 if let Some(p) = param {
                     match p.parse::<f32>() {
-                        Ok(db) => Ok(CommandAction::SetSquelch(Some(db))),
+                        Ok(db) if db.is_finite() && (-120.0..=0.0).contains(&db) => {
+                            Ok(CommandAction::SetSquelch(Some(db)))
+                        }
+                        Ok(_) => {
+                            Err("Squelch must be finite and between -120 and 0 dB".to_string())
+                        }
                         Err(_) => Err(format!("Invalid squelch value: '{p}'")),
                     }
                 } else {
@@ -376,6 +398,8 @@ pub enum CommandAction {
     SetAveraging(usize),
     ToggleScan,
     SetScanInterval(u64),
+    LoadConfig(String),
+    SaveConfig(String),
 }
 
 #[cfg(test)]
@@ -387,7 +411,18 @@ mod tests {
     #[test]
     fn test_registry_has_all_commands() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.all().len(), 29);
+        assert_eq!(reg.all().len(), 31);
+        for name in ["config-load", "config-save"] {
+            let command = reg
+                .all()
+                .iter()
+                .find(|command| command.name == name)
+                .unwrap_or_else(|| {
+                    panic!("registry must include {name} in unit and production builds")
+                });
+            assert!(command.accepts_param);
+            assert!(command.requires_param);
+        }
     }
 
     #[test]
@@ -402,7 +437,7 @@ mod tests {
     #[test]
     fn test_registry_filter_empty_returns_all() {
         let reg = CommandRegistry::new();
-        assert_eq!(reg.filter("").len(), 29);
+        assert_eq!(reg.filter("").len(), 31);
     }
 
     #[test]
@@ -552,7 +587,7 @@ mod tests {
     #[test]
     fn test_palette_select_up_down() {
         let mut palette = CommandPalette::new();
-        // All 15 commands visible
+        // The first commands are visible without filtering.
         palette.select_down();
         assert_eq!(palette.selected, 1);
         palette.select_down();
@@ -577,7 +612,10 @@ mod tests {
         for _ in 0..100 {
             palette.select_down();
         }
-        assert_eq!(palette.selected, 28); // 29 commands, index 28
+        // The registry has 31 commands (config-load/config-save included), so the
+        // last selectable index is 30. The old hard-coded 28 predates those
+        // commands and made zoom-in/zoom-out unreachable from the keyboard.
+        assert_eq!(palette.selected, palette.registry.all().len() - 1);
     }
 
     #[test]

@@ -9,4 +9,5 @@ pub mod config;
 pub mod dsp;
 pub mod types;
 pub mod server;
+pub mod session;
 pub mod ui;

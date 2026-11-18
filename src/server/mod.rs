@@ -37,6 +37,7 @@ pub struct ServerConfig {
 #[allow(clippy::too_many_arguments)] // server setup requires all these parameters
 pub fn run_server(
     config: AppConfig,
+    startup_session: Option<crate::session::Session>,
     server_config: ServerConfig,
     fft_rx: Receiver<FftResult>,
     audio_rx: Option<Receiver<Vec<u8>>>,
@@ -47,12 +48,18 @@ pub fn run_server(
 ) -> Result<()> {
     let rt = Runtime::new()?;
     rt.block_on(async move {
-        let mut state = ServerState::new(config);
+        let mut state = if let Some(session) = startup_session.as_ref() {
+            ServerState::from_session(config, session, audio_ctrl_tx.clone())
+        } else {
+            ServerState::new(config)
+        };
         if let Some(fa) = format_atomic {
             state = state.with_format_atomic(fa);
         }
-        if let Some(tx) = audio_ctrl_tx {
-            state = state.with_audio_control(tx);
+        if state.audio_control_tx.is_none() {
+            if let Some(tx) = audio_ctrl_tx {
+                state = state.with_audio_control(tx);
+            }
         }
         if let Some(sf) = shared_center_freq {
             state = state.with_shared_center_freq(sf);
@@ -147,6 +154,79 @@ mod tests {
         };
         assert_eq!(cfg.port, 9090);
         assert!(cfg.no_web);
+    }
+
+    #[tokio::test]
+    async fn headless_startup_applies_complete_session_state_and_audio_controls() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/barajas-session-v1.json"
+        );
+        let session = crate::session::load(path).unwrap();
+        let config = AppConfig {
+            center_freq: session.receiver.center_frequency_hz,
+            sample_rate: session.receiver.sample_rate_hz,
+            fft_size: session.receiver.fft_size,
+            gain: session.receiver.gain_db,
+            ppm: session.receiver.ppm,
+            ..AppConfig::default()
+        };
+        let (audio_tx, audio_rx) = crossbeam_channel::unbounded();
+
+        // Finite startup boundary: apply the already parsed session before the
+        // server enters its infinite accept loop, returning inspectable state.
+        let state = ServerState::from_session(config, &session, Some(audio_tx));
+        let shared = state.shared.read().await;
+
+        assert_eq!(shared.center_freq, 118_522_500.0);
+        assert_eq!(shared.cursor_freq, 118_070_000.0);
+        assert_eq!(shared.channel_bw, 6_000.0);
+        assert_eq!(shared.demod_mode, crate::audio::demod::DemodMode::AM);
+        assert!(!shared.muted);
+        assert_eq!(shared.volume, 80);
+        assert_eq!(shared.squelch, -60.0);
+        assert!(shared.agc.enabled);
+        assert_eq!(shared.agc.attack_ms, 10.0);
+        assert_eq!(shared.agc.decay_ms, 250.0);
+        assert_eq!(shared.agc.target_level, 0.3);
+        assert_eq!(shared.agc.max_gain_db, 40.0);
+        assert!(shared.bandpass.enabled);
+        assert_eq!(shared.bandpass.low_hz, 300.0);
+        assert_eq!(shared.bandpass.high_hz, 3000.0);
+        assert_eq!(shared.vfos.len(), 3);
+        assert_eq!(shared.vfos[0].id, 1);
+        assert_eq!(shared.vfos[0].freq, 118_150_000.0);
+        drop(shared);
+
+        let messages = audio_rx
+            .try_iter()
+            .map(|message| format!("{message:?}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in [
+            "SetTuning",
+            "SetChannelBw(6000.0)",
+            "SetDemodMode(AM)",
+            "Mute(false)",
+            "SetVolume(80)",
+            "SetSquelch(Some(-60.0))",
+            "SetAgcEnabled(true)",
+            "SetAgcAttack(10.0)",
+            "SetAgcDecay(250.0)",
+            "SetAgcTarget(0.3)",
+            "SetAgcMaxGain(40.0)",
+            "SetBandpassEnabled(true)",
+            "SetBandpassLowCut(300.0)",
+            "SetBandpassHighCut(3000.0)",
+            "AddVfo { id: 1, freq: 118150000.0",
+            "AddVfo { id: 2, freq: 118670000.0",
+            "AddVfo { id: 3, freq: 118975000.0",
+        ] {
+            assert!(
+                messages.contains(expected),
+                "headless startup omitted {expected:?} from:\n{messages}"
+            );
+        }
     }
 
     #[tokio::test]

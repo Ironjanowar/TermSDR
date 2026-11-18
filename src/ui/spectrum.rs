@@ -135,11 +135,11 @@ impl Widget for SpectrumWidget<'_> {
         let db_labels = 5.min(chart_height as usize);
         for i in 0..db_labels {
             #[allow(clippy::cast_possible_truncation)] // intentional truncation
-            let y = area.y + 1 + (i as u16 * (chart_height - 1)) / (db_labels as u16 - 1).max(1);
+            let y = area.y + 1 + (i as u16 * chart_height.saturating_sub(1)) / (db_labels as u16).saturating_sub(1).max(1);
             #[allow(clippy::cast_precision_loss)] // precision loss acceptable for DSP/UI
             let db_val = self.max_db - (i as f32 / (db_labels as f32 - 1.0).max(1.0)) * (self.max_db - self.min_db);
             let label = format!("{db_val:>5.0}dB");
-            if y < area.y + area.height - 1 {
+            if y < area.y + area.height.saturating_sub(1) {
                 buf.set_string(area.x, y, &label[..label.len().min(y_label_width as usize)], Style::default().fg(Color::DarkGray));
             }
         }
@@ -153,10 +153,10 @@ impl Widget for SpectrumWidget<'_> {
 
             // Draw filled column from bottom up
             for row in 0..chart_height {
-                let y = chart_y_start + chart_height - 1 - row;
+                let y = chart_y_start + chart_height.saturating_sub(1).saturating_sub(row);
                 #[allow(clippy::cast_possible_truncation)] // intentional truncation
                 let x = chart_x + col as u16;
-                if x < area.x + area.width && y < area.y + area.height - 1 {
+                if x < area.x + area.width && y < area.y + area.height.saturating_sub(1) {
                     if row < bar_height {
                         // Gradient color based on height
                         let intensity = f32::from(row) / f32::from(chart_height);
@@ -172,7 +172,7 @@ impl Widget for SpectrumWidget<'_> {
         }
 
         // Draw frequency labels at bottom
-        let freq_y = area.y + area.height - 1;
+        let freq_y = area.y + area.height.saturating_sub(1);
         if let Some(fft) = self.fft_result {
             let freq_labels = generate_freq_labels(
                 fft.center_freq,
@@ -192,13 +192,13 @@ impl Widget for SpectrumWidget<'_> {
         // Draw cursor (vertical line + label)
         if let Some(cursor_pos) = self.cursor_pos {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // intentional truncation; value is non-negative here
-            let cursor_x = chart_x + (cursor_pos * f32::from(chart_width - 1)) as u16;
+            let cursor_x = chart_x + (cursor_pos * f32::from(chart_width.saturating_sub(1))) as u16;
             if cursor_x >= chart_x && cursor_x < chart_x + chart_width {
                 // Vertical line through spectrum: always solid, cursor info is
                 // always shown (Space only affects audio mute, not presentation).
                 for row in 0..chart_height {
                     let y = chart_y_start + row;
-                    if y < area.y + area.height - 1 {
+                    if y < area.y + area.height.saturating_sub(1) {
                         buf.set_string(cursor_x, y, "│", Style::default().fg(Color::Yellow));
                     }
                 }
@@ -243,12 +243,12 @@ impl Widget for SpectrumWidget<'_> {
                     let pos = ((edge_freq - start_freq) / self.sample_rate) as f32;
                     if (0.0..=1.0).contains(&pos) {
                         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // intentional truncation; value is non-negative here
-                        let edge_x = chart_x + (pos * f32::from(chart_width - 1)) as u16;
+                        let edge_x = chart_x + (pos * f32::from(chart_width.saturating_sub(1))) as u16;
                         if edge_x >= chart_x && edge_x < chart_x + chart_width {
                             for row in 0..chart_height {
                                 if row % 2 == 0 {
                                     let y = chart_y_start + row;
-                                    if y < area.y + area.height - 1 {
+                                    if y < area.y + area.height.saturating_sub(1) {
                                         buf.set_string(edge_x, y, "┊", Style::default().fg(bw_color));
                                     }
                                 }
@@ -263,7 +263,10 @@ impl Widget for SpectrumWidget<'_> {
         if let Some(sq_db) = self.squelch {
             let normalized = ((sq_db - self.min_db) / (self.max_db - self.min_db)).clamp(0.0, 1.0);
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // intentional truncation; value is non-negative here
-            let sq_y = chart_y_start + chart_height - 1 - (normalized * f32::from(chart_height - 1)) as u16;
+            let sq_y = chart_y_start
+                + chart_height
+                    .saturating_sub(1)
+                    .saturating_sub((normalized * f32::from(chart_height.saturating_sub(1))) as u16);
             if sq_y >= chart_y_start && sq_y < chart_y_start + chart_height {
                 let sq_style = Style::default().fg(Color::LightRed);
                 for col in 0..chart_width {
@@ -298,12 +301,12 @@ impl Widget for SpectrumWidget<'_> {
                     let pos = ((edge_freq - start_freq) / self.sample_rate) as f32;
                     if (0.0..=1.0).contains(&pos) {
                         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // intentional truncation; value is non-negative here
-                        let edge_x = chart_x + (pos * f32::from(chart_width - 1)) as u16;
+                        let edge_x = chart_x + (pos * f32::from(chart_width.saturating_sub(1))) as u16;
                         if edge_x >= chart_x && edge_x < chart_x + chart_width {
                             for row in 0..chart_height {
                                 if row % 2 == 0 {
                                     let y = chart_y_start + row;
-                                    if y < area.y + area.height - 1 {
+                                    if y < area.y + area.height.saturating_sub(1) {
                                         buf.set_string(edge_x, y, "┊", Style::default().fg(color));
                                     }
                                 }
@@ -317,7 +320,7 @@ impl Widget for SpectrumWidget<'_> {
                 let center_pos = ((freq - start_freq) / self.sample_rate) as f32;
                 if (0.0..=1.0).contains(&center_pos) {
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // intentional truncation; value is non-negative here
-                    let label_x = chart_x + (center_pos * f32::from(chart_width - 1)) as u16;
+                    let label_x = chart_x + (center_pos * f32::from(chart_width.saturating_sub(1))) as u16;
                     if label_x >= chart_x && label_x < chart_x + chart_width {
                         let label = format!("{id}");
                         buf.set_string(label_x, chart_y_start, &label, Style::default().fg(color));
@@ -331,7 +334,7 @@ impl Widget for SpectrumWidget<'_> {
             let label = " 📡 SCAN ";
             let label_x = chart_x + 1;
             let label_y = chart_y_start;
-            if label_x + label.len() as u16 <= chart_x + chart_width && label_y < area.y + area.height - 1 {
+            if label_x + label.len() as u16 <= chart_x + chart_width && label_y < area.y + area.height.saturating_sub(1) {
                 buf.set_string(label_x, label_y, label, Style::default().fg(Color::LightGreen).bg(Color::Black));
             }
         }

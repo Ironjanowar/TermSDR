@@ -166,6 +166,57 @@ fn smoothing_coefficient(tau_ms: f64, sample_rate_hz: f64) -> f32 {
     coefficient
 }
 
+/// Validates a desired output RMS, in linear full scale.
+///
+/// Shared by [`SpeechAgc::new`] and [`SpeechAgc::set_target_rms`] so the constructor and the live
+/// setter cannot disagree about what a legal target is.
+fn validate_target_rms(target_rms: f32) -> Result<()> {
+    if !target_rms.is_finite() || target_rms <= 0.0 {
+        bail!("AGC target RMS must be finite and positive, got {target_rms}");
+    }
+    Ok(())
+}
+
+/// Validates a gain-smoother time constant in milliseconds.
+///
+/// `name` names the parameter in the error so a rejected live change says which one failed.
+fn validate_time_constant(milliseconds: f64, name: &str) -> Result<()> {
+    if !milliseconds.is_finite() || milliseconds <= 0.0 {
+        bail!("AGC {name} time constant must be finite and positive, got {milliseconds} ms");
+    }
+    Ok(())
+}
+
+/// Validates the attenuation floor in decibels.
+fn validate_min_gain_db(min_gain_db: f32) -> Result<()> {
+    if !min_gain_db.is_finite() {
+        bail!("AGC minimum gain must be finite, got {min_gain_db} dB");
+    }
+    if min_gain_db > 0.0 {
+        bail!("AGC minimum gain must be an attenuation floor (<= 0), got {min_gain_db} dB");
+    }
+    Ok(())
+}
+
+/// Validates the boost ceiling in decibels.
+fn validate_max_gain_db(max_gain_db: f32) -> Result<()> {
+    if !max_gain_db.is_finite() {
+        bail!("AGC maximum gain must be finite, got {max_gain_db} dB");
+    }
+    Ok(())
+}
+
+/// Validates that the gain range is not inverted.
+fn validate_gain_range(min_gain_db: f32, max_gain_db: f32) -> Result<()> {
+    if max_gain_db < min_gain_db {
+        bail!(
+            "AGC gain range is inverted: maximum {max_gain_db} dB is below minimum \
+             {min_gain_db} dB"
+        );
+    }
+    Ok(())
+}
+
 /// Squelch-aware speech AGC.
 #[derive(Debug)]
 pub(crate) struct SpeechAgc {
@@ -183,6 +234,8 @@ pub(crate) struct SpeechAgc {
     max_gain_db: f32,
     /// Squelch gate state; `false` means frozen and silent.
     squelch_open: bool,
+    /// Whether the stage applies gain; `false` passes audio through untouched.
+    enabled: bool,
     /// Smoothed gain applied to the most recent sample, in decibels. Starts at unity.
     current_gain_db: f32,
     /// Smoothed mean-square detector output, in linear full scale squared.
@@ -224,30 +277,12 @@ impl SpeechAgc {
         if !sample_rate_hz.is_finite() || sample_rate_hz <= 0.0 {
             bail!("AGC sample rate must be finite and positive, got {sample_rate_hz} Hz");
         }
-        if !target_rms.is_finite() || target_rms <= 0.0 {
-            bail!("AGC target RMS must be finite and positive, got {target_rms}");
-        }
-        if !attack_ms.is_finite() || attack_ms <= 0.0 {
-            bail!("AGC attack time constant must be finite and positive, got {attack_ms} ms");
-        }
-        if !release_ms.is_finite() || release_ms <= 0.0 {
-            bail!("AGC release time constant must be finite and positive, got {release_ms} ms");
-        }
-        if !min_gain_db.is_finite() {
-            bail!("AGC minimum gain must be finite, got {min_gain_db} dB");
-        }
-        if min_gain_db > 0.0 {
-            bail!("AGC minimum gain must be an attenuation floor (<= 0), got {min_gain_db} dB");
-        }
-        if !max_gain_db.is_finite() {
-            bail!("AGC maximum gain must be finite, got {max_gain_db} dB");
-        }
-        if max_gain_db < min_gain_db {
-            bail!(
-                "AGC gain range is inverted: maximum {max_gain_db} dB is below minimum \
-                 {min_gain_db} dB"
-            );
-        }
+        validate_target_rms(target_rms)?;
+        validate_time_constant(attack_ms, "attack")?;
+        validate_time_constant(release_ms, "release")?;
+        validate_min_gain_db(min_gain_db)?;
+        validate_max_gain_db(max_gain_db)?;
+        validate_gain_range(min_gain_db, max_gain_db)?;
 
         // Seeding the detector with the target power makes the initial desired gain exactly 0 dB,
         // so a fresh instance starts at unity for a target-level input instead of lurching.
@@ -261,6 +296,7 @@ impl SpeechAgc {
             min_gain_db,
             max_gain_db,
             squelch_open: false,
+            enabled: true,
             current_gain_db: 0.0,
             detector_power,
             detector_coefficient: f64::from(smoothing_coefficient(DETECTOR_TAU_MS, sample_rate_hz)),
@@ -283,6 +319,11 @@ impl SpeechAgc {
         // detector or the gain move, so one bad block cannot poison later ones.
         if let Some(sample) = input.iter().find(|sample| !sample.is_finite()) {
             bail!("AGC input sample must be finite, got {sample}");
+        }
+
+        if !self.enabled {
+            // Disabled: bit-exact passthrough, and neither the detector nor the gain moves.
+            return Ok(input.to_vec());
         }
 
         if !self.squelch_open {
@@ -328,6 +369,114 @@ impl SpeechAgc {
     /// resumes from whatever gain was last applied, never from a reset value.
     pub fn set_squelch_open(&mut self, open: bool) {
         self.squelch_open = open;
+    }
+
+    /// Enables or bypasses the stage.
+    ///
+    /// A disabled stage returns its input bit-exactly and moves neither the detector nor the gain,
+    /// so re-enabling resumes from the gain that was last applied rather than from unity.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    /// Whether the stage currently applies gain.
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Replaces the desired output RMS, in linear full scale.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-finite, zero, or negative target, leaving the previous value in
+    /// effect.
+    pub fn set_target_rms(&mut self, target_rms: f32) -> Result<()> {
+        validate_target_rms(target_rms)?;
+        self.target_rms = target_rms;
+        Ok(())
+    }
+
+    /// Desired output RMS, in linear full scale.
+    #[must_use]
+    pub fn target_rms(&self) -> f32 {
+        self.target_rms
+    }
+
+    /// Replaces the gain-reduction time constant, in milliseconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-finite, zero, or negative duration, leaving the previous value in
+    /// effect.
+    pub fn set_attack_ms(&mut self, attack_ms: f64) -> Result<()> {
+        validate_time_constant(attack_ms, "attack")?;
+        self.attack_coefficient = smoothing_coefficient(attack_ms, self.sample_rate_hz);
+        self.attack_ms = attack_ms;
+        Ok(())
+    }
+
+    /// Gain-reduction time constant, in milliseconds.
+    #[must_use]
+    pub fn attack_ms(&self) -> f64 {
+        self.attack_ms
+    }
+
+    /// Replaces the gain-increase time constant, in milliseconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-finite, zero, or negative duration, leaving the previous value in
+    /// effect.
+    pub fn set_release_ms(&mut self, release_ms: f64) -> Result<()> {
+        validate_time_constant(release_ms, "release")?;
+        self.release_coefficient = smoothing_coefficient(release_ms, self.sample_rate_hz);
+        self.release_ms = release_ms;
+        Ok(())
+    }
+
+    /// Gain-increase time constant, in milliseconds.
+    #[must_use]
+    pub fn release_ms(&self) -> f64 {
+        self.release_ms
+    }
+
+    /// Replaces the attenuation floor, in decibels.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value is non-finite, positive, or above the current ceiling,
+    /// leaving the previous value in effect.
+    pub fn set_min_gain_db(&mut self, min_gain_db: f32) -> Result<()> {
+        validate_min_gain_db(min_gain_db)?;
+        validate_gain_range(min_gain_db, self.max_gain_db)?;
+        self.min_gain_db = min_gain_db;
+        Ok(())
+    }
+
+    /// Attenuation floor, in decibels.
+    #[must_use]
+    pub fn min_gain_db(&self) -> f32 {
+        self.min_gain_db
+    }
+
+    /// Replaces the boost ceiling, in decibels.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value is non-finite, below the current floor, or outside the
+    /// documented `[0, MAX_ALLOWED_GAIN_DB]` span, leaving the previous value in effect.
+    pub fn set_max_gain_db(&mut self, max_gain_db: f32) -> Result<()> {
+        validate_max_gain_db(max_gain_db)?;
+        validate_gain_range(self.min_gain_db, max_gain_db)?;
+        self.max_gain_db = max_gain_db;
+        Ok(())
+    }
+
+    /// Boost ceiling, in decibels.
+    #[must_use]
+    pub fn max_gain_db(&self) -> f32 {
+        self.max_gain_db
     }
 
     /// Smoothed gain applied to the most recent sample, in decibels relative to unity.
@@ -800,6 +949,170 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn disabled_stage_passes_audio_through_and_freezes_state() {
+        let mut agc = settled_default_agc();
+        // Settle on a quiet tone so the frozen gain is measurably away from unity.
+        let warmup = tone(0.02, 0, samples(1_500.0));
+        agc.process(&warmup)
+            .expect("a finite block must be accepted");
+        let gain_before = agc.current_gain_db();
+
+        agc.set_enabled(false);
+        assert!(!agc.enabled(), "set_enabled(false) must report disabled");
+
+        let input = tone(0.6, warmup.len(), samples(500.0));
+        let output = agc
+            .process(&input)
+            .expect("a finite block must be accepted");
+
+        assert_eq!(
+            output.len(),
+            input.len(),
+            "a disabled stage must still return one sample per input sample"
+        );
+        assert!(
+            output
+                .iter()
+                .zip(input.iter())
+                .all(|(actual, expected)| actual.to_bits() == expected.to_bits()),
+            "a disabled stage must be a bit-exact passthrough"
+        );
+        let gain_after = agc.current_gain_db();
+        assert_eq!(
+            gain_before.to_bits(),
+            gain_after.to_bits(),
+            "a disabled stage must not move the gain: {gain_before} dB → {gain_after} dB"
+        );
+        assert!(
+            gain_before.abs() > 1.0,
+            "fixture bug: the frozen gain must be measurably away from unity, was {gain_before} dB"
+        );
+    }
+
+    #[test]
+    fn re_enabling_resumes_from_the_frozen_gain() {
+        let mut agc = settled_default_agc();
+        let warmup = tone(0.02, 0, samples(1_500.0));
+        agc.process(&warmup)
+            .expect("a finite block must be accepted");
+        let gain_before = agc.current_gain_db();
+
+        agc.set_enabled(false);
+        agc.process(&tone(0.6, warmup.len(), samples(500.0)))
+            .expect("a finite block must be accepted");
+        agc.set_enabled(true);
+
+        let quiet = tone(0.02, warmup.len() + samples(500.0), 50);
+        agc.process(&quiet)
+            .expect("a finite block must be accepted");
+
+        assert!(
+            (agc.current_gain_db() - gain_before).abs() < 1.0,
+            "re-enabling must resume from the frozen {gain_before} dB gain, not restart from unity, \
+             reported {} dB",
+            agc.current_gain_db()
+        );
+    }
+
+    #[test]
+    fn set_target_rms_changes_the_settled_level() {
+        let mut agc = settled_default_agc();
+        agc.set_target_rms(0.5)
+            .expect("0.5 is a valid linear full-scale target");
+        assert!(
+            (agc.target_rms() - 0.5).abs() < f32::EPSILON,
+            "the stage must report the new target"
+        );
+
+        let input = tone(0.02, 0, samples(4_000.0));
+        let output = agc
+            .process(&input)
+            .expect("a finite block must be accepted");
+        let tail = &output[output.len() - samples(MEASUREMENT_WINDOW_MS)..];
+        let error_db = db(rms(tail) / 0.5).abs();
+
+        assert!(
+            error_db <= TARGET_TOLERANCE_DB,
+            "a 0.5 target must settle the output near 0.5 RMS, got {} ({error_db:.2} dB off)",
+            rms(tail)
+        );
+    }
+
+    #[test]
+    fn set_attack_and_release_recompute_the_smoothing_coefficients() {
+        let mut agc = settled_default_agc();
+        agc.set_attack_ms(100.0).expect("100 ms is a valid attack");
+        agc.set_release_ms(1_000.0)
+            .expect("1000 ms is a valid release");
+
+        assert!((agc.attack_ms() - 100.0).abs() < f64::EPSILON);
+        assert!((agc.release_ms() - 1_000.0).abs() < f64::EPSILON);
+
+        // With a 100 ms attack the gain must move far slower than the 5 ms default over 50 samples.
+        let quiet = tone(0.02, 0, samples(1_500.0));
+        agc.process(&quiet)
+            .expect("a finite block must be accepted");
+        let gain_before = agc.current_gain_db();
+        let loud = tone(0.6, quiet.len(), 50);
+        for sample in &loud {
+            agc.process(std::slice::from_ref(sample))
+                .expect("a finite block must be accepted");
+        }
+        let moved = (agc.current_gain_db() - gain_before).abs();
+        assert!(
+            moved < 5.0,
+            "a 100 ms attack must not absorb much of a 30 dB step in 50 samples, moved {moved:.2} dB"
+        );
+        assert!(
+            moved > 0.0,
+            "the fixture must actually move the gain, it moved {moved:.4} dB"
+        );
+    }
+
+    #[test]
+    fn set_max_gain_db_bounds_the_boost_ceiling() {
+        let mut agc = settled_default_agc();
+        agc.set_max_gain_db(6.0)
+            .expect("6 dB is a valid ceiling above the -12 dB floor");
+        assert!((agc.max_gain_db() - 6.0).abs() < f32::EPSILON);
+
+        // A very quiet tone would otherwise ask for far more than 6 dB of boost.
+        let input = tone(0.000_1, 0, samples(4_000.0));
+        agc.process(&input)
+            .expect("a finite block must be accepted");
+
+        assert!(
+            agc.current_gain_db() <= 6.0 + 0.5,
+            "a 6 dB ceiling must bound the settled gain, reported {} dB",
+            agc.current_gain_db()
+        );
+    }
+
+    #[test]
+    fn a_rejected_parameter_change_leaves_the_previous_value_in_effect() {
+        let mut agc = settled_default_agc();
+        let attack_before = agc.attack_ms();
+        let target_before = agc.target_rms();
+        let max_gain_before = agc.max_gain_db();
+
+        for (label, result) in [
+            ("zero attack", agc.set_attack_ms(0.0)),
+            ("NaN release", agc.set_release_ms(f64::NAN)),
+            ("zero target", agc.set_target_rms(0.0)),
+            ("negative target", agc.set_target_rms(-0.2)),
+            ("positive gain floor", agc.set_min_gain_db(6.0)),
+            ("ceiling below the floor", agc.set_max_gain_db(-40.0)),
+        ] {
+            assert!(result.is_err(), "{label} must be rejected");
+        }
+
+        assert_eq!(agc.attack_ms().to_bits(), attack_before.to_bits());
+        assert_eq!(agc.target_rms().to_bits(), target_before.to_bits());
+        assert_eq!(agc.max_gain_db().to_bits(), max_gain_before.to_bits());
+        assert!(agc.current_gain_db().is_finite());
     }
 
     #[test]

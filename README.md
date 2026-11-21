@@ -426,7 +426,7 @@ termsdr --headless --test --audio-format pcm
 - 🌊 **Waterfall heatmap** — Viridis palette, drag to pan, click to tune
 - 🔊 **Live audio playback** — Web Audio API, PCM streaming (Opus planned)
 - 🏛️ **Full controls** — frequency input (with M/k/G suffixes), gain, volume, demod mode
-- ⚙️ **Settings modal** — AGC, bandpass filter, channel BW, squelch — every field has both slider and text input for exact values
+- ⚙️ **Settings modal** — AGC, bandpass filter, channel BW, squelch — every field has both slider and text input for exact values. On aviation AM the AGC and Audio Filter sections drive the chain's speech AGC and voice band-pass; a narrowed voice band survives a channel-bandwidth change, and the modal's values are what the chain actually runs.
 - 📍 **VFO management** — add/remove VFOs from the browser
 - 🔄 **Auto-reconnect** — exponential backoff, automatic state refresh
 - 👥 **Multi-client** — multiple browsers can connect simultaneously with shared control
@@ -590,7 +590,7 @@ cargo test -- --nocapture
 cargo test command_palette
 ```
 
-Currently: **557 tests** (553 unit + 4 integration) covering types, FFT, capture, UI state, command palette, audio demodulation (AM/FM/NFM), AGC, bandpass filter, VFOs, bookmarks, WebSocket server, protocol encoding/decoding, and end-to-end pipeline validation.
+Currently: **872 tests** (unit + integration) covering types, FFT, capture, UI state, command palette, audio demodulation (AM/FM/NFM), AGC, bandpass filter, VFOs, bookmarks, WebSocket server, protocol encoding/decoding, and end-to-end pipeline validation.
 
 ## 🗺️ Roadmap
 

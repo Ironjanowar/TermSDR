@@ -651,6 +651,11 @@ fn tui_thread(
     app.shared_averaging = Some(shared_averaging);
     if let Some(session) = startup_session {
         app.apply_startup_session(session);
+    } else {
+        // With no saved session nothing else publishes the audio state, so the audio thread would
+        // keep its own hardcoded defaults while the settings modal showed different ones. Push the
+        // modal's initial state once, so what the operator sees is what the chain is running.
+        app.publish_audio_session();
     }
 
     let target_frame_time = Duration::from_millis(TUI_FRAME_TIME_MS); // ~30 FPS

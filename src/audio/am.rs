@@ -251,6 +251,54 @@ impl DcBlocker {
     }
 }
 
+/// Runtime override of the voice band-pass, as requested by the operator.
+///
+/// The profile's [`VoiceProfile`] still supplies the shape; this override narrows or widens the
+/// actual band inside the RF profile's constraint, and can bypass the filter altogether. It is kept
+/// on the chain rather than in [`AmAudioProfile`] because a profile change must rebuild filters
+/// without discarding the operator's live selection.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BandpassRequest {
+    /// Whether the voice filter runs at all.
+    enabled: bool,
+    /// Requested low cutoff, in hertz, before RF clamping.
+    low_hz: f64,
+    /// Requested high cutoff, in hertz, before RF clamping.
+    high_hz: f64,
+    /// Whether the operator set the cutoffs, as opposed to them being derived from the profile.
+    ///
+    /// A profile change re-derives a derived band (so switching to `Standard` really does move the
+    /// cutoff to the standard edge), but must never silently discard an explicit operator choice.
+    overridden: bool,
+}
+
+impl BandpassRequest {
+    /// The request that reproduces the profile's own voice band exactly.
+    ///
+    /// This is the state a chain starts in, and it keeps the chain bit-identical to a profile-only
+    /// chain until the operator changes something.
+    fn from_profile(profile: &AmAudioProfile) -> Self {
+        Self {
+            enabled: true,
+            low_hz: f64::from(profile.voice.low_cutoff_hz()),
+            high_hz: f64::from(profile.voice.high_cutoff_hz()),
+            overridden: false,
+        }
+    }
+
+    /// Re-derives the cutoffs from `profile`, unless the operator set them explicitly.
+    fn follow_profile(self, profile: &AmAudioProfile) -> Self {
+        if self.overridden {
+            return self;
+        }
+        Self {
+            low_hz: f64::from(profile.voice.low_cutoff_hz()),
+            high_hz: f64::from(profile.voice.high_cutoff_hz()),
+            ..self
+        }
+    }
+}
+
 /// Stateful standalone AM demodulator for one tuned channel.
 #[derive(Debug)]
 pub(crate) struct AmDemodulator {
@@ -262,6 +310,13 @@ pub(crate) struct AmDemodulator {
     limiter: SoftLimiter,
     profile: AmAudioProfile,
     output_rate_hz: f64,
+    /// Live voice-band request, including the enabled toggle.
+    bandpass: BandpassRequest,
+    /// Upper edge the voice filter is actually running at, in hertz.
+    ///
+    /// Reported through [`AmAudioBlock::effective_voice_high_hz`], so telemetry describes the
+    /// filter in use rather than the profile's nominal request.
+    voice_high_in_use_hz: f64,
 }
 
 impl AmDemodulator {
@@ -296,11 +351,9 @@ impl AmDemodulator {
             profile.voice,
         )?;
         let effective_high_hz = channelizer.effective_voice_high_hz();
-        let voice_filter = VoiceBandpass::design(
-            f64::from(profile.voice.low_cutoff_hz()),
-            effective_high_hz,
-            output_rate_hz,
-        )?;
+        let bandpass = BandpassRequest::from_profile(&profile);
+        let (voice_filter, voice_high_in_use_hz) =
+            Self::design_voice_filter(&profile, bandpass, effective_high_hz, output_rate_hz)?;
         let squelch = SquelchState::new(profile.squelch, output_rate_hz)?;
         let dc_blocker = DcBlocker::new(output_rate_hz)?;
         let agc = SpeechAgc::new(
@@ -320,7 +373,45 @@ impl AmDemodulator {
             limiter: SoftLimiter::new(),
             profile,
             output_rate_hz,
+            bandpass,
+            voice_high_in_use_hz,
         })
+    }
+
+    /// Resolves the voice band a request would run at under `profile`, in hertz.
+    ///
+    /// Kept as the single place the clamping rules live, so the design path and the
+    /// change-detection path cannot disagree about what band a request produces.
+    fn resolve_voice_band(
+        profile: &AmAudioProfile,
+        bandpass: BandpassRequest,
+        effective_high_hz: f64,
+    ) -> (f64, f64) {
+        // The profile's own low cutoff is the floor: a request may narrow the band below it, but
+        // asking for a lower cutoff than the selected voice profile would defeat that profile.
+        let low_hz = bandpass
+            .low_hz
+            .max(f64::from(profile.voice.low_cutoff_hz()));
+        (low_hz, bandpass.high_hz.min(effective_high_hz))
+    }
+
+    /// Designs the voice filter for a request, and reports the upper edge it runs at.
+    ///
+    /// The request's own `high_hz` is clamped by the RF profile's effective edge, so widening the
+    /// band past the channel cannot reintroduce out-of-channel energy. A disabled request keeps the
+    /// filter designed but bypassed at process time, which is what lets enabling it again avoid a
+    /// second re-design.
+    fn design_voice_filter(
+        profile: &AmAudioProfile,
+        bandpass: BandpassRequest,
+        effective_high_hz: f64,
+        output_rate_hz: f64,
+    ) -> Result<(VoiceBandpass, f64)> {
+        let (low_hz, high_hz) = Self::resolve_voice_band(profile, bandpass, effective_high_hz);
+        let filter = VoiceBandpass::design(low_hz, high_hz, output_rate_hz).with_context(|| {
+            format!("failed to design voice band {low_hz}..{high_hz} Hz at {output_rate_hz} Hz")
+        })?;
+        Ok((filter, high_hz))
     }
 
     /// Process an arbitrary RF-rate I/Q partition through the complete chain.
@@ -352,7 +443,12 @@ impl AmDemodulator {
 
         let envelope: Vec<f32> = channelized.iq.iter().map(|sample| sample.norm()).collect();
         let dc_removed = self.dc_blocker.process(&envelope);
-        let filtered = self.voice_filter.process(&dc_removed);
+        let filtered = if self.bandpass.enabled {
+            self.voice_filter.process(&dc_removed)
+        } else {
+            // Bypassed, not merely quiet: the operator asked to hear the unfiltered voice band.
+            dc_removed
+        };
 
         // One channelizer output has one block-mean power measurement. Advance exact frame timing
         // with that constant value, retaining the convention that the frame completing an interval
@@ -389,7 +485,7 @@ impl AmDemodulator {
 
     fn block(&self, samples: Vec<f32>, channel_power_dbfs: f32) -> AmAudioBlock {
         #[allow(clippy::cast_possible_truncation)]
-        let effective_voice_high_hz = self.channelizer.effective_voice_high_hz() as f32;
+        let effective_voice_high_hz = self.voice_high_in_use_hz as f32;
         AmAudioBlock {
             samples,
             channel_power_dbfs,
@@ -436,12 +532,28 @@ impl AmDemodulator {
         let new_edges = profile.rf.effective_edges_hz(profile.voice);
         let channel_profile_changed =
             profile.rf != self.profile.rf || profile.voice != self.profile.voice;
-        let voice_response_changed = profile.voice != self.profile.voice
-            || new_edges.effective_voice_high_hz.to_bits()
-                != old_edges.effective_voice_high_hz.to_bits();
+
+        // A profile change re-derives a band the operator never touched, so switching to Standard
+        // really does move the cutoff; an explicit operator choice survives untouched.
+        let request = self.bandpass.follow_profile(&profile);
+        // Re-design when the profile moved either edge, or when the resolved band actually differs
+        // from what is running. Comparing the resolved band rather than the profile alone keeps a
+        // narrowed band from being silently widened by an unrelated bandwidth change.
+        let resolved_band = Self::resolve_voice_band(
+            &profile,
+            request,
+            f64::from(new_edges.effective_voice_high_hz),
+        );
+        let current_band = Self::resolve_voice_band(
+            &self.profile,
+            self.bandpass,
+            f64::from(old_edges.effective_voice_high_hz),
+        );
+        let voice_response_changed = resolved_band != current_band;
         let replacement_voice = if voice_response_changed {
-            Some(VoiceBandpass::design(
-                f64::from(profile.voice.low_cutoff_hz()),
+            Some(Self::design_voice_filter(
+                &profile,
+                request,
                 f64::from(new_edges.effective_voice_high_hz),
                 self.output_rate_hz,
             )?)
@@ -455,9 +567,11 @@ impl AmDemodulator {
         if profile.squelch != self.profile.squelch {
             self.squelch.set_mode(profile.squelch)?;
         }
-        if let Some(voice_filter) = replacement_voice {
+        if let Some((voice_filter, high_in_use_hz)) = replacement_voice {
             self.voice_filter = voice_filter;
+            self.voice_high_in_use_hz = high_in_use_hz;
         }
+        self.bandpass = request;
         self.profile = profile;
         Ok(())
     }
@@ -478,7 +592,11 @@ impl AmDemodulator {
         }
         let envelope: Vec<f32> = channelized.iq.iter().map(|sample| sample.norm()).collect();
         let dc_removed = self.dc_blocker.process(&envelope);
-        let filtered = self.voice_filter.process(&dc_removed);
+        let filtered = if self.bandpass.enabled {
+            self.voice_filter.process(&dc_removed)
+        } else {
+            dc_removed
+        };
         let open = self.squelch.is_open();
         self.agc.set_squelch_open(open);
         let gained = self.agc.process(&filtered)?;
@@ -493,6 +611,151 @@ impl AmDemodulator {
     #[must_use]
     pub fn profile(&self) -> &AmAudioProfile {
         &self.profile
+    }
+
+    /// Enables or bypasses the speech AGC.
+    pub fn set_agc_enabled(&mut self, enabled: bool) {
+        self.agc.set_enabled(enabled);
+    }
+
+    /// Whether the speech AGC currently applies gain.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "read back by tests and by callers inspecting a live chain"
+        )
+    )]
+    pub fn agc_enabled(&self) -> bool {
+        self.agc.enabled()
+    }
+
+    /// Replaces the speech-AGC gain-reduction time constant, in milliseconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-finite, zero, or negative duration, leaving the previous value in
+    /// effect.
+    pub fn set_agc_attack_ms(&mut self, attack_ms: f64) -> Result<()> {
+        self.agc.set_attack_ms(attack_ms)
+    }
+
+    /// Replaces the speech-AGC gain-increase time constant, in milliseconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-finite, zero, or negative duration, leaving the previous value in
+    /// effect.
+    pub fn set_agc_release_ms(&mut self, release_ms: f64) -> Result<()> {
+        self.agc.set_release_ms(release_ms)
+    }
+
+    /// Replaces the speech-AGC desired output RMS, in linear full scale.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-finite, zero, or negative target, leaving the previous value in
+    /// effect.
+    pub fn set_agc_target_rms(&mut self, target_rms: f32) -> Result<()> {
+        self.agc.set_target_rms(target_rms)
+    }
+
+    /// Replaces the speech-AGC boost ceiling, in decibels.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ceiling is non-finite or below the current floor, leaving the
+    /// previous value in effect.
+    pub fn set_agc_max_gain_db(&mut self, max_gain_db: f32) -> Result<()> {
+        self.agc.set_max_gain_db(max_gain_db)
+    }
+
+    /// Enables or bypasses the voice band-pass filter.
+    ///
+    /// Bypassing keeps the designed filter in place so re-enabling it costs no re-design.
+    pub fn set_bandpass_enabled(&mut self, enabled: bool) {
+        self.bandpass.enabled = enabled;
+    }
+
+    /// Whether the voice band-pass filter currently runs.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "read back by tests and by callers inspecting a live chain"
+        )
+    )]
+    pub fn bandpass_enabled(&self) -> bool {
+        self.bandpass.enabled
+    }
+
+    /// Replaces the requested lower voice cutoff, in hertz.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value is non-finite or the resulting band cannot be designed at
+    /// this rate; the previous band stays in effect.
+    pub fn set_bandpass_low_cut(&mut self, low_hz: f64) -> Result<()> {
+        let request = BandpassRequest {
+            low_hz,
+            overridden: true,
+            ..self.bandpass
+        };
+        self.apply_bandpass_request(request)
+    }
+
+    /// Replaces the requested upper voice cutoff, in hertz.
+    ///
+    /// The request is clamped by the RF profile's effective edge, so a value wider than the channel
+    /// cannot reintroduce out-of-channel energy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value is non-finite or the resulting band cannot be designed at
+    /// this rate; the previous band stays in effect.
+    pub fn set_bandpass_high_cut(&mut self, high_hz: f64) -> Result<()> {
+        let request = BandpassRequest {
+            high_hz,
+            overridden: true,
+            ..self.bandpass
+        };
+        self.apply_bandpass_request(request)
+    }
+
+    /// Resolves and applies a voice-band request, re-designing only when the band actually moves.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for non-finite cutoffs or a band that cannot be designed, leaving both the
+    /// request and the live filter untouched.
+    fn apply_bandpass_request(&mut self, request: BandpassRequest) -> Result<()> {
+        if !request.low_hz.is_finite() || !request.high_hz.is_finite() {
+            bail!(
+                "voice band cutoffs must be finite, got {}..{} Hz",
+                request.low_hz,
+                request.high_hz
+            );
+        }
+        let effective_high_hz = self.channelizer.effective_voice_high_hz();
+        let resolved = Self::resolve_voice_band(&self.profile, request, effective_high_hz);
+        let current = Self::resolve_voice_band(&self.profile, self.bandpass, effective_high_hz);
+
+        // Only re-design when the resolved band actually moves, and design before mutating so a
+        // rejected band leaves the chain on its previous filter.
+        if resolved != current {
+            let (filter, high_in_use_hz) = Self::design_voice_filter(
+                &self.profile,
+                request,
+                effective_high_hz,
+                self.output_rate_hz,
+            )?;
+            self.voice_filter = filter;
+            self.voice_high_in_use_hz = high_in_use_hz;
+        }
+        self.bandpass = request;
+        Ok(())
     }
 
     /// Total deterministic pipeline latency, in output-rate samples.
@@ -743,6 +1006,217 @@ mod tests {
             amplitude * (2.0 * normalized - 1.0)
         };
         IqSample::new(to_bipolar(first), to_bipolar(second))
+    }
+
+    #[test]
+    fn bandpass_toggle_bypasses_the_voice_filter_without_losing_it() {
+        let mut demodulator = AmDemodulator::new(
+            CENTER_HZ,
+            CENTER_HZ,
+            RF_RATE_HZ,
+            AUDIO_RATE_HZ,
+            open_standard(),
+        )
+        .expect("literal rates and profile must construct");
+        assert!(
+            demodulator.bandpass_enabled(),
+            "a chain starts with the voice filter running"
+        );
+
+        process_generated(&mut demodulator, 2_048_000, RF_BLOCK, |index| {
+            am_sample(index, RF_RATE_HZ, 0.0, 1_000.0, 0.35, 0.70)
+        })
+        .expect("finite synthetic AM must process");
+
+        let filtered = demodulator
+            .process(&generated_block(2_048_000, 4_096, 0.0))
+            .expect("a finite block must process")
+            .samples;
+
+        demodulator.set_bandpass_enabled(false);
+        assert!(!demodulator.bandpass_enabled());
+        let bypassed = demodulator
+            .process(&generated_block(2_052_096, 4_096, 0.0))
+            .expect("a finite block must process")
+            .samples;
+
+        assert_eq!(filtered.len(), bypassed.len(), "bypass must keep the clock");
+        assert!(
+            filtered
+                .iter()
+                .zip(bypassed.iter())
+                .any(|(a, b)| a.to_bits() != b.to_bits()),
+            "bypassing the voice filter must change the audio"
+        );
+
+        demodulator.set_bandpass_enabled(true);
+        assert!(
+            demodulator.bandpass_enabled(),
+            "re-enabling must cost no re-design and report enabled"
+        );
+    }
+
+    #[test]
+    fn narrowing_the_voice_band_lowers_the_reported_high_cutoff() {
+        let mut demodulator = AmDemodulator::new(
+            CENTER_HZ,
+            CENTER_HZ,
+            RF_RATE_HZ,
+            AUDIO_RATE_HZ,
+            open_standard(),
+        )
+        .expect("literal rates and profile must construct");
+        process_generated(&mut demodulator, 4_096, RF_BLOCK, |index| {
+            am_sample(index, RF_RATE_HZ, 0.0, 1_000.0, 0.35, 0.70)
+        })
+        .expect("finite synthetic AM must process");
+
+        demodulator
+            .set_bandpass_high_cut(2_000.0)
+            .expect("2000 Hz is inside the 8 kHz profile's pass edge");
+        let narrow = demodulator
+            .process(&[])
+            .expect("diagnostics must be available");
+        assert!(
+            (narrow.effective_voice_high_hz - 2_000.0).abs() < 1.0,
+            "a narrowed band must be reported, got {} Hz",
+            narrow.effective_voice_high_hz
+        );
+
+        // Widening past the RF profile edge must be clamped, not accepted verbatim.
+        demodulator
+            .set_bandpass_high_cut(20_000.0)
+            .expect("an over-wide request is clamped rather than rejected");
+        let wide = demodulator
+            .process(&[])
+            .expect("diagnostics must be available");
+        assert!(
+            wide.effective_voice_high_hz < 20_000.0,
+            "an over-wide request must be clamped to the RF profile edge, reported {} Hz",
+            wide.effective_voice_high_hz
+        );
+        assert!(
+            wide.effective_voice_high_hz > 2_000.0,
+            "the widened band must actually widen from the narrowed one"
+        );
+    }
+
+    #[test]
+    fn a_non_finite_voice_cutoff_is_rejected_and_keeps_the_previous_band() {
+        let mut demodulator = AmDemodulator::new(
+            CENTER_HZ,
+            CENTER_HZ,
+            RF_RATE_HZ,
+            AUDIO_RATE_HZ,
+            open_standard(),
+        )
+        .expect("literal rates and profile must construct");
+        let before = demodulator
+            .process(&[])
+            .expect("diagnostics must be available")
+            .effective_voice_high_hz;
+
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                demodulator.set_bandpass_high_cut(bad).is_err(),
+                "{bad} Hz must be rejected as a high cutoff"
+            );
+            assert!(
+                demodulator.set_bandpass_low_cut(bad).is_err(),
+                "{bad} Hz must be rejected as a low cutoff"
+            );
+        }
+
+        let after = demodulator
+            .process(&[])
+            .expect("the chain must stay usable after a rejected request")
+            .effective_voice_high_hz;
+        assert_eq!(
+            after.to_bits(),
+            before.to_bits(),
+            "a rejected cutoff must leave the previous band in effect"
+        );
+    }
+
+    #[test]
+    fn agc_setters_reach_the_speech_stage() {
+        let mut demodulator = AmDemodulator::new(
+            CENTER_HZ,
+            CENTER_HZ,
+            RF_RATE_HZ,
+            AUDIO_RATE_HZ,
+            open_standard(),
+        )
+        .expect("literal rates and profile must construct");
+        assert!(
+            demodulator.agc_enabled(),
+            "a chain starts with the speech AGC enabled"
+        );
+
+        demodulator.set_agc_enabled(false);
+        assert!(!demodulator.agc_enabled());
+
+        demodulator
+            .set_agc_attack_ms(20.0)
+            .expect("20 ms is a valid attack");
+        demodulator
+            .set_agc_release_ms(600.0)
+            .expect("600 ms is a valid release");
+        demodulator
+            .set_agc_target_rms(0.4)
+            .expect("0.4 is a valid linear full-scale target");
+        demodulator
+            .set_agc_max_gain_db(30.0)
+            .expect("30 dB is a valid ceiling");
+
+        for (label, result) in [
+            ("NaN attack", demodulator.set_agc_attack_ms(f64::NAN)),
+            ("zero release", demodulator.set_agc_release_ms(0.0)),
+            ("negative target", demodulator.set_agc_target_rms(-1.0)),
+            ("inverted ceiling", demodulator.set_agc_max_gain_db(-40.0)),
+        ] {
+            assert!(result.is_err(), "{label} must be rejected");
+        }
+
+        let output = demodulator
+            .process(&generated_block(0, 4_096, 0.0))
+            .expect("a finite block must process")
+            .samples;
+        assert!(output.iter().all(|sample| sample.is_finite()));
+    }
+
+    #[test]
+    fn a_bandwidth_change_preserves_a_narrowed_voice_band() {
+        let mut demodulator = AmDemodulator::new(
+            CENTER_HZ,
+            CENTER_HZ,
+            RF_RATE_HZ,
+            AUDIO_RATE_HZ,
+            open_standard(),
+        )
+        .expect("literal rates and profile must construct");
+        demodulator
+            .set_bandpass_high_cut(2_000.0)
+            .expect("2000 Hz is inside the 8 kHz pass edge");
+
+        // Retune the RF profile to 12 kHz, whose pass edge is wider than the operator's request.
+        let wider = profile(
+            AmRfProfile::Khz12,
+            VoiceProfile::Standard,
+            SquelchMode::Open,
+        );
+        demodulator
+            .set_profile(wider)
+            .expect("12 kHz/Standard is valid at 48 kHz output");
+
+        let reported = demodulator
+            .process(&[])
+            .expect("diagnostics must be available")
+            .effective_voice_high_hz;
+        assert!(
+            (reported - 2_000.0).abs() < 1.0,
+            "a profile change must not silently widen the operator's band, reported {reported} Hz"
+        );
     }
 
     #[test]

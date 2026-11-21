@@ -259,6 +259,32 @@ impl App {
         }
     }
 
+    /// Publish the whole audio session currently held by the settings modal.
+    ///
+    /// The modal is the app's single source of truth for volume, squelch, AGC, and bandpass, so
+    /// pushing its snapshot is what makes the audio thread agree with what the operator sees.
+    /// Without this the thread keeps its own hardcoded defaults and the modal silently depicts a
+    /// chain nobody is running.
+    pub fn publish_audio_session(&self) {
+        let session = self.settings_modal.session_audio(self.volume, self.squelch);
+        self.send_audio_control(AudioControl::SetVolume(session.volume));
+        self.send_audio_control(AudioControl::SetSquelch(session.global_squelch_dbfs));
+        self.send_audio_control(AudioControl::SetAgcEnabled(session.agc.enabled));
+        self.send_audio_control(AudioControl::SetAgcAttack(session.agc.attack_ms));
+        self.send_audio_control(AudioControl::SetAgcDecay(session.agc.decay_ms));
+        self.send_audio_control(AudioControl::SetAgcTarget(session.agc.target_level));
+        self.send_audio_control(AudioControl::SetAgcMaxGain(session.agc.max_gain_db));
+        self.send_audio_control(AudioControl::SetBandpassEnabled(
+            session.bandpass.enabled,
+        ));
+        self.send_audio_control(AudioControl::SetBandpassLowCut(
+            session.bandpass.low_hz,
+        ));
+        self.send_audio_control(AudioControl::SetBandpassHighCut(
+            session.bandpass.high_hz,
+        ));
+    }
+
     /// Publish the requested center frequency to capture/DSP threads.
     fn publish_shared_center_freq(&self) {
         if let Some(ref freq) = self.shared_center_freq {

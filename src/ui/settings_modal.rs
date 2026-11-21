@@ -304,10 +304,10 @@ impl SettingsModal {
             SettingsItem {
                 label: "Bandpass",
                 section: Some("Audio Filter"),
-                kind: SettingsItemKind::Toggle { value: false },
+                kind: SettingsItemKind::Toggle { value: true },
                 id: SettingsItemId::BandpassEnabled,
                 help_text: "Voice bandpass filter removes frequencies outside the speech range, reducing noise and improving clarity.",
-                default_kind: DefaultKind::Toggle(false),
+                default_kind: DefaultKind::Toggle(true),
             },
             SettingsItem {
                 label: "Low Cut",

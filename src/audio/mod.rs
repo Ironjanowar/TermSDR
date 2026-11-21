@@ -539,7 +539,45 @@ fn am_squelch_mode(squelch: Option<f32>) -> SquelchMode {
     }
 }
 
-/// Applies the AGC and bandpass controls that every legacy chain shares in place.
+/// Applies the AGC and bandpass controls that every chain shares.
+///
+/// Both chain kinds are served: the legacy demodulator mutates in place, and the AM chain routes the
+/// same request into its speech AGC and voice filter. Before this routing existed the AM chain
+/// silently dropped every one of these controls, so the modal's AGC and Audio Filter sections did
+/// nothing on aviation AM — the mode where they matter most.
+fn apply_shared_control(chain: &mut AudioChain, ctrl: &AudioControl) {
+    match chain {
+        AudioChain::Legacy(demod) => apply_legacy_shared_control(demod, ctrl),
+        AudioChain::Am(am) => {
+            // A control has no error path in the audio thread: report the rejection and keep the
+            // previous value, rather than failing the stream or dropping the request silently.
+            if let Err(error) = apply_am_shared_control(am, ctrl) {
+                tracing::warn!(%error, ?ctrl, "AM audio control rejected; keeping previous value");
+            }
+        }
+    }
+}
+
+/// Translates one shared audio control into the AM chain's own setters.
+///
+/// The AM chain reports rejections instead of ignoring them, so a control the operator set is
+/// either in effect or was refused for a named reason.
+fn apply_am_shared_control(chain: &mut AmDemodulator, ctrl: &AudioControl) -> anyhow::Result<()> {
+    match *ctrl {
+        AudioControl::SetAgcEnabled(enabled) => chain.set_agc_enabled(enabled),
+        AudioControl::SetAgcAttack(ms) => chain.set_agc_attack_ms(ms)?,
+        AudioControl::SetAgcDecay(ms) => chain.set_agc_release_ms(ms)?,
+        AudioControl::SetAgcTarget(level) => chain.set_agc_target_rms(level)?,
+        AudioControl::SetAgcMaxGain(db) => chain.set_agc_max_gain_db(db)?,
+        AudioControl::SetBandpassEnabled(enabled) => chain.set_bandpass_enabled(enabled),
+        AudioControl::SetBandpassLowCut(hz) => chain.set_bandpass_low_cut(hz)?,
+        AudioControl::SetBandpassHighCut(hz) => chain.set_bandpass_high_cut(hz)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Applies the AGC and bandpass controls the legacy chain owns in place.
 fn apply_legacy_shared_control(demod: &mut Demodulator, ctrl: &AudioControl) {
     match *ctrl {
         AudioControl::SetAgcEnabled(enabled) => demod.set_agc_enabled(enabled),
@@ -680,9 +718,7 @@ impl ChainTarget for ChainSlot {
     }
 
     fn apply_shared(&mut self, ctrl: &AudioControl) {
-        if let AudioChain::Legacy(demod) = &mut self.chain {
-            apply_legacy_shared_control(demod, ctrl);
-        }
+        apply_shared_control(&mut self.chain, ctrl);
     }
 }
 
@@ -3225,5 +3261,88 @@ mod tests {
                 "{name} must fall back to the legacy path (< 0 dB adjacent rejection); measured {rejection_db:.2} dB, which means an AM chain was mixed into a legacy stream"
             );
         }
+    }
+
+    #[test]
+    fn shared_audio_controls_reach_the_am_chain() {
+        // Regression: `ChainSlot::apply_shared` used to deliver these controls only to a legacy
+        // demodulator, so every AGC and Audio Filter setting in the modal was silently discarded on
+        // aviation AM. The chain must now report the values it is actually running.
+        let context = ChainContext {
+            input_sample_rate: T10B_RF_HZ,
+            output_sample_rate: f64::from(T10B_SINK_HZ),
+        };
+        let spec = ChainSpec::new(100_000_000.0, 100_000_000.0, 8_000.0, DemodMode::AM);
+        let mut slot = ChainSlot::new(&context, spec, SquelchMode::Open);
+        let AudioChain::Am(chain) = &mut slot.chain else {
+            panic!("an explicit AM request must build the AM chain");
+        };
+
+        // Baseline: a fresh AM chain runs its plan defaults, which differ from the modal's defaults.
+        assert!(chain.agc_enabled());
+        assert!(chain.bandpass_enabled());
+
+        slot.apply_shared(&AudioControl::SetAgcEnabled(false));
+        slot.apply_shared(&AudioControl::SetAgcTarget(0.4));
+        slot.apply_shared(&AudioControl::SetAgcAttack(20.0));
+        slot.apply_shared(&AudioControl::SetAgcDecay(600.0));
+        slot.apply_shared(&AudioControl::SetAgcMaxGain(30.0));
+        slot.apply_shared(&AudioControl::SetBandpassEnabled(false));
+        slot.apply_shared(&AudioControl::SetBandpassHighCut(2_500.0));
+
+        let AudioChain::Am(chain) = &mut slot.chain else {
+            panic!("applying shared controls must not change the chain kind");
+        };
+        assert!(
+            !chain.agc_enabled(),
+            "SetAgcEnabled must reach the AM chain's speech AGC"
+        );
+        assert!(
+            !chain.bandpass_enabled(),
+            "SetBandpassEnabled must reach the AM chain's voice filter"
+        );
+        let reported = chain
+            .process(&[])
+            .expect("diagnostics must be available")
+            .effective_voice_high_hz;
+        assert!(
+            (reported - 2_500.0).abs() < 1.0,
+            "SetBandpassHighCut must be visible in the chain's telemetry, reported {reported} Hz"
+        );
+    }
+
+    #[test]
+    fn a_rejected_shared_control_keeps_the_chain_running() {
+        // A non-finite value must not fail the audio thread or poison the chain: it is reported and
+        // the previous value stays in effect.
+        let context = ChainContext {
+            input_sample_rate: T10B_RF_HZ,
+            output_sample_rate: f64::from(T10B_SINK_HZ),
+        };
+        let spec = ChainSpec::new(100_000_000.0, 100_000_000.0, 8_000.0, DemodMode::AM);
+        let mut slot = ChainSlot::new(&context, spec, SquelchMode::Open);
+        let AudioChain::Am(chain) = &mut slot.chain else {
+            panic!("an explicit AM request must build the AM chain");
+        };
+        let before = chain
+            .process(&[])
+            .expect("diagnostics must be available")
+            .effective_voice_high_hz;
+
+        slot.apply_shared(&AudioControl::SetBandpassHighCut(f64::NAN));
+        slot.apply_shared(&AudioControl::SetAgcAttack(f64::NAN));
+
+        let AudioChain::Am(chain) = &mut slot.chain else {
+            panic!("a rejected control must not change the chain kind");
+        };
+        let after = chain
+            .process(&[])
+            .expect("the chain must stay usable after a rejected control")
+            .effective_voice_high_hz;
+        assert_eq!(
+            after.to_bits(),
+            before.to_bits(),
+            "a rejected control must leave the previous band in effect"
+        );
     }
 }
